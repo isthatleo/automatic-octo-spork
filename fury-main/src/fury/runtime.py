@@ -1,0 +1,537 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, Dict, List, Optional, Protocol, Tuple
+
+import httpx
+
+from .tools import ToolExecutor, ToolRegistry
+from .tool_healing import (
+    TOOL_XML_SIGNALS,
+    has_tool_signal,
+    parse_tool_calls_from_text,
+    strip_tool_markup,
+)
+from .types import ChatStreamEvent
+from .multimodal import materialize_history_message
+from .utils.validation import validate_history
+
+logger = logging.getLogger(__name__)
+
+THINK_OPEN = "<think>"
+THINK_CLOSE = "</think>"
+
+
+def _marker_suffix_len(text: str, marker: str) -> int:
+    return max(
+        (i for i in range(1, min(len(text), len(marker) - 1) + 1) if marker.startswith(text[-i:])),
+        default=0,
+    )
+
+
+def _split_think_markup(
+    buffer: str, in_think: bool, chunk: str, *, flush: bool = False
+) -> Tuple[List[Tuple[str, str]], str, bool]:
+    buffer += chunk
+    parts: List[Tuple[str, str]] = []
+    while buffer:
+        marker = THINK_CLOSE if in_think else THINK_OPEN
+        index = buffer.find(marker)
+        if index >= 0:
+            if index:
+                parts.append(("reasoning" if in_think else "content", buffer[:index]))
+            buffer = buffer[index + len(marker) :]
+            in_think = not in_think
+            continue
+        keep = 0 if flush or in_think else _marker_suffix_len(buffer, THINK_OPEN)
+        emit = buffer[:-keep] if keep else buffer
+        if emit:
+            parts.append(("reasoning" if in_think else "content", emit))
+        buffer = buffer[-keep:] if keep else ""
+        break
+    return parts, buffer, in_think
+
+
+@dataclass
+class RunnerControl:
+    _mode: Optional[str] = None
+    _partial_response: str = ""
+    _stop_callback: Optional[Any] = None
+
+    def cancel(self) -> None:
+        self._request_stop("cancel")
+
+    def interrupt(self) -> None:
+        self._request_stop("interrupt")
+
+    @property
+    def cancelled(self) -> bool:
+        return self._mode == "cancel"
+
+    @property
+    def interrupted(self) -> bool:
+        return self._mode == "interrupt"
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._mode is not None
+
+    @property
+    def partial_response(self) -> str:
+        return self._partial_response
+
+    def _set_partial_response(self, text: str) -> None:
+        self._partial_response = text
+
+    def _bind_stop_callback(self, callback: Optional[Any]) -> None:
+        self._stop_callback = callback
+
+    def _request_stop(self, mode: str) -> None:
+        if self._mode is None:
+            self._mode = mode
+        if self._stop_callback is not None:
+            self._stop_callback()
+
+
+class GenerationRuntime(Protocol):
+    model: str
+    system_prompt: str
+    generation_params: Dict[str, Any]
+    max_tool_rounds: int
+    auto_heal_tool_calls: bool
+    client: Any
+
+
+def _resolve_system_prompt(runtime: GenerationRuntime) -> str:
+    build_system_prompt = getattr(runtime, "build_system_prompt", None)
+    if callable(build_system_prompt):
+        return build_system_prompt()
+    return runtime.system_prompt
+
+
+class GenerationSession:
+    def __init__(self, control: Optional[RunnerControl]) -> None:
+        self.handle = control
+        self.loop = asyncio.get_running_loop()
+        self.current_stream: Optional[Any] = None
+        self.current_task: Optional[asyncio.Task[Any]] = None
+
+        if self.handle is not None:
+            self.handle._bind_stop_callback(self.stop_active_work)
+
+    @property
+    def stop_requested(self) -> bool:
+        return bool(self.handle and self.handle.stop_requested)
+
+    def attach_stream(self, stream: Any) -> None:
+        self.current_stream = stream
+
+    def detach_stream(self, stream: Any) -> None:
+        if self.current_stream is stream:
+            self.current_stream = None
+
+    def attach_task(self, task: asyncio.Task[Any]) -> None:
+        self.current_task = task
+
+    def detach_task(self, task: asyncio.Task[Any]) -> None:
+        if self.current_task is task:
+            self.current_task = None
+
+    def update_partial_response(self, text: str) -> None:
+        if self.handle is not None:
+            self.handle._set_partial_response(text)
+
+    def finalize(self, history: List[Dict[str, Any]], partial_response: str) -> None:
+        if self.handle is None:
+            return
+
+        self.handle._set_partial_response(partial_response)
+        self.handle._bind_stop_callback(None)
+        if self.handle.interrupted and partial_response:
+            history.append({"role": "assistant", "content": partial_response})
+
+    def stop_active_work(self) -> None:
+        if self.loop.is_running():
+            self.loop.call_soon_threadsafe(self._stop_active_work)
+            return
+        self._stop_active_work()
+
+    def _stop_active_work(self) -> None:
+        if self.current_task is not None and not self.current_task.done():
+            self.current_task.cancel()
+
+        stream = self.current_stream
+        if stream is None:
+            return
+
+        close = getattr(stream, "aclose", None)
+        if close is None:
+            return
+
+        try:
+            result = close()
+        except Exception:
+            return
+
+        if asyncio.iscoroutine(result):
+            self.loop.create_task(result)
+
+
+def _prune_unfinished_sentences(text: str) -> str:
+    if not text:
+        return ""
+
+    match = re.search(r"^(.*[.!?]+)\s*$", text, flags=re.DOTALL)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _prepare_active_history(
+    history: List[Dict[str, Any]],
+    system_prompt: str,
+) -> List[Dict[str, Any]]:
+    active_history = [materialize_history_message(message) for message in history]
+    if system_prompt and not any(msg.get("role") == "system" for msg in active_history):
+        return [{"role": "system", "content": system_prompt}, *active_history]
+    return active_history
+
+
+def _build_chat_completion_kwargs(
+    *,
+    model: str,
+    active_history: List[Dict[str, Any]],
+    reasoning: bool,
+    tools: List[Dict[str, Any]],
+    generation_params: Dict[str, Any],
+) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "messages": active_history,
+        "stream": True,
+    }
+    if generation_params:
+        kwargs.update(generation_params)
+    chat_template_kwargs = dict(kwargs.get("chat_template_kwargs") or {})
+    if not reasoning:
+        chat_template_kwargs["enable_thinking"] = False
+    if chat_template_kwargs:
+        kwargs["chat_template_kwargs"] = chat_template_kwargs
+    if not reasoning:
+        extra_body = dict(kwargs.get("extra_body") or {})
+        extra_chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+        extra_chat_template_kwargs.update(chat_template_kwargs)
+        extra_chat_template_kwargs["enable_thinking"] = False
+        extra_body["chat_template_kwargs"] = extra_chat_template_kwargs
+        kwargs["extra_body"] = extra_body
+    if tools:
+        kwargs["tools"] = tools
+    kwargs["model"] = model
+    return kwargs
+
+
+def _append_tool_call_chunks(
+    tool_calls: List[Dict[str, Any]],
+    delta_tool_calls: Optional[List[Any]],
+) -> None:
+    if not delta_tool_calls:
+        return
+
+    for tc_chunk in delta_tool_calls:
+        if len(tool_calls) <= tc_chunk.index:
+            tool_calls.append(
+                {
+                    "id": "",
+                    "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                }
+            )
+        tc = tool_calls[tc_chunk.index]
+        if tc_chunk.id:
+            tc["id"] += tc_chunk.id
+        if tc_chunk.function.name:
+            tc["function"]["name"] += tc_chunk.function.name
+        if tc_chunk.function.arguments:
+            tc["function"]["arguments"] += tc_chunk.function.arguments
+
+
+def _auto_heal_tool_calls(runtime: GenerationRuntime) -> bool:
+    return bool(getattr(runtime, "auto_heal_tool_calls", True))
+
+
+def _is_expected_stop_exception(
+    exc: BaseException, session: GenerationSession
+) -> bool:
+    if not session.stop_requested:
+        return False
+
+    return isinstance(
+        exc,
+        (
+            asyncio.CancelledError,
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.ReadError,
+            httpx.RemoteProtocolError,
+        ),
+    )
+
+
+class GenerationRunner:
+    def __init__(
+        self,
+        *,
+        runtime: GenerationRuntime,
+        tool_registry: ToolRegistry,
+        tool_executor: ToolExecutor,
+    ) -> None:
+        self.runtime = runtime
+        self.tool_registry = tool_registry
+        self.tool_executor = tool_executor
+
+    async def chat(
+        self,
+        history: List[Dict[str, Any]],
+        reasoning: bool = False,
+        prune_unfinished_sentences: bool = False,
+        model: Optional[str] = None,
+        control: Optional[RunnerControl] = None,
+    ) -> AsyncGenerator[ChatStreamEvent, None]:
+        validate_history(history)
+        response_buffer: List[str] = []
+        session = GenerationSession(control)
+
+        try:
+            active_history = _prepare_active_history(
+                history,
+                _resolve_system_prompt(self.runtime),
+            )
+            for _ in range(self.runtime.max_tool_rounds):
+                if session.stop_requested:
+                    break
+
+                tool_calls: List[Dict[str, Any]] = []
+                kwargs = _build_chat_completion_kwargs(
+                    model=model if model is not None else self.runtime.model,
+                    active_history=active_history,
+                    reasoning=reasoning,
+                    tools=self.tool_registry.tools,
+                    generation_params=self.runtime.generation_params,
+                )
+                completion = await self.runtime.client.chat.completions.create(**kwargs)
+                session.attach_stream(completion)
+
+                try:
+                    async for event in self._stream_chat_completion_events(
+                        completion=completion,
+                        tool_calls=tool_calls,
+                        prune_unfinished_sentences=prune_unfinished_sentences,
+                        reasoning=reasoning,
+                        auto_heal_tool_calls=(
+                            _auto_heal_tool_calls(self.runtime)
+                            and bool(self.tool_registry.tools)
+                        ),
+                    ):
+                        if event.content:
+                            response_buffer.append(event.content)
+                            session.update_partial_response("".join(response_buffer))
+                        yield event
+                        if session.stop_requested:
+                            break
+                finally:
+                    session.detach_stream(completion)
+                    close = getattr(completion, "aclose", None)
+                    if close is not None:
+                        await close()
+
+                if session.stop_requested:
+                    break
+
+                if not tool_calls:
+                    return
+
+                active_history.append({"role": "assistant", "tool_calls": tool_calls})
+                async for event in self.tool_executor.execute_tool_calls(
+                    tool_calls=tool_calls,
+                    active_history=active_history,
+                    session=session,
+                ):
+                    yield event
+                    if session.stop_requested:
+                        break
+                if session.stop_requested:
+                    break
+
+            if not session.stop_requested:
+                yield ChatStreamEvent(content="Max tool rounds reached")
+        except asyncio.CancelledError as exc:
+            if _is_expected_stop_exception(exc, session):
+                return
+            raise
+        except Exception as exc:
+            if _is_expected_stop_exception(exc, session):
+                return
+            logger.exception(f"Error in chat: {exc}")
+            yield ChatStreamEvent(content=str(exc))
+        finally:
+            session.finalize(history, "".join(response_buffer))
+
+    async def ask_async(
+        self,
+        user_input: str,
+        history: Optional[List[Dict[str, Any]]] = None,
+        reasoning: bool = False,
+        prune_unfinished_sentences: bool = False,
+        model: Optional[str] = None,
+    ) -> str:
+        active_history = history if history is not None else []
+        active_history.append({"role": "user", "content": user_input})
+
+        validate_history(active_history)
+
+        buffer: List[str] = []
+        async for event in self.chat(
+            active_history,
+            reasoning=reasoning,
+            prune_unfinished_sentences=prune_unfinished_sentences,
+            model=model,
+        ):
+            if event.content:
+                buffer.append(event.content)
+
+        response = "".join(buffer)
+        active_history.append({"role": "assistant", "content": response})
+        return response
+
+    async def _stream_chat_completion_events(
+        self,
+        completion: Any,
+        tool_calls: List[Dict[str, Any]],
+        prune_unfinished_sentences: bool,
+        reasoning: bool,
+        auto_heal_tool_calls: bool,
+    ) -> AsyncGenerator[ChatStreamEvent, None]:
+        content_buffer = ""
+        emitted_length = 0
+        raw_content = ""
+        pending_prefix = ""
+        draining_tool_markup = False
+        streaming_content = not auto_heal_tool_calls
+        max_prefix_chars = max(len(signal) for signal in TOOL_XML_SIGNALS)
+        think_buffer = ""
+        in_think = False
+
+        async for chunk in completion:
+            if not getattr(chunk, "choices", None):
+                continue
+            delta = chunk.choices[0].delta
+            if not delta:
+                continue
+
+            _append_tool_call_chunks(tool_calls, getattr(delta, "tool_calls", None))
+
+            reasoning_content = getattr(delta, "reasoning_content", None)
+            if reasoning_content and not draining_tool_markup:
+                yield ChatStreamEvent(reasoning=reasoning_content)
+                continue
+
+            if not delta.content:
+                continue
+
+            segments, think_buffer, in_think = _split_think_markup(
+                think_buffer, in_think, delta.content
+            )
+            for segment_kind, segment_text in segments:
+                if segment_kind == "reasoning":
+                    if reasoning and segment_text and not draining_tool_markup:
+                        yield ChatStreamEvent(reasoning=segment_text)
+                    continue
+
+                if auto_heal_tool_calls:
+                    raw_content += segment_text
+                    if tool_calls or draining_tool_markup:
+                        continue
+
+                    if not streaming_content:
+                        pending_prefix += segment_text
+                        stripped = pending_prefix.lstrip()
+                        if not stripped:
+                            continue
+                        if any(stripped.startswith(signal) for signal in TOOL_XML_SIGNALS):
+                            draining_tool_markup = True
+                            continue
+                        if (
+                            any(signal.startswith(stripped) for signal in TOOL_XML_SIGNALS)
+                            and len(stripped) <= max_prefix_chars
+                        ):
+                            continue
+
+                        streaming_content = True
+                        delta_content = pending_prefix
+                        pending_prefix = ""
+                    else:
+                        candidate = segment_text
+                        signal_positions = [
+                            candidate.find(signal)
+                            for signal in TOOL_XML_SIGNALS
+                            if candidate.find(signal) >= 0
+                        ]
+                        if signal_positions:
+                            candidate = candidate[: min(signal_positions)]
+                            draining_tool_markup = True
+                        delta_content = strip_tool_markup(candidate)
+                else:
+                    delta_content = segment_text
+
+                if not delta_content:
+                    continue
+
+                if prune_unfinished_sentences:
+                    content_buffer += delta_content
+                    pruned = _prune_unfinished_sentences(content_buffer)
+                    if len(pruned) <= emitted_length:
+                        continue
+                    fresh = pruned[emitted_length:]
+                    emitted_length = len(pruned)
+                    yield ChatStreamEvent(content=fresh)
+                    continue
+
+                yield ChatStreamEvent(content=delta_content)
+
+        segments, think_buffer, in_think = _split_think_markup(
+            think_buffer, in_think, "", flush=True
+        )
+        for segment_kind, segment_text in segments:
+            if segment_kind == "reasoning":
+                if reasoning and segment_text and not draining_tool_markup:
+                    yield ChatStreamEvent(reasoning=segment_text)
+                continue
+            if segment_text:
+                if prune_unfinished_sentences:
+                    content_buffer += segment_text
+                    pruned = _prune_unfinished_sentences(content_buffer)
+                    if len(pruned) > emitted_length:
+                        fresh = pruned[emitted_length:]
+                        emitted_length = len(pruned)
+                        yield ChatStreamEvent(content=fresh)
+                else:
+                    yield ChatStreamEvent(content=segment_text)
+
+        if not auto_heal_tool_calls or tool_calls or not has_tool_signal(raw_content):
+            if auto_heal_tool_calls and pending_prefix and not streaming_content:
+                yield ChatStreamEvent(content=pending_prefix)
+            return
+
+        parsed_tool_calls = parse_tool_calls_from_text(raw_content)
+        if not parsed_tool_calls:
+            if draining_tool_markup:
+                cleaned = strip_tool_markup(raw_content, final=True)
+                if cleaned:
+                    yield ChatStreamEvent(content=cleaned)
+            elif pending_prefix:
+                yield ChatStreamEvent(content=pending_prefix)
+            return
+
+        tool_calls.extend(parsed_tool_calls)

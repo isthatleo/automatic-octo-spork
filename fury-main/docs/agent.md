@@ -1,0 +1,215 @@
+# Agent
+
+The `Agent` class is the core runtime for chatting with an OpenAI-compatible model while supporting tool calling, multimodal inputs, and streaming responses. It provides single-shot (`ask`, `ask_async`) interfaces and creates `Runner` objects for streaming runs.
+
+## Key Features
+
+- **Streaming chat** via `Runner.chat()`.
+- **Interruptible generation** via `Runner.cancel()` and `Runner.interrupt()`.
+- **Tool calling** through `create_tool()` and registered tools.
+- **Parallel tool execution** using the built-in `multi_tool_use.parallel` wrapper.
+- **Named durable memory scopes** via `memory_scope=...`.
+- **Multimodal inputs** with helper methods for images and voice messages.
+- **Optional TTS** via `Agent.speak()`.
+
+## Basic Usage
+
+```python
+from fury import Agent
+
+agent = Agent(
+    model="your-model-name",
+    system_prompt="You are a helpful assistant.",
+    base_url="http://127.0.0.1:8080/v1",
+    api_key="your-api-key",
+)
+
+response = agent.ask("Hello!", history=[], model="override-model")
+print(response)
+```
+
+## Streaming Chat
+
+```python
+import asyncio
+from fury import Agent
+
+agent = Agent(
+    model="your-model-name",
+    system_prompt="You are a helpful assistant.",
+)
+
+async def main():
+    history = [{"role": "user", "content": "Hello"}]
+    runner = agent.runner()
+    async for event in runner.chat(history, reasoning=False, model="override-model"):
+        if event.content:
+            print(event.content, end="", flush=True)
+
+asyncio.run(main())
+```
+
+## Cancelling Or Interrupting A Generation
+
+Use `agent.runner()` when you want to stream a reply and optionally stop it before completion.
+
+- `runner.cancel()`: stops the in-flight request and discards the partial assistant response from history.
+- `runner.interrupt()`: stops the in-flight request and preserves the partial assistant response by appending it to the provided history.
+- For the minimal version, see `docs/interruption.md`.
+- For a runnable example, see `examples/interruption.py`.
+
+```python
+import asyncio
+from fury import Agent
+
+agent = Agent(
+    model="your-model-name",
+    system_prompt="You are a helpful assistant.",
+)
+
+async def main():
+    history = [{"role": "user", "content": "Explain TCP in detail."}]
+    runner = agent.runner()
+
+    async for event in runner.chat(history):
+        if event.content:
+            print(event.content, end="", flush=True)
+            runner.interrupt()
+
+    print("\nPartial response:", runner.partial_response)
+    print("Updated history:", history)
+
+asyncio.run(main())
+```
+
+## Tool Calling
+
+Tools are defined with `create_tool()` and passed to the agent. The agent filters any extra arguments that the model hallucinates to match the declared input schema.
+
+```python
+from fury import Agent, create_tool
+
+def add(a: int, b: int, emit=None):
+    if emit:
+        emit(
+            {
+                "id": "add",
+                "title": f"Adding {a} and {b}",
+                "type": "tool_call",
+            }
+        )
+    return {"result": a + b}
+
+add_tool = create_tool(
+    id="add",
+    description="Add two numbers together",
+    execute=add,
+    input_schema={
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+        "required": ["a", "b"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {"result": {"type": "integer"}},
+        "required": ["result"],
+    },
+)
+
+agent = Agent(
+    model="your-model-name",
+    system_prompt="You are a helpful assistant.",
+    tools=[add_tool],
+)
+```
+
+If a tool function accepts an `emit` argument, Fury injects a runtime-only callback while the tool runs. `emit` is not added to the tool schema sent to the model.
+
+```python
+def search(query: str, emit):
+    emit(
+        {
+            "id": "search-1",
+            "title": f"Searching for {query}",
+            "type": "tool_call",
+        }
+    )
+    return {"query": query}
+```
+
+Stream consumers receive these as `ChatStreamEvent(tool_ui=...)`, separate from `tool_call` arguments and results.
+
+### Auto-Healing Local Tool Calls
+
+Some local OpenAI-compatible servers stream tool calls as assistant text instead of native `delta.tool_calls`, for example `<tool_call>{"name":"search","arguments":{"query":"..."}}</tool_call>`. Fury parses those XML-style calls, hides the raw markup from streamed content, and dispatches them through the normal tool executor.
+
+This is enabled by default when tools are registered. Disable it with:
+
+```python
+agent = Agent(
+    model="your-model-name",
+    system_prompt="You are a helpful assistant.",
+    tools=[add_tool],
+    auto_heal_tool_calls=False,
+)
+```
+
+## History Management
+
+`Agent` does not automatically manage history. Pass a list of `{role, content}` messages into `chat()` or `ask()`. For auto-compaction, use `HistoryManager` (see `docs/history_manager.md`).
+
+When using `HistoryManager`, each managed message gets a stable `id`. The manager
+also exposes `edit_message()`, `delete_message()`, `regenerate_message()`, and
+`set_variant()` for SDK-managed history editing and response variants.
+
+You can override the configured agent model per request by passing `model="..."` to `Agent.chat()`, `Agent.ask()`, `Agent.ask_async()`, or `Runner.chat()`.
+
+## Durable Memory
+
+Pass `memory_scope="my-project"` to bind the agent to an explicit durable-memory namespace. Fury will inject the current memory snapshot for that scope into the system prompt on each turn and will register a `memory` tool scoped only to that namespace.
+
+If you want multiple agents in the same script with airgapped memory, give them different `memory_scope` values. To share the same backing directory across agents, pass the same `MemoryStore` instance along with different scope strings.
+
+## Multimodal Helpers
+
+For managed histories, prefer:
+
+- `await history_manager.add_image(image_path, text="...")`
+- `await history_manager.add_voice(base64_audio_bytes)`
+
+If you only need transcription and do not want to initialize an `Agent`, use
+`SpeechToText().transcribe(...)` instead.
+
+`Agent` still exposes lower-level helpers for direct list-based history management.
+By default, `HistoryManager.add_image(...)` stores a lightweight placeholder in the
+managed history instead of persisting raw base64 image data. Set
+`HistoryManager(save_images_to_history=True)` if you want the full image payload
+embedded in history.
+
+Pass `disable_stt=True` to skip STT warmup and reject voice transcription for that agent.
+
+## Text-to-Speech
+
+`Agent.speak()` uses the NeuTTS backend to generate audio from text, conditioned on a
+reference clip. If you only need standalone synthesis, use `TextToSpeech().speak(...)`
+instead. See `examples/tts.py` for a complete example.
+
+Pass `disable_tts=True` to prevent TTS warmup and audio generation for that agent.
+
+## Constructor Arguments
+
+- `model`: Model name.
+- `system_prompt`: System instruction string.
+- `tools`: List of `Tool` objects from `create_tool()`.
+- `memory_scope`: Optional durable-memory namespace for this agent.
+- `memory_store`: Optional `MemoryStore` to reuse across agents.
+- `enable_memory_tool`: Register the built-in `memory` tool for the bound scope.
+- `memory_tool_name`: Override the default tool name (`memory`).
+- `base_url`: OpenAI-compatible server URL.
+- `api_key`: API key for the server.
+- `generation_params`: Additional model parameters (temperature, max_tokens, etc.).
+- `max_tool_rounds`: Maximum tool-call iterations per request.
+- `parallel_tool_calls`: Enable the built-in parallel tool wrapper.
+- `auto_heal_tool_calls`: Parse XML-style tool calls emitted as assistant text by local/OpenAI-compatible models. Defaults to `True`.
+- `disable_stt`: Skip STT warmup and disable `HistoryManager.add_voice()`.
+- `disable_tts`: Skip TTS warmup and disable `Agent.speak()`.
