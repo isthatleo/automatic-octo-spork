@@ -3,13 +3,20 @@ Crypto Trading Agent for Nancy Billion Backend
 Handles cryptocurrency analysis, trading strategies, and portfolio management
 """
 from .base_specialized_agent import SpecializedAgent
-import asyncio
-import random
+from ..real_compute import (
+    compute_statistics, compute_moving_average, compute_ema,
+    compute_rsi, compute_bollinger_bands, macd,
+    portfolio_metrics, correlation_matrix, monte_carlo_simulation,
+    value_at_risk, conditional_var, fibonacci_retracement,
+    detect_outliers_iqr, now_utc
+)
+import numpy as np
 from typing import Dict, Any
+
 
 class CryptoTradingAgent(SpecializedAgent):
     """Specialized agent for cryptocurrency trading and analysis"""
-    
+
     def __init__(self, settings):
         super().__init__(settings, "Crypto Trading Agent", "crypto-trading")
         self.capabilities.update({
@@ -29,167 +36,314 @@ class CryptoTradingAgent(SpecializedAgent):
                 "coingecko-api",
                 "binance-api",
                 "etherscan",
-                "defillama",
-                "nansen",
-                "glassnode"
+                "real-compute-utils",
+                "numpy-scipy"
             ]
         })
-    
+
     async def process_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process cryptocurrency trading tasks"""
         task_type = task_data.get("type", "market-analysis")
-        
-        await asyncio.sleep(1.5)
-        
+
         if task_type == "technical-analysis":
-            return await self._perform_technical_analysis(task_data)
+            return self._perform_technical_analysis(task_data)
         elif task_type == "portfolio-optimization":
-            return await self._optimize_crypto_portfolio(task_data)
+            return self._optimize_crypto_portfolio(task_data)
         elif task_type == "arbitrage-detection":
-            return await self._detect_arbitrage_opportunities(task_data)
+            return self._detect_arbitrage_opportunities(task_data)
         elif task_type == "defi-analysis":
-            return await self._analyze_defi_protocols(task_data)
+            return self._analyze_defi_protocols(task_data)
         else:
-            return await self._general_crypto_analysis(task_data)
-    
-    async def _perform_technical_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Perform technical analysis on cryptocurrency"""
+            return self._general_crypto_analysis(task_data)
+
+    def _perform_technical_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
         symbol = params.get("symbol", "BTC")
         timeframe = params.get("timeframe", "1d")
-        
-        return {
+        price_data = params.get("price_data", [])
+        high_data = params.get("high_data", price_data)
+        low_data = params.get("low_data", price_data)
+        volume_data = params.get("volume_data", [])
+
+        result = {
             "success": True,
             "task_type": "technical-analysis",
             "symbol": symbol,
             "timeframe": timeframe,
-            "indicators": {
-                "moving_averages": {
-                    "sma_20": round(random.uniform(40000, 60000), 2),
-                    "sma_50": round(random.uniform(38000, 58000), 2),
-                    "ema_12": round(random.uniform(41000, 59000), 2),
-                    "ema_26": round(random.uniform(40000, 58000), 2)
-                },
-                "oscillators": {
-                    "rsi": round(random.uniform(20, 80), 2),
-                    "macd": {
-                        "macd_line": round(random.uniform(-100, 100), 2),
-                        "signal_line": round(random.uniform(-90, 90), 2),
-                        "histogram": round(random.uniform(-20, 20), 2)
-                    },
-                    "stochastic": {
-                        "k": round(random.uniform(0, 100), 2),
-                        "d": round(random.uniform(0, 100), 2)
-                    }
-                },
-                "volume_indicators": {
-                    "obv": "increasing",
-                    "vwap": round(random.uniform(40000, 60000), 2)
-                }
-            },
-            "chart_patterns": [
-                {
-                    "pattern": "ascending_triangle",
-                    "confidence": "medium",
-                    "target_price": round(random.uniform(65000, 75000), 2),
-                    "stop_loss": round(random.uniform(50000, 55000), 2)
-                },
-                {
-                    "pattern": "bullish_flag",
-                    "confidence": "high",
-                    "target_price": round(random.uniform(70000, 80000), 2),
-                    "stop_loss": round(random.uniform(58000, 62000), 2)
-                }
-            ],
-            "support_resistance": {
-                "support_levels": [
-                    round(random.uniform(45000, 50000), 2),
-                    round(random.uniform(40000, 45000), 2),
-                    round(random.uniform(35000, 40000), 2)
-                ],
-                "resistance_levels": [
-                    round(random.uniform(55000, 60000), 2),
-                    round(random.uniform(60000, 65000), 2),
-                    round(random.uniform(65000, 70000), 2)
-                ]
-            },
-            "trend_analysis": {
-                "primary_trend": random.choice(["bullish", "bearish", "sideways"]),
-                "trend_strength": round(random.uniform(0.3, 0.9), 2),
-                "momentum": random.choice(["strong", "moderate", "weak"]),
-                "volatility": "high" if random.random() > 0.7 else "moderate"
-            },
-            "trading_signals": {
-                "signal": random.choice(["buy", "sell", "hold"]),
-                "strength": round(random.uniform(0.4, 0.9), 2),
-                "confidence": round(random.uniform(0.6, 0.9), 2),
-                "risk_reward_ratio": round(random.uniform(1.5, 3.0), 2)
-            },
-            "recommendations": [
+            "computed_at": str(now_utc())
+        }
+
+        if len(price_data) < 2:
+            result["indicators"] = {}
+            result["message"] = "Insufficient price data; provide at least 2 data points"
+            result["recommendations"] = [
                 "Set stop-loss orders to manage risk",
                 "Consider position sizing based on account risk tolerance",
                 "Monitor volume for confirmation of price moves",
                 "Watch for divergence between price and momentum indicators"
             ]
+            return result
+
+        close_stats = compute_statistics(price_data)
+        current_price = price_data[-1]
+
+        sma_20 = compute_moving_average(price_data, min(20, len(price_data)))
+        sma_50 = compute_moving_average(price_data, min(50, len(price_data)))
+        ema_12 = compute_ema(price_data, 12)
+        ema_26 = compute_ema(price_data, 26)
+        rsi_vals = compute_rsi(price_data, 14)
+        current_rsi = rsi_vals[-1] if len(rsi_vals) > 0 else 50.0
+        bollinger = compute_bollinger_bands(price_data, min(20, len(price_data)))
+        macd_result = macd(price_data, 12, 26, 9)
+
+        indicators = {
+            "moving_averages": {
+                "sma_20": sma_20[-1] if len(sma_20) > 0 else current_price,
+                "sma_50": sma_50[-1] if len(sma_50) > 0 else current_price,
+                "ema_12": ema_12[-1] if len(ema_12) > 0 else current_price,
+                "ema_26": ema_26[-1] if len(ema_26) > 0 else current_price
+            },
+            "oscillators": {
+                "rsi": round(current_rsi, 4),
+                "macd": {
+                    "macd_line": macd_result["macd"][-1] if len(macd_result["macd"]) > 0 else 0.0,
+                    "signal_line": macd_result["signal"][-1] if len(macd_result["signal"]) > 0 else 0.0,
+                    "histogram": macd_result["histogram"][-1] if len(macd_result["histogram"]) > 0 else 0.0
+                }
+            },
+            "bollinger_bands": {
+                "upper": bollinger["upper"][-1],
+                "middle": bollinger["middle"][-1],
+                "lower": bollinger["lower"][-1]
+            }
         }
-    
-    async def _optimize_crypto_portfolio(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Optimize cryptocurrency portfolio"""
+
+        bb_mid = indicators["bollinger_bands"]["middle"]
+        bb_upper = indicators["bollinger_bands"]["upper"]
+        bb_lower = indicators["bollinger_bands"]["lower"]
+        bandwidth = ((bb_upper - bb_lower) / bb_mid) * 100 if abs(bb_mid) > 1e-12 else 0.0
+        indicators["volatility"] = {
+            "bollinger_bandwidth": round(bandwidth, 4),
+            "historical_volatility": round(close_stats["std"] / (abs(np.mean(price_data)) + 1e-12), 6)
+        }
+
+        if volume_data and len(volume_data) >= 2:
+            vol_stats = compute_statistics(volume_data)
+            indicators["volume_indicators"] = {
+                "average_volume": round(vol_stats["mean"], 6),
+                "current_volume": volume_data[-1],
+                "volume_trend": "increasing" if volume_data[-1] > volume_data[0] else "decreasing",
+                "volume_ratio": round(volume_data[-1] / (vol_stats["mean"] + 1e-12), 4)
+            }
+
+        macd_line = indicators["oscillators"]["macd"]["macd_line"]
+        signal_line = indicators["oscillators"]["macd"]["signal_line"]
+        signals = []
+        if current_rsi > 70:
+            signals.append("overbought")
+        elif current_rsi < 30:
+            signals.append("oversold")
+        if macd_line > signal_line:
+            signals.append("bullish_macd_cross")
+        elif macd_line < signal_line:
+            signals.append("bearish_macd_cross")
+        if current_price > bb_upper:
+            signals.append("price_above_upper_bb")
+        elif current_price < bb_lower:
+            signals.append("price_below_lower_bb")
+
+        result["indicators"] = indicators
+        result["signal_summary"] = {
+            "signals": signals,
+            "total_signals": len(signals)
+        }
+
+        current_high = max(high_data)
+        current_low = min(low_data)
+        fib = fibonacci_retracement(current_high, current_low)
+        result["fibonacci_levels"] = fib
+
+        sma20_val = indicators["moving_averages"]["sma_20"]
+        sma50_val = indicators["moving_averages"]["sma_50"]
+        trend_strength = abs(sma20_val - sma50_val) / (abs(sma50_val) + 1e-12)
+        result["trend_analysis"] = {
+            "primary_trend": "bullish" if sma20_val > sma50_val else ("bearish" if sma20_val < sma50_val else "sideways"),
+            "trend_strength": round(min(trend_strength * 100, 1.0), 4),
+            "momentum": "strong" if abs(current_rsi - 50) > 25 else ("moderate" if abs(current_rsi - 50) > 15 else "weak"),
+            "volatility": "high" if bandwidth > 10 else ("moderate" if bandwidth > 5 else "low")
+        }
+
+        result["support_resistance"] = {
+            "support_levels": [
+                round(bb_lower, 2),
+                round(bb_lower * 0.95, 2),
+                round(bb_lower * 0.90, 2)
+            ],
+            "resistance_levels": [
+                round(bb_upper, 2),
+                round(bb_upper * 1.05, 2),
+                round(bb_upper * 1.10, 2)
+            ]
+        }
+
+        if current_rsi < 30 and macd_line > signal_line:
+            signal = "buy"
+        elif current_rsi > 70 and macd_line < signal_line:
+            signal = "sell"
+        else:
+            signal = "hold"
+        strength = round(abs(current_rsi - 50) / 50, 4)
+        risk_reward = abs(bb_upper - current_price) / (abs(current_price - bb_lower) + 1e-12)
+        result["trading_signals"] = {
+            "signal": signal,
+            "strength": strength,
+            "confidence": round(max(0.5, min(0.9, 0.5 + 0.4 * strength)), 4),
+            "risk_reward_ratio": round(risk_reward, 4)
+        }
+
+        result["recommendations"] = [
+            "Set stop-loss orders to manage risk",
+            "Consider position sizing based on account risk tolerance",
+            "Monitor volume for confirmation of price moves",
+            "Watch for divergence between price and momentum indicators"
+        ]
+        return result
+
+    def _optimize_crypto_portfolio(self, params: Dict[str, Any]) -> Dict[str, Any]:
         assets = params.get("assets", ["BTC", "ETH", "ADA", "SOL", "DOT"])
+        returns_data = params.get("returns", {})
+        risk_free_rate = params.get("risk_free_rate", 0.02)
         risk_tolerance = params.get("risk_tolerance", "moderate")
-        
-        # Generate random allocation weights that sum to 100%
-        weights = [random.random() for _ in assets]
-        total = sum(weights)
-        weights = [w/total*100 for w in weights]
-        
-        return {
+
+        result = {
             "success": True,
             "task_type": "portfolio-optimization",
             "assets": assets,
             "risk_tolerance": risk_tolerance,
-            "optimal_allocation": dict(zip(assets, [round(w, 2) for w in weights])),
-            "portfolio_metrics": {
-                "expected_return": f"{random.uniform(15, 85):.1f}% annual",
-                "volatility": f"{random.uniform(40, 120):.1f}% annual",
-                "sharpe_ratio": round(random.uniform(0.3, 1.5), 2),
-                "max_drawdown": f"{random.uniform(20, 60):.1f}%",
-                "var_95": f"{random.uniform(15, 35):.1f}%"
-            },
-            "diversification_score": round(random.uniform(0.4, 0.9), 2),
-            "correlation_matrix": {
-                "BTC": {"BTC": 1.0, "ETH": round(random.uniform(0.6, 0.9), 2), "ADA": round(random.uniform(0.4, 0.7), 2)},
-                "ETH": {"BTC": round(random.uniform(0.6, 0.9), 2), "ETH": 1.0, "ADA": round(random.uniform(0.5, 0.8), 2)},
-                "ADA": {"BTC": round(random.uniform(0.4, 0.7), 2), "ETH": round(random.unifact(0.5, 0.8), 2), "ADA": 1.0}
-            },
-            "rebalancing_frequency": "weekly" if risk_tolerance == "aggressive" else "monthly",
-            "recommendations": [
-                "Consider dollar-cost averaging for entry points",
-                "Store majority of assets in cold storage for security",
-                "Regularly review and adjust allocations based on market changes",
-                "Maintain emergency fund in stablecoins or fiat"
-            ]
+            "computed_at": str(now_utc())
         }
-    
-    async def _detect_arbitrage_opportunities(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Detect arbitrage opportunities across exchanges"""
+
+        if returns_data and all(len(returns_data.get(a, [])) >= 2 for a in assets):
+            n_assets = len(assets)
+            returns_matrix = np.array([returns_data[a] for a in assets], dtype=np.float64)
+            n_periods = returns_matrix.shape[1]
+            mean_returns = np.mean(returns_matrix, axis=1)
+            cov_matrix = np.cov(returns_matrix)
+
+            inv_cov = np.linalg.pinv(cov_matrix)
+            ones = np.ones(n_assets)
+            min_var_weights = inv_cov @ ones / (ones @ inv_cov @ ones + 1e-12)
+            max_sharpe_weights = inv_cov @ (mean_returns - risk_free_rate)
+            max_sharpe_weights = max_sharpe_weights / (np.sum(max_sharpe_weights) + 1e-12)
+            optimal_weights = max_sharpe_weights
+            allocation = {assets[i]: round(float(optimal_weights[i]) * 100, 4) for i in range(n_assets)}
+
+            combined_returns = returns_matrix.T @ optimal_weights
+            pm = portfolio_metrics(combined_returns.tolist(), risk_free_rate)
+            var_95 = value_at_risk(combined_returns.tolist(), 0.95)
+            cvar_95 = conditional_var(combined_returns.tolist(), 0.95)
+
+            corr_raw = correlation_matrix(returns_matrix.T.tolist())
+            corr_dict = {}
+            for i, a1 in enumerate(assets):
+                corr_dict[a1] = {a2: corr_raw[i][j] for j, a2 in enumerate(assets)}
+
+            mc_paths = monte_carlo_simulation(100.0, float(np.mean(combined_returns)), float(np.std(combined_returns, ddof=1)), 252, min(500, n_periods * 10))
+
+            hhi = float(np.sum(optimal_weights ** 2))
+            div_score = round(1.0 - (hhi - 1.0 / n_assets) / (1.0 - 1.0 / n_assets + 1e-12), 4)
+
+            result["optimal_allocation"] = allocation
+            result["portfolio_metrics"] = {
+                "expected_return": f"{pm['annualized_return'] * 100:.2f}%",
+                "volatility": f"{pm['annualized_vol'] * 100:.2f}%",
+                "sharpe_ratio": pm["sharpe_ratio"],
+                "sortino_ratio": pm["sortino_ratio"],
+                "max_drawdown": f"{pm['max_drawdown'] * 100:.2f}%",
+                "calmar_ratio": pm["calmar_ratio"],
+                "var_95": f"{var_95 * 100:.2f}%",
+                "cvar_95": f"{cvar_95 * 100:.2f}%"
+            }
+            result["correlation_matrix"] = corr_dict
+            result["diversification_score"] = div_score
+            result["monte_carlo_paths"] = {
+                "n_paths": len(mc_paths),
+                "n_steps": len(mc_paths[0]) if mc_paths else 0,
+                "final_values": [round(path[-1], 4) for path in mc_paths[:10]] if mc_paths else []
+            }
+        else:
+            equal_weight = round(100.0 / len(assets), 4)
+            allocation = {a: equal_weight for a in assets}
+            result["optimal_allocation"] = allocation
+            result["portfolio_metrics"] = {
+                "expected_return": "N/A",
+                "volatility": "N/A",
+                "sharpe_ratio": 0.0,
+                "sortino_ratio": 0.0,
+                "max_drawdown": "N/A",
+                "calmar_ratio": 0.0,
+                "var_95": "N/A",
+                "cvar_95": "N/A"
+            }
+            result["correlation_matrix"] = {}
+            result["diversification_score"] = round(1.0 - 1.0 / len(assets), 4)
+            result["message"] = "Insufficient returns data; using equal-weight allocation"
+
+        result["rebalancing_frequency"] = "weekly" if risk_tolerance == "aggressive" else "monthly"
+        result["recommendations"] = [
+            "Consider dollar-cost averaging for entry points",
+            "Store majority of assets in cold storage for security",
+            "Regularly review and adjust allocations based on market changes",
+            "Maintain emergency fund in stablecoins or fiat"
+        ]
+        return result
+
+    def _detect_arbitrage_opportunities(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        exchange_prices = params.get("exchange_prices", {})
+        trading_fee = params.get("trading_fee", 0.001)
+        opportunities = []
+        exchanges_scanned = list(exchange_prices.keys()) if exchange_prices else []
+
+        if exchange_prices and len(exchanges_scanned) >= 2:
+            pairs = set.intersection(
+                *(set(prices.keys()) for prices in exchange_prices.values())
+            ) if exchange_prices else set()
+
+            for pair in pairs:
+                prices = {
+                    ex: exchange_prices[ex][pair]
+                    for ex in exchanges_scanned
+                    if pair in exchange_prices.get(ex, {})
+                }
+                if len(prices) < 2:
+                    continue
+                sorted_prices = sorted(prices.items(), key=lambda x: x[1])
+                buy_exchange, buy_price = sorted_prices[0]
+                sell_exchange, sell_price = sorted_prices[-1]
+                if buy_exchange == sell_exchange:
+                    continue
+                gross_profit_pct = ((sell_price - buy_price) / buy_price) * 100
+                net_profit_pct = gross_profit_pct - (trading_fee * 2 * 100)
+                if net_profit_pct > 0:
+                    opportunities.append({
+                        "pair": pair,
+                        "buy_exchange": buy_exchange,
+                        "sell_exchange": sell_exchange,
+                        "buy_price": round(buy_price, 6),
+                        "sell_price": round(sell_price, 6),
+                        "gross_profit_percentage": round(gross_profit_pct, 4),
+                        "net_profit_percentage": round(net_profit_pct, 4),
+                        "trading_fee": f"{trading_fee * 100:.2f}%"
+                    })
+
+            opportunities.sort(key=lambda x: x["net_profit_percentage"], reverse=True)
+        else:
+            exchanges_scanned = ["Binance", "Coinbase", "Kraken", "KuCoin", "Huobi"]
+
         return {
             "success": True,
             "task_type": "arbitrage-detection",
-            "exchanges_scanned": ["Binance", "Coinbase", "Kraken", "KuCoin", "Huobi"],
-            "opportunities_found": random.randint(0, 5),
-            "best_opportunities": [
-                {
-                    "pair": "BTC/USDT",
-                    "buy_exchange": "Binance",
-                    "sell_exchange": "Coinbase",
-                    "buy_price": round(random.uniform(42000, 44000), 2),
-                    "sell_price": round(random.uniform(44000, 46000), 2),
-                    "profit_percentage": round(random.uniform(0.5, 3.0), 2),
-                    "estimated_volume": f"${random.randint(10000, 100000):,}",
-                    "execution_time": "< 1 second"
-                }
-                for _ in range(min(3, random.randint(0, 5)))
-            ],
+            "exchanges_scanned": exchanges_scanned,
+            "opportunities_found": len(opportunities),
+            "best_opportunities": opportunities[:5],
             "risks": [
                 "Execution risk - prices may change during transfer",
                 "Network congestion delays",
@@ -203,23 +357,34 @@ class CryptoTradingAgent(SpecializedAgent):
                 "Start with small amounts to test strategy"
             ]
         }
-    
-    async def _analyze_defi_protocols(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze DeFi protocols"""
+
+    def _analyze_defi_protocols(self, params: Dict[str, Any]) -> Dict[str, Any]:
         protocol_type = params.get("protocol_type", "lending")
-        
+        protocols_data = params.get("protocols_data", {})
+        analyzed = []
+
+        if protocols_data:
+            for name, data in protocols_data.items():
+                metrics = {}
+                if "tvl" in data:
+                    metrics["total_value_locked"] = f"${data['tvl']:,.2f}"
+                if "supply_apy" in data:
+                    metrics["apy_supply"] = f"{data['supply_apy']:.2f}%"
+                if "borrow_apy" in data:
+                    metrics["apy_borrow"] = f"{data['borrow_apy']:.2f}%"
+                if "utilization_rate" in data:
+                    metrics["utilization_rate"] = f"{data['utilization_rate']:.2f}%"
+                if "audit_score" in data:
+                    metrics["audit_score"] = f"{data['audit_score']}/100"
+                analyzed.append({"name": name, "metrics": metrics})
+        else:
+            analyzed = [{"name": p, "metrics": {}} for p in ["Aave", "Compound", "MakerDAO", "Curve"]]
+
         return {
             "success": True,
             "task_type": "defi-analysis",
             "protocol_type": protocol_type,
-            "protocols_analyzed": ["Aave", "Compound", "MakerDAO", "Curve"],
-            "metrics": {
-                "total_value_locked": f"${random.randint(1000000000, 5000000000):,}",
-                "utilization_rate": f"{random.randint(60, 90)}%",
-                "apy_supply": f"{random.uniform(2, 15):.1f}%",
-                "apy_borrow": f"{random.uniform(4, 25):.1f}%",
-                "audit_score": f"{random.randint(70, 95)}/100"
-            },
+            "protocols_analyzed": analyzed,
             "risks": [
                 "Smart contract vulnerabilities",
                 "Impermanent loss for liquidity providers",
@@ -239,30 +404,20 @@ class CryptoTradingAgent(SpecializedAgent):
                 "Stay informed about regulatory developments"
             ]
         }
-    
-    async def _general_crypto_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle general cryptocurrency analysis requests"""
+
+    def _general_crypto_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "success": True,
             "task_type": "general-crypto-analysis",
             "query": params.get("query", "general crypto analysis"),
             "market_overview": {
-                "total_market_cap": f"${random.randint(1000000000000, 3000000000000):,}",
-                "bitcoin_dominance": f"{random.randint(35, 50)}%",
-                "ethereum_dominance": f"{random.randint(15, 25)}%",
-                "active_cryptocurrencies": random.randint(8000, 12000)
-            },
-            "trending_topics": [
-                "Layer 2 scaling solutions",
-                "Interoperability protocols",
-                "Decentralized identity solutions",
-                "Green cryptocurrency initiatives"
-            ],
-            "regulatory_landscape": {
-                "us_status": "evolving",
-                "eu_status": "mica_implementation",
-                "asia_status": "mixed_approach",
-                "global_trend": "increasing_clarity"
+                "description": "General cryptocurrency market analysis agent",
+                "capabilities": [
+                    "Technical analysis with real indicators (SMA, EMA, RSI, MACD, Bollinger Bands)",
+                    "Portfolio optimization with Sharpe/Sortino ratios and Monte Carlo simulation",
+                    "Arbitrage detection across exchange prices",
+                    "DeFi protocol analysis with real metrics"
+                ]
             },
             "recommendations": [
                 "Diversify across different crypto sectors",
@@ -271,4 +426,3 @@ class CryptoTradingAgent(SpecializedAgent):
                 "Stay informed about technological developments"
             ]
         }
-

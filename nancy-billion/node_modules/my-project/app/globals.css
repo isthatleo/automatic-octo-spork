@@ -1,0 +1,419 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-heading: var(--font-heading), 'Chakra Petch', 'Rajdhani', system-ui, sans-serif;
+  --font-sans: var(--font-sans), 'Space Grotesk', system-ui, sans-serif;
+  --font-mono: var(--font-mono), 'JetBrains Mono', ui-monospace, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-hud: var(--hud);
+  --color-hud-dim: var(--hud-dim);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+:root {
+  color-scheme: dark;
+  /* Stark-class HUD palette: deep navy-black, cyan glow, amber accent */
+  --background: oklch(0.16 0.03 240);
+  --foreground: oklch(0.92 0.04 210);
+  --card: oklch(0.21 0.04 235 / 65%);
+  --card-foreground: oklch(0.92 0.04 210);
+  --popover: oklch(0.18 0.035 238);
+  --popover-foreground: oklch(0.92 0.04 210);
+  --primary: oklch(0.82 0.16 210);
+  --primary-foreground: oklch(0.16 0.03 240);
+  --secondary: oklch(0.28 0.05 235);
+  --secondary-foreground: oklch(0.92 0.04 210);
+  --muted: oklch(0.26 0.04 235);
+  --muted-foreground: oklch(0.68 0.06 215);
+  --accent: oklch(0.8 0.15 75);
+  --accent-foreground: oklch(0.16 0.03 240);
+  --destructive: oklch(0.62 0.22 25);
+  --border: oklch(0.78 0.14 210 / 22%);
+  --input: oklch(0.78 0.14 210 / 18%);
+  --ring: oklch(0.82 0.16 210);
+  --radius: 0.5rem;
+
+  --hud: oklch(0.82 0.16 210);
+  --hud-dim: oklch(0.55 0.1 220);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    @apply font-sans;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-background text-foreground;
+    background:
+      radial-gradient(ellipse 80% 60% at 50% 0%, oklch(0.24 0.09 220 / 55%), transparent 70%),
+      radial-gradient(ellipse 60% 50% at 50% 110%, oklch(0.28 0.11 215 / 45%), transparent 70%),
+      radial-gradient(circle at 15% 30%, oklch(0.22 0.08 250 / 35%), transparent 55%),
+      radial-gradient(circle at 85% 70%, oklch(0.22 0.09 190 / 35%), transparent 55%),
+      linear-gradient(180deg, oklch(0.14 0.03 240) 0%, oklch(0.12 0.03 245) 100%);
+    background-attachment: fixed;
+    overflow-x: hidden;
+    font-feature-settings: 'ss01', 'cv11', 'liga';
+  }
+
+  .font-heading {
+    font-family: var(--font-heading);
+    letter-spacing: -0.01em;
+    font-weight: 600;
+  }
+}
+
+@layer components {
+  .hud-panel {
+    position: relative;
+    background:
+      linear-gradient(
+        180deg,
+        oklch(0.22 0.045 235 / 70%),
+        oklch(0.17 0.035 240 / 70%)
+      );
+    border: 1px solid oklch(0.78 0.14 210 / 25%);
+    backdrop-filter: blur(8px);
+    box-shadow:
+      inset 0 0 24px oklch(0.78 0.14 210 / 8%),
+      0 0 22px oklch(0.5 0.1 215 / 18%);
+  }
+
+  .hud-panel::before,
+  .hud-panel::after {
+    content: '';
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border-color: var(--hud);
+    border-style: solid;
+  }
+  .hud-panel::before {
+    top: -1px;
+    left: -1px;
+    border-width: 1px 0 0 1px;
+  }
+  .hud-panel::after {
+    bottom: -1px;
+    right: -1px;
+    border-width: 0 1px 1px 0;
+  }
+
+  .hud-glow {
+    text-shadow: 0 0 8px oklch(0.82 0.16 210 / 70%);
+  }
+  .hud-glow-amber {
+    text-shadow: 0 0 8px oklch(0.8 0.15 75 / 70%);
+  }
+}
+
+@keyframes hud-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes hud-spin-rev {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+@keyframes hud-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+@keyframes hud-scan {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(100vh);
+  }
+}
+@keyframes hud-flicker {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  92% {
+    opacity: 1;
+  }
+  93% {
+    opacity: 0.4;
+  }
+  94% {
+    opacity: 1;
+  }
+}
+@keyframes scan {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 0 100%;
+  }
+}
+@keyframes chromaticShift {
+  0%, 100% {
+    transform: translate(0, 0);
+  }
+  25% {
+    transform: translate(2px, -1px);
+  }
+  50% {
+    transform: translate(-1px, 2px);
+  }
+  75% {
+    transform: translate(1px, -2px);
+  }
+}
+
+/* JARVIS-style HUD overlay styles */
+.hud-overlay {
+  @apply inset-0 pointer-events-none;
+}
+
+.hud-corner {
+  @apply absolute w-[120px] h-[120px];
+}
+
+.hud-corner.top-left {
+  @apply top-0 left-0;
+}
+
+.hud-corner.top-right {
+  @apply top-0 right-0;
+}
+
+.hud-corner.bottom-left {
+  @apply bottom-0 left-0;
+}
+
+.hud-corner.bottom-right {
+  @apply bottom-0 right-0;
+}
+
+.hud-line {
+  @apply absolute bg-hud/50;
+}
+
+.hud-line.hud-horizontal {
+  @apply w-[100px] h-[1px] left-[10px];
+}
+
+.hud-line.hud-vertical {
+  @apply h-[100px] w-[1px] top-[10px];
+}
+
+.hud-corner.top-left .hud-line.hud-horizontal {
+  @apply left-0;
+}
+
+.hud-corner.top-left .hud-line.hud-vertical {
+  @apply top-0;
+}
+
+.hud-corner.top-right .hud-line.hud-horizontal {
+  @apply right-0;
+}
+
+.hud-corner.top-right .hud-line.hud-vertical {
+  @apply top-0;
+}
+
+.hud-corner.bottom-left .hud-line.hud-horizontal {
+  @apply left-0;
+}
+
+.hud-corner.bottom-left .hud-line.hud-vertical {
+  @apply bottom-0;
+}
+
+.hud-corner.bottom-right .hud-line.hud-horizontal {
+  @apply right-0;
+}
+
+.hud-corner.bottom-right .hud-line.hud-vertical {
+  @apply bottom-0;
+}
+
+.hud-center {
+  @apply absolute inset-0 flex items-center justify-center;
+}
+
+.hud-ring {
+  @apply relative w-[180px] h-[180px] border-2 border-hud/50 rounded-full;
+  animation: hud-spin 38s linear infinite;
+}
+
+.hud-ring::before {
+  content: '';
+  @apply absolute inset-0 border-2 border-hud/30 rounded-full;
+  animation: hud-pulse 2.6s ease-in-out infinite;
+}
+
+.hud-scan-line {
+  @apply absolute inset-0;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    oklch(0.82 0.16 210 / 0.3),
+    transparent
+  );
+  animation: hud-scan 4s linear infinite;
+}
+
+.hud-data-top,
+.hud-data-bottom {
+  @apply absolute left-4 right-4 text-xs font-mono text-hud/70;
+}
+
+.hud-data-top {
+  @apply top-4;
+}
+
+.hud-data-bottom {
+  @apply bottom-4;
+}
+
+.hud-data-item {
+  @apply block mb-1;
+}
+
+.hud-data-item:first-letter {
+  @apply text-hud/100;
+}
+
+.animate-hud-spin {
+  animation: hud-spin 18s linear infinite;
+}
+.animate-hud-spin-slow {
+  animation: hud-spin 42s linear infinite;
+}
+.animate-hud-spin-rev {
+  animation: hud-spin-rev 26s linear infinite;
+}
+.animate-hud-pulse {
+  animation: hud-pulse 2.6s ease-in-out infinite;
+}
+.animate-hud-flicker {
+  animation: hud-flicker 6s linear infinite;
+}
+
+/* Panel / orb transitions */
+@keyframes panel-enter {
+  0% { opacity: 0; transform: translateY(12px) scale(0.985); filter: blur(6px); }
+  100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+@keyframes orb-dock {
+  0% { transform: scale(1); opacity: 1; }
+  40% { transform: scale(0.55); opacity: 0.9; }
+  100% { transform: scale(0.35); opacity: 1; }
+}
+@keyframes stripe-flow {
+  0% { background-position: 0 0; }
+  100% { background-position: 40px 0; }
+}
+@keyframes count-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes orb-scan {
+  0%, 100% { transform: translateY(-140%); opacity: 0; }
+  50% { transform: translateY(140%); opacity: 1; }
+}
+.animate-panel-enter { animation: panel-enter 0.55s cubic-bezier(.2,.8,.2,1) both; }
+.animate-orb-dock    { animation: orb-dock 0.6s cubic-bezier(.6,.05,.3,1) both; }
+.animate-count-up    { animation: count-up 0.6s ease-out both; }
+.hud-stripes {
+  background-image: repeating-linear-gradient(
+    45deg,
+    oklch(0.82 0.16 210 / 0.14) 0 6px,
+    transparent 6px 12px
+  );
+  animation: stripe-flow 2.4s linear infinite;
+}
+
+/* Leaflet dark HUD overrides */
+.leaflet-container {
+  background: #05080d !important;
+  font-family: var(--font-mono), ui-monospace, monospace !important;
+}
+.leaflet-control-attribution {
+  background: oklch(0.18 0.035 238 / 80%) !important;
+  color: oklch(0.68 0.06 215) !important;
+}
+.leaflet-control-attribution a {
+  color: oklch(0.82 0.16 210) !important;
+}
+.hud-map-tiles {
+  filter: brightness(0.85) contrast(1.1) saturate(1.15) hue-rotate(8deg);
+}
+/* Smooth cross-fade between preloaded day/night basemaps. */
+.leaflet-layer.hud-basemap-day,
+.leaflet-layer.hud-basemap-night {
+  transition: opacity 350ms ease-out;
+}
+
+/* Night-mode satellite tint: keep the 3D imagery visible, but shift it into
+   a deep JARVIS-blue nighttime palette with strong contrast. */
+.hud-basemap-day.hud-night-tint {
+  filter: brightness(0.32) contrast(1.35) saturate(0.55) hue-rotate(200deg);
+}
+.leaflet-layer.hud-basemap-day,
+.leaflet-layer.hud-basemap-night {
+  transition: filter 500ms ease-out, opacity 350ms ease-out;
+}
+
+/* Fullscreen workspace container */
+.workspace-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+}
+
+/* When the map container has .hud-night-mode, tint the day satellite tiles
+   into a JARVIS midnight-blue palette while preserving the satellite/3D look. */
+.hud-night-mode .leaflet-layer.hud-basemap-day,
+.hud-night-mode .hud-basemap-day {
+  filter: brightness(0.28) contrast(1.4) saturate(0.5) hue-rotate(200deg);
+}

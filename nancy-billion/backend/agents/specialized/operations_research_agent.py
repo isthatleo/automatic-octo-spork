@@ -3,13 +3,16 @@ Operations Research Agent for Nancy Billion Backend
 Handles process optimization, resource allocation, and supply chain optimization
 """
 from .base_specialized_agent import SpecializedAgent
-import asyncio
-import random
-from typing import Dict, Any
+from .. import real_compute as rc
+from typing import Dict, Any, List, Tuple
+import numpy as np
+import heapq
+import math
+
 
 class OperationsResearchAgent(SpecializedAgent):
     """Specialized agent for operations research and optimization"""
-    
+
     def __init__(self, settings):
         super().__init__(settings, "Operations Research Agent", "operations-research")
         self.capabilities.update({
@@ -34,13 +37,11 @@ class OperationsResearchAgent(SpecializedAgent):
                 "lindo-lingo"
             ]
         })
-    
+
     async def process_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process operations research tasks"""
         task_type = task_data.get("type", "optimization")
-        
-        await asyncio.sleep(2)
-        
+
         if task_type == "process-optimization":
             return await self._optimize_process(task_data)
         elif task_type == "resource-allocation":
@@ -51,99 +52,38 @@ class OperationsResearchAgent(SpecializedAgent):
             return await self._optimize_schedule(task_data)
         else:
             return await self._general_or_consultation(task_data)
-    
+
     async def _optimize_process(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Optimize business processes"""
+        """Optimize business processes using real linear programming"""
         process = params.get("process", "order_fulfillment")
-        
+        c = params.get("objective_coeffs", None)
+        A = params.get("constraint_matrix", None)
+        b = params.get("constraint_rhs", None)
+        bounds = params.get("bounds", None)
+
+        lp_result = None
+        if c and A and b:
+            try:
+                lp_result = rc.solve_linear_program(c, A, b, bounds)
+            except Exception:
+                lp_result = {"success": False, "message": "LP solve failed"}
+
         return {
             "success": True,
             "task_type": "process-optimization",
             "process": process,
-            "current_state": {
-                "cycle_time": f"{random.randint(3, 10)} days",
-                "defect_rate": f"{random.randint(2, 10)}%",
-                "utilization": f"{random.randint(60, 85)}%",
-                "work_in_progress": f"{random.randint(50, 200)} units"
-            },
-            "bottlenecks": [
-                {
-                    "step": "quality_inspection",
-                    "issue": "manual_inspection_slow",
-                    "impact": "high",
-                    "improvement_potential": f"{random.randint(30, 60)}%"
-                },
-                {
-                    "step": "material_handling",
-                    "issue": "inefficient_layout",
-                    "impact": "medium",
-                    "improvement_potential": f"{random.randint(20, 40)}%"
-                },
-                {
-                    "step": "setup_changeover",
-                    "issue": "long_setup_times",
-                    "impact": "medium",
-                    "improvement_potential": f"{random.randint(25, 45)}%"
-                }
-            ],
+            "linear_programming_result": lp_result,
             "optimization_approach": {
-                "methodology": "lean_six_sigma",
-                "tools": [
-                    "value_stream_mapping",
-                    "root_cause_analysis",
-                    "process_capability_analysis"
-                ],
+                "methodology": "linear_programming",
+                "tools": ["value_stream_mapping", "root_cause_analysis", "process_capability_analysis"],
                 "phases": [
-                    {
-                        "phase": "define",
-                        "activities": ["project_charter", "stakeholder_analysis", "goal_setting"]
-                    },
-                    {
-                        "phase": "measure",
-                        "activities": ["baseline_metrics", "data_collection", "measurement_system_analysis"]
-                    },
-                    {
-                        "phase": "analyze",
-                        "activities": ["process_analysis", "bottleneck_identification", "root_cause_analysis"]
-                    },
-                    {
-                        "phase": "improve",
-                        "activities": ["solution_generation", "pilot_testing", "implementation"]
-                    },
-                    {
-                        "phase": "control",
-                        "activities": ["process_control", "monitoring", "continuous_improvement"]
-                    }
+                    {"phase": "define", "activities": ["project_charter", "stakeholder_analysis", "goal_setting"]},
+                    {"phase": "measure", "activities": ["baseline_metrics", "data_collection", "measurement_system_analysis"]},
+                    {"phase": "analyze", "activities": ["process_analysis", "bottleneck_identification", "root_cause_analysis"]},
+                    {"phase": "improve", "activities": ["solution_generation", "pilot_testing", "implementation"]},
+                    {"phase": "control", "activities": ["process_control", "monitoring", "continuous_improvement"]},
                 ]
             },
-            "expected_improvements": {
-                "cycle_time_reduction": f"{random.randint(30, 60)}%",
-                "defect_rate_reduction": f"{random.randint(50, 80)}%",
-                "utilization_increase": f"{random.randint(10, 25)}%",
-                "waste_reduction": f"{random.randint(40, 70)}%"
-            },
-            "kpis_to_track": [
-                {
-                    "kpi": "cycle_time",
-                    "target": f"{random.randint(2, 5)} days",
-                    "frequency": "daily"
-                },
-                {
-                    "kpi": "first_pass_yield",
-                    "target": f">{random.randint(90, 98)}%",
-                    "frequency": "weekly"
-                },
-                {
-                    "kpi": "on_time_delivery",
-                    "target": f">{random.randint(90, 98)}%",
-                    "frequency": "daily"
-                },
-                {
-                    "kpi": "overall_equipment_effectiveness",
-                    "target": f">{random.randint(75, 85)}%",
-                    "frequency": "monthly"
-                }
-            ],
             "recommendations": [
                 "Implement visual management systems",
                 "Standardize work procedures",
@@ -151,77 +91,62 @@ class OperationsResearchAgent(SpecializedAgent):
                 "Establish continuous improvement culture"
             ]
         }
-    
+
     async def _allocate_resources(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Allocate resources optimally"""
+        """Allocate resources optimally using constrained optimization"""
         resource_type = params.get("type", "budget")
-        
+        total_budget = params.get("total_budget", 1000000)
+        project_costs = params.get("project_costs", None)
+        project_returns = params.get("project_returns", None)
+        project_names = params.get("project_names", None)
+
+        allocation = []
+        if project_costs and project_returns and isinstance(project_costs, list) and isinstance(project_returns, list):
+            n = min(len(project_costs), len(project_returns))
+            costs = np.array(project_costs[:n], dtype=np.float64)
+            returns = np.array(project_returns[:n], dtype=np.float64)
+            rois = (returns - costs) / (costs + 1e-12)
+
+            ratios = rois / (costs + 1e-12)
+            sorted_indices = np.argsort(-ratios)
+
+            remaining = float(total_budget)
+            selected = []
+            for idx in sorted_indices:
+                cost = float(costs[idx])
+                if cost <= remaining * 1.05:
+                    allocated = min(cost, remaining)
+                    roi = float(rois[idx])
+                    name = project_names[idx] if project_names and idx < len(project_names) else f"Project_{idx}"
+                    selected.append({
+                        "project": name,
+                        "cost": round(cost, 2),
+                        "expected_return": round(float(returns[idx]), 2),
+                        "roi": round(roi, 4),
+                        "allocated": round(allocated, 2),
+                        "allocation_pct": round(allocated / (total_budget + 1e-12) * 100, 2),
+                    })
+                    remaining -= cost
+                    if remaining <= 0:
+                        break
+
+            total_allocated = sum(s["allocated"] for s in selected)
+            total_return = sum(s["expected_return"] for s in selected)
+            allocation = {
+                "selected_projects": selected,
+                "total_allocated": round(total_allocated, 2),
+                "total_expected_return": round(total_return, 2),
+                "portfolio_roi": round((total_return - total_allocated) / (total_allocated + 1e-12), 4),
+                "remaining_budget": round(remaining, 2),
+            }
+
         return {
             "success": True,
             "task_type": "resource-allocation",
             "resource_type": resource_type,
-            "constraints": {
-                "total_budget": f"${random.randint(100000, 1000000):,}",
-                "time_horizon": f"{random.randint(6, 24)} months",
-                "minimum_allocation": f"{random.randint(5, 15)}% per project",
-                "maximum_allocation": f"{random.randint(30, 50)}% per project"
-            },
-            "projects": [
-                {
-                    "id": "proj_a",
-                    "name": "Website Redesign",
-                    "duration": f"{random.randint(3, 6)} months",
-                    "required_resources": f"{random.randint(15, 30)}%",
-                    "expected_roi": f"{random.randint(150, 300)}%",
-                    "risk": "low",
-                    "strategic_importance": "high"
-                },
-                {
-                    "id": "proj_b",
-                    "name": "Mobile App Development",
-                    "duration": f"{random.randint(4, 8)} months",
-                    "required_resources": f"{random.randint(20, 40)}%",
-                    "expected_roi": f"{random.randint(100, 250)}%",
-                    "risk": "medium",
-                    "strategic_importance": "high"
-                },
-                {
-                    "id": "proj_c",
-                    "name": "Marketing Automation",
-                    "duration": f"{random.randint(2, 4)} months",
-                    "required_resources": f"{random.randint(10, 25)}%",
-                    "expected_roi": f"{random.randint(200, 400)}%",
-                    "risk": "low",
-                    "strategic_importance": "medium"
-                }
-            ],
-            "optimal_allocation": [
-                {
-                    "project": "proj_a",
-                    "allocated": f"{random.randint(15, 30)}%",
-                    "rationale": "high_strategic_value_good_roi"
-                },
-                {
-                    "project": "proj_b",
-                    "allocated": f"{random.randint(20, 40)}%",
-                    "rationale": "balanced_risk_return_profile"
-                },
-                {
-                    "project": "proj_c",
-                    "allocated": f"{random.randint(10, 25)}%",
-                    "rationale": "high_roi_low_risk_quick_win"
-                }
-            ],
-            "sensitivity_analysis": {
-                "budget_variation": {
-                    "+10%": "additional_projects_possible",
-                    "-10%": "scope_reduction_required"
-                },
-                "timeline_changes": {
-                    "accelerated": "resource_intensity_increase",
-                    "delayed": "opportunity_cost_loss"
-                }
-            },
+            "total_budget": total_budget,
+            "allocation": allocation,
+            "method": "knapsack_by_roi_density",
             "recommendations": [
                 "Regularly review and adjust allocations based on performance",
                 "Implement stage-gate process for project approval",
@@ -229,83 +154,62 @@ class OperationsResearchAgent(SpecializedAgent):
                 "Track actual vs planned resource utilization"
             ]
         }
-    
+
     async def _optimize_supply_chain(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Optimize supply chain network"""
+        """Optimize supply chain network using real algorithms"""
         product = params.get("product", "consumer_goods")
-        
+        distance_matrix = params.get("distance_matrix", None)
+        node_names = params.get("node_names", None)
+        source_idx = params.get("source_idx", 0)
+        demand = params.get("demand", 1000)
+        order_cost = params.get("order_cost", 100)
+        holding_cost = params.get("holding_cost", 10)
+
+        shortest_paths = None
+        if distance_matrix and isinstance(distance_matrix, list) and len(distance_matrix) > 0:
+            n_nodes = len(distance_matrix)
+            dist_matrix = np.array(distance_matrix, dtype=np.float64)
+            distances, predecessors = _dijkstra_all_pairs(dist_matrix, source_idx)
+
+            paths_from_source = []
+            for target in range(n_nodes):
+                if target == source_idx:
+                    continue
+                path = _reconstruct_path(predecessors, target)
+                name_target = node_names[target] if node_names and target < len(node_names) else f"Node_{target}"
+                paths_from_source.append({
+                    "from": node_names[source_idx] if node_names else f"Node_{source_idx}",
+                    "to": name_target,
+                    "distance": round(float(distances[target]), 4),
+                    "path": [node_names[p] if node_names else f"Node_{p}" for p in path],
+                })
+            shortest_paths = {
+                "source": node_names[source_idx] if node_names else f"Node_{source_idx}",
+                "paths": paths_from_source,
+            }
+
+        eoq = None
+        if demand > 0 and order_cost > 0 and holding_cost > 0:
+            optimal_q = math.sqrt(2.0 * demand * order_cost / (holding_cost + 1e-12))
+            optimal_orders = demand / (optimal_q + 1e-12)
+            total_cost_inv = optimal_q * holding_cost / 2.0 + order_cost * demand / (optimal_q + 1e-12)
+            cycle_time = optimal_q / (demand + 1e-12) * 365
+            eoq = {
+                "economic_order_quantity": round(optimal_q, 2),
+                "optimal_order_frequency": round(optimal_orders, 2),
+                "total_inventory_cost": round(total_cost_inv, 2),
+                "cycle_days": round(cycle_time, 1),
+                "demand": demand,
+                "order_cost": order_cost,
+                "holding_cost": holding_cost,
+            }
+
         return {
             "success": True,
             "task_type": "supply-chain-optimization",
             "product": product,
-            "network_design": {
-                "facilities": [
-                    {
-                        "type": "manufacturing",
-                        "location": "Shanghai, China",
-                        "capacity": f"{random.randint(1000, 5000)} units/day",
-                        "fixed_cost": f"${random.randint(500000, 2000000):,}/year",
-                        "variable_cost": f"${random.randint(5, 20):,}/unit"
-                    },
-                    {
-                        "type": "distribution_center",
-                        "location": "Los Angeles, CA",
-                        "capacity": f"{random.randint(5000, 20000)} units/week",
-                        "fixed_cost": f"${random.randint(200000, 800000):,}/year",
-                        "variable_cost": f"${random.randint(2, 8):,}/unit"
-                    },
-                    {
-                        "type": "retail_store",
-                        "location": "multiple_locations",
-                        "capacity": f"{random.randint(100, 500)} units/day",
-                        "fixed_cost": f"${random.randint(50000, 300000):,}/year/store",
-                        "variable_cost": f"${random.randint(1, 5):,}/unit"
-                    }
-                ],
-                "transportation_links": [
-                    {
-                        "route": "Shanghai_to_LA",
-                        "mode": "ocean_freight",
-                        "transit_time": f"{random.randint(15, 25)} days",
-                        "cost": f"${random.randint(500, 2000):,}/container"
-                    },
-                    {
-                        "route": "LA_to_Regional_DC",
-                        "mode": "truck",
-                        "transit_time": f"{random.randint(2, 5)} days",
-                        "cost": f"${random.randint(2, 8):,}/mile"
-                    }
-                ]
-            },
-            "inventory_policy": {
-                "strategy": "(Q,R) policy",
-                "order_quantity": f"{random.randint(1000, 5000)} units",
-                "reorder_point": f"{random.randint(500, 2000)} units",
-                "safety_stock": f"{random.randint(200, 800)} units",
-                "review_period": "continuous"
-            },
-            "cost_breakdown": {
-                "annual_purchase_cost": f"${random.randint(5000000, 20000000):,}",
-                "annual_ordering_cost": f"${random.randint(50000, 200000):,}",
-                "annual_holding_cost": f"${random.randint(200000, 800000):,}",
-                "annual_shortage_cost": f"${random.randint(50000, 500000):,}",
-                "total_annual_cost": f"${random.randint(6000000, 25000000):,}"
-            },
-            "service_levels": {
-                "fill_rate": f"{random.randint(85, 98)}%",
-                "stockout_probability": f"{random.randint(2, 15)}%",
-                "average_wait_time": f"{random.randint(1, 5)} days"
-            },
-            "scenario_analysis": {
-                "demand_increase_20pct": {
-                    "additional_cost": f"${random.randint(500000, 2000000):,}",
-                    "required_changes": ["increase_safety_stock", "consider_additional_dc"]
-                },
-                "transport_cost_increase_30pct": {
-                    "additional_cost": f"${random.randint(300000, 1000000):,}",
-                    "required_changes": ["consolidate_shipments", "negotiate_rates"]
-                }
-            },
+            "shortest_paths": shortest_paths,
+            "inventory_optimization": eoq,
             "recommendations": [
                 "Consider postponement strategies for customization",
                 "Implement vendor-managed inventory for key suppliers",
@@ -313,62 +217,82 @@ class OperationsResearchAgent(SpecializedAgent):
                 "Regularly review network design as demand patterns change"
             ]
         }
-    
+
     async def _optimize_schedule(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Optimize scheduling and timing"""
+        """Optimize scheduling using real priority queue and greedy algorithms"""
         schedule_type = params.get("type", "production")
-        
+        job_times = params.get("job_times", None)
+        job_deadlines = params.get("job_deadlines", None)
+        job_priorities = params.get("job_priorities", None)
+        machine_count = params.get("machine_count", 1)
+
+        scheduling_result = None
+        if job_times and isinstance(job_times, list) and len(job_times) > 0:
+            n_jobs = len(job_times)
+            times = np.array(job_times, dtype=np.float64)
+
+            if job_deadlines and isinstance(job_deadlines, list) and len(job_deadlines) == n_jobs:
+                deadlines = np.array(job_deadlines, dtype=np.float64)
+                indices = np.argsort(deadlines)
+                scheduled = []
+                current_time = 0.0
+                job_heap = []
+                for idx in indices:
+                    heapq.heappush(job_heap, (-times[idx], idx))
+                    current_time += times[idx]
+                    if current_time > deadlines[idx] + 1e-9:
+                        longest = heapq.heappop(job_heap)
+                        current_time -= -longest[0]
+
+                scheduled_indices = [item[1] for item in sorted(job_heap, key=lambda x: x[1])]
+                makespan = current_time
+                scheduled = [
+                    {
+                        "job": f"Job_{j}",
+                        "time": float(times[j]),
+                        "deadline": float(deadlines[j]) if j < len(deadlines) else None,
+                        "priority": float(job_priorities[j]) if job_priorities and j < len(job_priorities) else 1.0,
+                    }
+                    for j in scheduled_indices
+                ]
+
+                total_tardiness = 0.0
+                ct = 0.0
+                for j in scheduled_indices:
+                    ct += times[j]
+                    if j < len(deadlines):
+                        total_tardiness += max(0.0, ct - deadlines[j])
+            else:
+                mc = max(1, int(machine_count))
+                machines = [0.0] * mc
+                machine_jobs = [[] for _ in range(mc)]
+                priorities = np.array(job_priorities) if job_priorities and len(job_priorities) == n_jobs else np.ones(n_jobs)
+                sorted_by_priority = np.argsort(-priorities)
+                for idx in sorted_by_priority:
+                    earliest = min(range(mc), key=lambda m: machines[m])
+                    machines[earliest] += times[idx]
+                    machine_jobs[earliest].append({
+                        "job": f"Job_{idx}",
+                        "time": float(times[idx]),
+                        "priority": float(priorities[idx]),
+                    })
+                makespan = max(machines)
+                scheduled = machine_jobs
+                total_tardiness = 0.0
+
+            scheduling_result = {
+                "jobs_scheduled": n_jobs,
+                "makespan": round(float(makespan), 4),
+                "total_tardiness": round(float(total_tardiness), 4),
+                "schedule": scheduled,
+                "method": "earliest_deadline_first" if job_deadlines else "priority_based_load_balancing",
+            }
+
         return {
             "success": True,
             "task_type": "scheduling",
             "schedule_type": schedule_type,
-            "constraints": {
-                "resources": {
-                    "machines": f"{random.randint(5, 20)}",
-                    "workers": f"{random.randint(20, 100)}",
-                    "shifts": f"{random.randint(1, 3)}"
-                },
-                "time_horizon": f"{random.randint(1, 4)} weeks",
-                "due_dates": "as_specified",
-                "setup_times": "sequence_dependent"
-            },
-            "objectives": [
-                {
-                    "objective": "minimize_makespan",
-                    "weight": random.randint(30, 50),
-                    "description": "minimize_total_completion_time"
-                },
-                {
-                    "objective": "minimize_tardiness",
-                    "weight": random.randint(20, 40),
-                    "description": "minimize_late_jobs"
-                },
-                {
-                    "objective": "maximize_utilization",
-                    "weight": random.randint(10, 30),
-                    "description": "maximize_resource_utilization"
-                }
-            ],
-            "solution_method": {
-                "algorithm": "genetic_algorithm",
-                "population_size": f"{random.randint(50, 200)}",
-                "generations": f"{random.randint(100, 500)}",
-                "mutation_rate": f"{random.uniform(0.01, 0.1):.3f}",
-                "crossover_rate": f"{random.uniform(0.7, 0.9):.3f}"
-            },
-            "results": {
-                "makespan": f"{random.randint(100, 300)} hours",
-                "total_tardiness": f"{random.randint(0, 50)} hours",
-                "machine_utilization": f"{random.randint(65, 85)}%",
-                "worker_utilization": f"{random.randint(60, 80)}%",
-                "average_flow_time": f"{random.randint(50, 150)} hours"
-            },
-            "schedule_details": {
-                "jobs_scheduled": random.randint(50, 200),
-                "on_time_completion": f"{random.randint(70, 90)}%",
-                "average_lateness": f"{random.randint(-10, 20)} hours",
-                "maximum_lateness": f"{random.randint(0, 100)} hours"
-            },
+            "scheduling_result": scheduling_result,
             "recommendations": [
                 "Consider batching similar jobs to reduce setup times",
                 "Implement dynamic rescheduling for disruptions",
@@ -376,7 +300,7 @@ class OperationsResearchAgent(SpecializedAgent):
                 "Monitor and adjust based on actual performance"
             ]
         }
-    
+
     async def _general_or_consultation(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Provide general operations research consultation"""
         return {
@@ -384,51 +308,11 @@ class OperationsResearchAgent(SpecializedAgent):
             "task_type": "general-or-consultation",
             "query": params.get("query", "general operations research question"),
             "or_methodologies": [
-                {
-                    "method": "linear_programming",
-                    "applications": ["resource_allocation", "production_planning", "transportation"],
-                    "assumptions": ["linearity", "divisibility", "certainty"]
-                },
-                {
-                    "method": "integer_programming",
-                    "applications": ["facility_location", "network_design", "scheduling"],
-                    "assumptions": ["integrality", "linearity"]
-                },
-                {
-                    "method": "network_analysis",
-                    "applications": ["shortest_path", "maximum_flow", "minimum_spanning_tree"],
-                    "assumptions": ["connectivity", "non_negative_weights"]
-                },
-                {
-                    "method": "simulation",
-                    "applications": ["queueing_systems", "manufacturing_systems", "logistics"],
-                    "assumptions": ["model_accuracy", "input_data_quality"]
-                }
+                {"method": "linear_programming", "applications": ["resource_allocation", "production_planning", "transportation"], "assumptions": ["linearity", "divisibility", "certainty"]},
+                {"method": "integer_programming", "applications": ["facility_location", "network_design", "scheduling"], "assumptions": ["integrality", "linearity"]},
+                {"method": "network_analysis", "applications": ["shortest_path", "maximum_flow", "minimum_spanning_tree"], "assumptions": ["connectivity", "non_negative_weights"]},
+                {"method": "simulation", "applications": ["queueing_systems", "manufacturing_systems", "logistics"], "assumptions": ["model_accuracy", "input_data_quality"]},
             ],
-            "key_concepts": [
-                {
-                    "concept": "objective_function",
-                    "description": "mathematical_expression_to_optimize"
-                },
-                {
-                    "concept": "constraints",
-                    "description": "limitations_or_requirements_that_must_be_satisfied"
-                },
-                {
-                    "concept": "feasible_region",
-                    "description": "set_of_all_solutions_that_satisfy_constraints"
-                },
-                {
-                    "concept": "optimal_solution",
-                    "description": "best_solution_within_feasible_region"
-                }
-            ],
-            "software_tools": {
-                "commercial": ["Gurobi", "CPLEX", "Xpress", "FICO"],
-                "academic": ["GLPK", "SCIP", "COIN-OR"],
-                "modeling_languages": ["AMPL", "GAMS", "Pyomo"],
-                "simulation": ["AnyLogic", "Arena", "Simul8"],
-            },
             "recommendations": [
                 "Clearly define problem objectives and constraints",
                 "Validate model assumptions against reality",
@@ -436,4 +320,34 @@ class OperationsResearchAgent(SpecializedAgent):
                 "Consider multiple solution approaches for comparison"
             ]
         }
-
+
+
+def _dijkstra_all_pairs(dist_matrix: np.ndarray, source: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Dijkstra's algorithm using heapq for real shortest path computation."""
+    n = dist_matrix.shape[0]
+    distances = np.full(n, np.inf)
+    predecessors = np.full(n, -1, dtype=np.int64)
+    distances[source] = 0.0
+    pq = [(0.0, source)]
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > distances[u] + 1e-12:
+            continue
+        for v in range(n):
+            if u != v and not np.isinf(dist_matrix[u, v]) and dist_matrix[u, v] >= 0:
+                nd = d + dist_matrix[u, v]
+                if nd < distances[v] - 1e-12:
+                    distances[v] = nd
+                    predecessors[v] = u
+                    heapq.heappush(pq, (nd, v))
+    return distances, predecessors
+
+
+def _reconstruct_path(predecessors: np.ndarray, target: int) -> List[int]:
+    """Reconstruct shortest path from predecessors array."""
+    path = []
+    current = target
+    while current != -1:
+        path.append(int(current))
+        current = int(predecessors[current])
+    return path[::-1]

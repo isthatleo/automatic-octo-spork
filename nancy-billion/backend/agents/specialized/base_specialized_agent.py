@@ -13,7 +13,7 @@ from abc import abstractmethod
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from .base import BaseAgent
+from ..base import BaseAgent
 
 logger = logging.getLogger(__name__)
 

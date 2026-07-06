@@ -1,0 +1,15 @@
+'use client'
+
+// Example integration page showing how to use the revamped frontend
+// Place this in: frontend/app/dashboard/page.tsx
+
+import { RevampedDashboard } from '@/components/nancy/revamped-dashboard'
+
+export default function DashboardPage() {
+  return (
+    <main className="min-h-screen">
+      <RevampedDashboard />
+    </main>
+  )
+}
+
