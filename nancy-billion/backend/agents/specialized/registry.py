@@ -78,5 +78,8 @@ def create_agent(agent_type, settings):
     """Create an instance of the specified agent type"""
     if agent_type not in SPECIALIZED_AGENTS:
         raise ValueError(f"Unknown agent type: {agent_type}")
-    return SPECIALIZED_AGENTS[agent_type](settings)
+    cls = SPECIALIZED_AGENTS[agent_type]
+    if cls is None:
+        raise ValueError(f"Agent type '{agent_type}' is not available (missing module)")
+    return cls(settings)
 

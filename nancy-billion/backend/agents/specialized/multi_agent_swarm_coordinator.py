@@ -48,7 +48,7 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
             "collaboration_efficiency": 0.0
         }
         self.collective_knowledge = {}
-        self.coordination_protocols = ["consensus", auctions, "stigmergy", "hierarchical"]
+        self.coordination_protocols = ["consensus", "auctions", "stigmergy", "hierarchical"]
         
     async def process_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process swarm coordination tasks"""
@@ -56,15 +56,15 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
         
         await asyncio.sleep(0.3)  # Simulate coordination delay
         
-        if task_type == "register-agent":
+        if task_type in ("register-agent", "status"):
             return await self._register_agent(task_data)
-        elif task_type == "submit-task":
+        elif task_type in ("submit-task", "submit_task"):
             return await self._submit_task(task_data)
         elif task_type == "coordinate-task":
             return await self._coordinate_task_execution(task_data)
-        elif task_type == "consensus-building":
+        elif task_type in ("consensus-building", "propose_consensus"):
             return await self._facilitate_consensus(task_data)
-        elif task_type == "swarm-optimization":
+        elif task_type in ("swarm-optimization", "swarm_analytics"):
             return await self._optimize_swarm_performance(task_data)
         elif task_type == "emergent-behavior":
             return await self._study_emergent_behavior(task_data)
@@ -819,7 +819,7 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
                 "path_length": self._estimate_average_path_length()
             },
             "recommendations": self._get_swarm_recommendations(),
-            "timestamp": time.time(): time.time()
+            "timestamp": time.time()
         }
     
     # Additional helper methods for overview
