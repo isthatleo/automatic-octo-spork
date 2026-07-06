@@ -1,0 +1,701 @@
+
+> my-project@0.1.0 dev
+> next dev
+
+▲ Next.js 16.2.9 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.100.26:3000
+- Environments: .env.local, .env
+✓ Ready in 926ms
+⚠ Warning: Next.js inferred your workspace root, but it may not be correct.
+ We detected multiple lockfiles and selected the directory of C:\Users\leona.DESKTOP-10QNDAN\Desktop\automatic-octo-spork\nancy-billion\package-lock.json as the root directory.
+ To silence this warning, set `turbopack.root` in your Next.js config, or consider removing one of the lockfiles if it's not needed.
+   See https://nextjs.org/docs/app/api-reference/config/next-config-js/turbopack#root-directory for more information.
+ Detected additional lockfiles: 
+   * C:\Users\leona.DESKTOP-10QNDAN\Desktop\automatic-octo-spork\nancy-billion\frontend\pnpm-lock.yaml
+
+
+ GET / 200 in 1694ms (next.js: 802ms, application-code: 892ms)
+[v0] nancy brain error: Backend error: 404
+ POST /api/nancy 200 in 393ms (next.js: 244ms, application-code: 148ms)
+[v0] nancy brain error: Backend error: 404
+ POST /api/nancy 200 in 45ms (next.js: 9ms, application-code: 37ms)
+⚠ Found a change in next.config.mjs. Restarting the server to apply the changes...
+▲ Next.js 16.2.9 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.100.26:3000
+- Environments: .env.local, .env
+✓ Ready in 979ms
+⚠ Warning: Next.js inferred your workspace root, but it may not be correct.
+ We detected multiple lockfiles and selected the directory of C:\Users\leona.DESKTOP-10QNDAN\Desktop\automatic-octo-spork\nancy-billion\package-lock.json as the root directory.
+ To silence this warning, set `turbopack.root` in your Next.js config, or consider removing one of the lockfiles if it's not needed.
+   See https://nextjs.org/docs/app/api-reference/config/next-config-js/turbopack#root-directory for more information.
+ Detected additional lockfiles: 
+   * C:\Users\leona.DESKTOP-10QNDAN\Desktop\automatic-octo-spork\nancy-billion\frontend\pnpm-lock.yaml
+
+
+ GET / 200 in 2.1s (next.js: 1262ms, application-code: 870ms)
+[browser] A tree hydrated but some attributes of the server rendered HTML didn't match the client properties. This won't be patched up. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  ...
+    <HTTPAccessFallbackBoundary notFound={{...}} forbidden={undefined} unauthorized={undefined}>
+      <HTTPAccessFallbackErrorBoundary pathname="/" notFound={{...}} forbidden={undefined} unauthorized={undefined} ...>
+        <RedirectBoundary>
+          <RedirectErrorBoundary router={{...}}>
+            <InnerLayoutRouter url="/" tree={[...]} params={{}} cacheNode={{rsc:{...}, ...}} segmentPath={[...]} ...>
+              <SegmentViewNode type="page" pagePath="page.tsx">
+                <SegmentTrieNode>
+                <ClientPageRoot Component={function Page} serverProvidedParams={{...}}>
+                  <Page params={Promise} searchParams={Promise}>
+                    <BootSequence onDone={function onDone}>
+                      <div className="fixed inse..." style={{opacity:1}}>
+                        <ArcReactor size={180}>
+                          <div className="relative f..." style={{width:180, ...}} aria-hidden={true}>
+                            <svg>
+                            <svg>
+                            <svg viewBox="0 0 200 200" className="absolute i...">
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line
++                               x1={49.84094634875325}
+-                               x1="49.840946348753256"
+                                y1={63.55731435786667}
++                               x2={53.07701432625304}
+-                               x2="53.07701432625305"
+                                y2={65.90845536703657}
+                                stroke="var(--hud)"
+                                strokeWidth={0.6}
+                                opacity={0.4}
+                              >
+                              <line>
+                              <line>
+                              <line>
+                              <line
+                                x1={68.99999999999997}
++                               y1={46.30642496536482}
+-                               y1="46.30642496536481"
+                                x2={72.99999999999997}
++                               y2={53.234628195640326}
+-                               y2="53.23462819564032"
+                                stroke="var(--hud)"
+                                strokeWidth={1.4}
+                                opacity={0.9}
+                              >
+                              ...
+                            ...
+                        ...
+              ...
+            ...
+ 
+ GET / 200 in 179ms (next.js: 14ms, application-code: 165ms)
+[browser] A tree hydrated but some attributes of the server rendered HTML didn't match the client properties. This won't be patched up. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  ...
+    <HTTPAccessFallbackBoundary notFound={{...}} forbidden={undefined} unauthorized={undefined}>
+      <HTTPAccessFallbackErrorBoundary pathname="/" notFound={{...}} forbidden={undefined} unauthorized={undefined} ...>
+        <RedirectBoundary>
+          <RedirectErrorBoundary router={{...}}>
+            <InnerLayoutRouter url="/" tree={[...]} params={{}} cacheNode={{rsc:{...}, ...}} segmentPath={[...]} ...>
+              <SegmentViewNode type="page" pagePath="page.tsx">
+                <SegmentTrieNode>
+                <ClientPageRoot Component={function Page} serverProvidedParams={{...}}>
+                  <Page params={Promise} searchParams={Promise}>
+                    <BootSequence onDone={function onDone}>
+                      <div className="fixed inse..." style={{opacity:1}}>
+                        <ArcReactor size={180}>
+                          <div className="relative f..." style={{width:180, ...}} aria-hidden={true}>
+                            <svg>
+                            <svg>
+                            <svg viewBox="0 0 200 200" className="absolute i...">
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line
++                               x1={49.84094634875325}
+-                               x1="49.840946348753256"
+                                y1={63.55731435786667}
++                               x2={53.07701432625304}
+-                               x2="53.07701432625305"
+                                y2={65.90845536703657}
+                                stroke="var(--hud)"
+                                strokeWidth={0.6}
+                                opacity={0.4}
+                              >
+                              <line>
+                              <line>
+                              <line>
+                              <line
+                                x1={68.99999999999997}
++                               y1={46.30642496536482}
+-                               y1="46.30642496536481"
+                                x2={72.99999999999997}
++                               y2={53.234628195640326}
+-                               y2="53.23462819564032"
+                                stroke="var(--hud)"
+                                strokeWidth={1.4}
+                                opacity={0.9}
+                              >
+                              ...
+                            ...
+                        ...
+              ...
+            ...
+ 
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 1805ms (next.js: 602ms, application-code: 1203ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 697ms (next.js: 8ms, application-code: 689ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 898ms (next.js: 12ms, application-code: 887ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 658ms (next.js: 6ms, application-code: 652ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 804ms (next.js: 5ms, application-code: 799ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 823ms (next.js: 8ms, application-code: 815ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 531ms (next.js: 10ms, application-code: 520ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 917ms (next.js: 13ms, application-code: 904ms)
+[browser] Cannot listen to the event from the provided iframe, contentWindow is not available 
+    at shouldListenToIframeResize.t.width.iframe.style.width (https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js:4:2474)
+    at g._replaceScript (https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js:4:2705)
+    at new g (https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js:3:794)
+    at new <anonymous> (https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js:6:730)
+    at <unknown> (https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js:6:726)
+    at <unknown> (https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js:6:1793) (https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js:4:2474)
+[browser] Cannot listen to the event from the provided iframe, contentWindow is not available 
+    at shouldListenToIframeResize.t.width.iframe.style.width (https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js:4:2415)
+    at u._replaceScript (https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js:4:2646)
+    at new u (https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js:3:794)
+    at new <anonymous> (https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js:5:2689)
+    at <unknown> (https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js:5:2685)
+    at <unknown> (https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js:6:136) (https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js:4:2415)
+[v0] analyze falling back: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/analyze 200 in 2.4s (next.js: 1979ms, application-code: 435ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 2.4s (next.js: 31ms, application-code: 2.4s)
+ GET /api/news?type=articles 200 in 2.4s (next.js: 1383ms, application-code: 1045ms)
+ GET /api/article?url=https%3A%2F%2Fwww.aljazeera.com%2Fnews%2F2026%2F6%2F16%2Fus-justice-department-accuses-15-minnesota-activists-of-antifa-activities%3Ftraffic_source%3Drss 200 in 4.1s (next.js: 1823ms, application-code: 2.3s)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 970ms (next.js: 9ms, application-code: 961ms)
+ GET /api/news?type=articles&topic=xauusd 200 in 1106ms (next.js: 12ms, application-code: 1094ms)
+ GET /api/article?url=https%3A%2F%2Fnews.google.com%2Frss%2Farticles%2FCBMi1AFBVV95cUxOdU9WU1p6eGVoaW1HYWN1Z2JvRkwyazJQSDBMNFUyXzBfeFhhRmhQYXNaTXBXMnJwcXJ5Y3JGaTVBVGwzMHBpTDNOazlLdmxNLXNEREFFdlBWUWNxLW1YWEFwNXk3dHJZX2xIQ0lsWm9zREJzRk5qWXNjM0NLTjJYR3c4U0RuM1c1MVJhZFVuR2hfZURPSzJLSVREdi1wNXczTEs0dVpMWUhhNm12Z0pySVRtZFNIMGo4RTIwemE4YndINWtUNE10eGQ3b09jWVlMYjdzNNIB4AFBVV95cUxNWDlWLUJVcFBkVURsbkFRWk9OZ2hreXBSTHE0Zk1EakNYRWNUeDZ1bXpVaU94aTczTFRJWDJXUEtRVDdnZGZHMFpHSzV1ZmQ4UUdQRUJGTDVrU2FPWk1UaHJwajJpU28tUHliclZyN3d2VGVRUE42dnJOcEVaNjdnTlJRdHYyUnhyTkVxMzZUc0FBajZSaEkyLTl1MFByTkV0cU1ReUdnbVJpRTBsNFJLNzNFMEd5dTBvampDSUtCRVJnMllkeF9FZTJrSDMyVTVBQnZuRll2MHgxSTQwS1lkUA%3Foc%3D5 200 in 3.1s (next.js: 8ms, application-code: 3.1s)
+ GET / 200 in 435ms (next.js: 9ms, application-code: 426ms)
+[browser] A tree hydrated but some attributes of the server rendered HTML didn't match the client properties. This won't be patched up. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  ...
+    <HTTPAccessFallbackBoundary notFound={{...}} forbidden={undefined} unauthorized={undefined}>
+      <HTTPAccessFallbackErrorBoundary pathname="/" notFound={{...}} forbidden={undefined} unauthorized={undefined} ...>
+        <RedirectBoundary>
+          <RedirectErrorBoundary router={{...}}>
+            <InnerLayoutRouter url="/" tree={[...]} params={{}} cacheNode={{rsc:{...}, ...}} segmentPath={[...]} ...>
+              <SegmentViewNode type="page" pagePath="page.tsx">
+                <SegmentTrieNode>
+                <ClientPageRoot Component={function Page} serverProvidedParams={{...}}>
+                  <Page params={Promise} searchParams={Promise}>
+                    <BootSequence onDone={function onDone}>
+                      <div className="fixed inse..." style={{opacity:1}}>
+                        <ArcReactor size={180}>
+                          <div className="relative f..." style={{width:180, ...}} aria-hidden={true}>
+                            <svg>
+                            <svg>
+                            <svg viewBox="0 0 200 200" className="absolute i...">
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line
++                               x1={49.84094634875325}
+-                               x1="49.840946348753256"
+                                y1={63.55731435786667}
++                               x2={53.07701432625304}
+-                               x2="53.07701432625305"
+                                y2={65.90845536703657}
+                                stroke="var(--hud)"
+                                strokeWidth={0.6}
+                                opacity={0.4}
+                              >
+                              <line>
+                              <line>
+                              <line>
+                              <line
+                                x1={68.99999999999997}
++                               y1={46.30642496536482}
+-                               y1="46.30642496536481"
+                                x2={72.99999999999997}
++                               y2={53.234628195640326}
+-                               y2="53.23462819564032"
+                                stroke="var(--hud)"
+                                strokeWidth={1.4}
+                                opacity={0.9}
+                              >
+                              ...
+                            ...
+                        ...
+              ...
+            ...
+ 
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 993ms (next.js: 4ms, application-code: 989ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 488ms (next.js: 5ms, application-code: 483ms)
+ GET / 200 in 97ms (next.js: 7ms, application-code: 90ms)
+[browser] A tree hydrated but some attributes of the server rendered HTML didn't match the client properties. This won't be patched up. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  ...
+    <HTTPAccessFallbackBoundary notFound={{...}} forbidden={undefined} unauthorized={undefined}>
+      <HTTPAccessFallbackErrorBoundary pathname="/" notFound={{...}} forbidden={undefined} unauthorized={undefined} ...>
+        <RedirectBoundary>
+          <RedirectErrorBoundary router={{...}}>
+            <InnerLayoutRouter url="/" tree={[...]} params={{}} cacheNode={{rsc:{...}, ...}} segmentPath={[...]} ...>
+              <SegmentViewNode type="page" pagePath="page.tsx">
+                <SegmentTrieNode>
+                <ClientPageRoot Component={function Page} serverProvidedParams={{...}}>
+                  <Page params={Promise} searchParams={Promise}>
+                    <BootSequence onDone={function onDone}>
+                      <div className="fixed inse..." style={{opacity:1}}>
+                        <ArcReactor size={180}>
+                          <div className="relative f..." style={{width:180, ...}} aria-hidden={true}>
+                            <svg>
+                            <svg>
+                            <svg viewBox="0 0 200 200" className="absolute i...">
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line
++                               x1={49.84094634875325}
+-                               x1="49.840946348753256"
+                                y1={63.55731435786667}
++                               x2={53.07701432625304}
+-                               x2="53.07701432625305"
+                                y2={65.90845536703657}
+                                stroke="var(--hud)"
+                                strokeWidth={0.6}
+                                opacity={0.4}
+                              >
+                              <line>
+                              <line>
+                              <line>
+                              <line
+                                x1={68.99999999999997}
++                               y1={46.30642496536482}
+-                               y1="46.30642496536481"
+                                x2={72.99999999999997}
++                               y2={53.234628195640326}
+-                               y2="53.23462819564032"
+                                stroke="var(--hud)"
+                                strokeWidth={1.4}
+                                opacity={0.9}
+                              >
+                              ...
+                            ...
+                        ...
+              ...
+            ...
+ 
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 1082ms (next.js: 4ms, application-code: 1079ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 701ms (next.js: 6ms, application-code: 694ms)
+[v0] nancy brain falling back to local core: [1m[31mUnauthenticated request to AI Gateway.[0m
+
+To authenticate, set the [33mAI_GATEWAY_API_KEY[0m environment variable with your API key.
+
+Alternatively, you can use a provider module instead of the AI Gateway.
+
+Learn more: [34mhttps://ai-sdk.dev/unauthenticated-ai-gateway[0m
+
+
+ POST /api/nancy 200 in 583ms (next.js: 8ms, application-code: 575ms)
+✓ Compiled in 721ms
+ GET / 200 in 435ms (next.js: 298ms, application-code: 137ms)
+ GET / 200 in 3.7s (next.js: 494ms, application-code: 3.3s)
+[browser] A tree hydrated but some attributes of the server rendered HTML didn't match the client properties. This won't be patched up. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  ...
+    <HTTPAccessFallbackBoundary notFound={{...}} forbidden={undefined} unauthorized={undefined}>
+      <HTTPAccessFallbackErrorBoundary pathname="/" notFound={{...}} forbidden={undefined} unauthorized={undefined} ...>
+        <RedirectBoundary>
+          <RedirectErrorBoundary router={{...}}>
+            <InnerLayoutRouter url="/" tree={[...]} params={{}} cacheNode={{rsc:{...}, ...}} segmentPath={[...]} ...>
+              <SegmentViewNode type="page" pagePath="page.tsx">
+                <SegmentTrieNode>
+                <ClientPageRoot Component={function Page} serverProvidedParams={{...}}>
+                  <Page params={Promise} searchParams={Promise}>
+                    <BootSequence onDone={function onDone}>
+                      <div className="fixed inse..." style={{opacity:1}}>
+                        <ArcReactor size={180}>
+                          <div className="relative f..." style={{width:180, ...}} aria-hidden={true}>
+                            <svg>
+                            <svg>
+                            <svg viewBox="0 0 200 200" className="absolute i...">
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line>
+                              <line
++                               x1={49.84094634875325}
+-                               x1="49.840946348753256"
+                                y1={63.55731435786667}
++                               x2={53.07701432625304}
+-                               x2="53.07701432625305"
+                                y2={65.90845536703657}
+                                stroke="var(--hud)"
+                                strokeWidth={0.6}
+                                opacity={0.4}
+                              >
+                              <line>
+                              <line>
+                              <line>
+                              <line
+                                x1={68.99999999999997}
++                               y1={46.30642496536482}
+-                               y1="46.30642496536481"
+                                x2={72.99999999999997}
++                               y2={53.234628195640326}
+-                               y2="53.23462819564032"
+                                stroke="var(--hud)"
+                                strokeWidth={1.4}
+                                opacity={0.9}
+                              >
+                              ...
+                            ...
+                        ...
+              ...
+            ...
+ 

@@ -1,0 +1,106 @@
+version: "3.9"
+
+services:
+  # Orchestrator Brain (Main backend)
+  orchestrator:
+    build: ./backend
+    container_name: nancy-orchestrator
+    ports:
+      - "8000:8000"
+    environment:
+      - LOG_LEVEL=INFO
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app/backend
+    depends_on:
+      - ollama
+      - memory-service
+    networks:
+      - nancy-network
+    restart: unless-stopped
+
+  # Memory Service (Knowledge graph)
+  memory-service:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.memory
+    container_name: nancy-memory
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./data/memory:/app/data
+    networks:
+      - nancy-network
+    restart: unless-stopped
+
+  # LLM Proxy (Ollama local)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: nancy-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    networks:
+      - nancy-network
+    restart: unless-stopped
+    # Pull models on startup
+    command: sh -c "ollama serve & sleep 10 && ollama pull mistral && ollama pull neural-chat && wait"
+
+  # Frontend (Next.js)
+  frontend:
+    build: ./frontend
+    container_name: nancy-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://orchestrator:8000
+    depends_on:
+      - orchestrator
+    networks:
+      - nancy-network
+    restart: unless-stopped
+
+  # PostgreSQL (Optional: for persistent storage)
+  # postgres:
+  #   image: postgres:15
+  #   container_name: nancy-postgres
+  #   ports:
+  #     - "5432:5432"
+  #   environment:
+  #     - POSTGRES_USER=nancy
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+  #     - POSTGRES_DB=nancy
+  #   volumes:
+  #     - ./data/postgres:/var/lib/postgresql/data
+  #   networks:
+  #     - nancy-network
+  #   restart: unless-stopped
+
+  # Redis (Optional: for caching)
+  # redis:
+  #   image: redis:7
+  #   container_name: nancy-redis
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - ./data/redis:/data
+  #   networks:
+  #     - nancy-network
+  #   restart: unless-stopped
+
+networks:
+  nancy-network:
+    driver: bridge
+
+volumes:
+  nancy-data:
+    driver: local
+

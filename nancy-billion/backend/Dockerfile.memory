@@ -1,0 +1,29 @@
+# Nancy Memory Service Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY backend/requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy memory module
+COPY backend/memory ./memory
+COPY backend/context_manager.py .
+
+# Create data directory
+RUN mkdir -p /app/data
+
+# Expose port
+EXPOSE 5001
+
+# Memory service startup script
+CMD ["python", "-c", "from memory import MemoryGraph; from fastapi import FastAPI; from fastapi.responses import JSONResponse; import uvicorn; app = FastAPI(); graph = MemoryGraph('/app/data/memory.json'); @app.get('/health'); async def health(): return {'status': 'ok'}; @app.post('/query'); async def query(q: str): return {'results': graph.query(q)}; uvicorn.run(app, host='0.0.0.0', port=5001)"]
+
