@@ -1,0 +1,554 @@
+'use client'
+'use client'
+
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { BootSequence } from '@/components/nancy/boot-sequence'
+import { BootSequence } from '@/components/nancy/boot-sequence'
+import { MapPanel } from '@/components/nancy/map-panel'
+import { MapPanel } from '@/components/nancy/map-panel'
+import {
+import {
+  AgentsPanel,
+  AgentsPanel,
+  CorePanel,
+  CorePanel,
+  OverviewPanel,
+  OverviewPanel,
+  SystemPanel,
+  SystemPanel,
+} from '@/components/nancy/panels'
+} from '@/components/nancy/panels'
+import { ConsoleBar } from '@/components/nancy/console-bar'
+import { ConsoleBar } from '@/components/nancy/console-bar'
+import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
+import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
+import { useVoice, speak } from '@/lib/nancy/use-voice'
+import { useVoice, speak } from '@/lib/nancy/use-voice'
+import { parseCommand } from '@/lib/nancy/commands'
+import { parseCommand } from '@/lib/nancy/commands'
+import { geocode } from '@/lib/nancy/geocode'
+import { geocode } from '@/lib/nancy/geocode'
+import type { LogEntry, PanelKey, Place } from '@/lib/nancy/types'
+import type { LogEntry, PanelKey, Place } from '@/lib/nancy/types'
+import { cn } from '@/lib/utils'
+import { cn } from '@/lib/utils'
+import { Brain, Bot, Globe2, LayoutDashboard, TerminalSquare } from 'lucide-react'
+import { Brain, Bot, Globe2, LayoutDashboard, TerminalSquare } from 'lucide-react'
+
+
+const NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
+const NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
+  { key: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { key: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { key: 'core', label: 'AI Core', icon: Brain },
+  { key: 'core', label: 'AI Core', icon: Brain },
+  { key: 'agents', label: 'Agents', icon: Bot },
+  { key: 'agents', label: 'Agents', icon: Bot },
+  { key: 'system', label: 'System', icon: TerminalSquare },
+  { key: 'system', label: 'System', icon: TerminalSquare },
+  { key: 'map', label: 'Recon', icon: Globe2 },
+  { key: 'map', label: 'Recon', icon: Globe2 },
+]
+]
+
+
+let logSeq = 0
+let logSeq = 0
+
+
+export default function Page() {
+export default function Page() {
+  const [booting, setBooting] = useState(true)
+  const [booting, setBooting] = useState(true)
+  const [panel, setPanel] = useState<PanelKey>('overview')
+  const [panel, setPanel] = useState<PanelKey>('overview')
+  const [place, setPlace] = useState<Place | null>(null)
+  const [place, setPlace] = useState<Place | null>(null)
+  const [mapLoading, setMapLoading] = useState(false)
+  const [mapLoading, setMapLoading] = useState(false)
+  const [launched, setLaunched] = useState<string | null>(null)
+  const [launched, setLaunched] = useState<string | null>(null)
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [clock, setClock] = useState('')
+  const [clock, setClock] = useState('')
+  const [speaking, setSpeaking] = useState(false)
+  const [speaking, setSpeaking] = useState(false)
+  const [thinking, setThinking] = useState(false)
+  const [thinking, setThinking] = useState(false)
+  const launchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const launchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const speakTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const speakTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+
+  const log = useCallback((level: LogEntry['level'], text: string) => {
+  const log = useCallback((level: LogEntry['level'], text: string) => {
+    setLogs((prev) =>
+    setLogs((prev) =>
+      [...prev, { id: `l${logSeq++}`, ts: Date.now(), level, text }].slice(-60),
+      [...prev, { id: `l${logSeq++}`, ts: Date.now(), level, text }].slice(-60),
+    )
+    )
+  }, [])
+  }, [])
+
+
+  const nancySay = useCallback(
+  const nancySay = useCallback(
+    (text: string) => {
+    (text: string) => {
+      log('nancy', text)
+      log('nancy', text)
+      speak(text)
+      speak(text)
+      // Drive the orb's "speaking" state for the estimated utterance duration.
+      // Drive the orb's "speaking" state for the estimated utterance duration.
+      setSpeaking(true)
+      setSpeaking(true)
+      if (speakTimer.current) clearTimeout(speakTimer.current)
+      if (speakTimer.current) clearTimeout(speakTimer.current)
+      const words = text.trim().split(/\s+/).length
+      const words = text.trim().split(/\s+/).length
+      const ms = Math.min(12000, 900 + words * 320)
+      const ms = Math.min(12000, 900 + words * 320)
+      speakTimer.current = setTimeout(() => setSpeaking(false), ms)
+      speakTimer.current = setTimeout(() => setSpeaking(false), ms)
+    },
+    },
+    [log],
+    [log],
+  )
+  )
+
+
+  const doLaunch = useCallback((target: string) => {
+  const doLaunch = useCallback((target: string) => {
+    setPanel('system')
+    setPanel('system')
+    setLaunched(target)
+    setLaunched(target)
+    if (launchTimer.current) clearTimeout(launchTimer.current)
+    if (launchTimer.current) clearTimeout(launchTimer.current)
+    launchTimer.current = setTimeout(() => setLaunched(null), 4000)
+    launchTimer.current = setTimeout(() => setLaunched(null), 4000)
+  }, [])
+  }, [])
+
+
+  const locate = useCallback(
+  const locate = useCallback(
+    async (query: string) => {
+    async (query: string) => {
+      setPanel('map')
+      setPanel('map')
+      setMapLoading(true)
+      setMapLoading(true)
+      setThinking(true)
+      setThinking(true)
+      const found = await geocode(query)
+      const found = await geocode(query)
+      setThinking(false)
+      setThinking(false)
+      setMapLoading(false)
+      setMapLoading(false)
+      if (found) {
+      if (found) {
+        setPlace(found)
+        setPlace(found)
+        nancySay(`Target acquired. Displaying ${found.name}, ${found.country}.`)
+        nancySay(`Target acquired. Displaying ${found.name}, ${found.country}.`)
+      } else {
+      } else {
+        nancySay(`I could not locate ${query}. Please try another place.`)
+        nancySay(`I could not locate ${query}. Please try another place.`)
+      }
+      }
+    },
+    },
+    [nancySay],
+    [nancySay],
+  )
+  )
+
+
+  const runCommand = useCallback(
+  const runCommand = useCallback(
+    (input: string) => {
+    (input: string) => {
+      const result = parseCommand(input)
+      const result = parseCommand(input)
+      switch (result.type) {
+      switch (result.type) {
+        case 'navigate':
+        case 'navigate':
+          setPanel(result.panel)
+          setPanel(result.panel)
+          nancySay(result.reply)
+          nancySay(result.reply)
+          break
+          break
+        case 'locate':
+        case 'locate':
+          nancySay(result.reply)
+          nancySay(result.reply)
+          void locate(result.query)
+          void locate(result.query)
+          break
+          break
+        case 'launch':
+        case 'launch':
+          nancySay(result.reply)
+          nancySay(result.reply)
+          doLaunch(result.target)
+          doLaunch(result.target)
+          break
+          break
+        case 'scan':
+        case 'scan':
+          nancySay(result.reply)
+          nancySay(result.reply)
+          setPanel('overview')
+          setPanel('overview')
+          break
+          break
+        case 'time': {
+        case 'time': {
+          const now = new Date().toLocaleTimeString()
+          const now = new Date().toLocaleTimeString()
+          nancySay(`The local system time is ${now}.`)
+          nancySay(`The local system time is ${now}.`)
+          break
+          break
+        }
+        }
+        case 'status':
+        case 'status':
+        case 'greet':
+        case 'greet':
+        case 'unknown':
+        case 'unknown':
+          nancySay(result.reply)
+          nancySay(result.reply)
+          break
+          break
+      }
+      }
+    },
+    },
+    [doLaunch, locate, nancySay],
+    [doLaunch, locate, nancySay],
+  )
+  )
+
+
+  const onUserInput = useCallback(
+  const onUserInput = useCallback(
+    (text: string) => {
+    (text: string) => {
+      log('user', text)
+      log('user', text)
+      runCommand(text)
+      runCommand(text)
+    },
+    },
+    [log, runCommand],
+    [log, runCommand],
+  )
+  )
+
+
+  const { state, start, stop } = useVoice({
+  const { state, start, stop } = useVoice({
+    onCommand: runCommand,
+    onCommand: runCommand,
+    onWake: () => log('info', 'Wake word detected — awaiting command'),
+    onWake: () => log('info', 'Wake word detected — awaiting command'),
+  })
+  })
+
+
+  // Live clock
+  // Live clock
+  useEffect(() => {
+  useEffect(() => {
+    const t = setInterval(
+    const t = setInterval(
+      () => setClock(new Date().toLocaleTimeString('en-GB')),
+      () => setClock(new Date().toLocaleTimeString('en-GB')),
+      1000,
+      1000,
+    )
+    )
+    return () => clearInterval(t)
+    return () => clearInterval(t)
+  }, [])
+  }, [])
+
+
+  // Greeting after boot
+  // Greeting after boot
+  useEffect(() => {
+  useEffect(() => {
+    if (booting) return
+    if (booting) return
+    const t = setTimeout(() => {
+    const t = setTimeout(() => {
+      nancySay('NÅNCY online. Say "Nancy" followed by a command, or type below.')
+      nancySay('NÅNCY online. Say "Nancy" followed by a command, or type below.')
+    }, 600)
+    }, 600)
+    return () => clearTimeout(t)
+    return () => clearTimeout(t)
+  }, [booting, nancySay])
+  }, [booting, nancySay])
+
+
+  const toggleMic = useCallback(() => {
+  const toggleMic = useCallback(() => {
+    if (state.listening) {
+    if (state.listening) {
+      stop()
+      stop()
+      log('info', 'Microphone disabled')
+      log('info', 'Microphone disabled')
+    } else {
+    } else {
+      start()
+      start()
+      log('info', 'Microphone armed — listening for "Nancy"')
+      log('info', 'Microphone armed — listening for "Nancy"')
+    }
+    }
+  }, [state.listening, start, stop, log])
+  }, [state.listening, start, stop, log])
+
+
+  const mapOpen = panel === 'map'
+  const mapOpen = panel === 'map'
+  const orbState: OrbState =
+  const orbState: OrbState =
+    mapLoading || launched
+    mapLoading || launched
+      ? 'executing'
+      ? 'executing'
+      : speaking
+      : speaking
+        ? 'speaking'
+        ? 'speaking'
+        : thinking
+        : thinking
+          ? 'thinking'
+          ? 'thinking'
+          : state.listening
+          : state.listening
+            ? 'listening'
+            ? 'listening'
+            : 'idle'
+            : 'idle'
+
+
+  if (booting) return <BootSequence onDone={() => setBooting(false)} />
+  if (booting) return <BootSequence onDone={() => setBooting(false)} />
+
+
+  return (
+  return (
+    <main className="relative mx-auto flex min-h-dvh max-w-[1600px] flex-col gap-3 p-3 md:p-4">
+    <main className="relative mx-auto flex min-h-dvh max-w-[1600px] flex-col gap-3 p-3 md:p-4">
+      {/* Header */}
+      {/* Header */}
+      <header className="hud-panel flex flex-wrap items-center justify-between gap-3 rounded-md px-4 py-2.5">
+      <header className="hud-panel flex flex-wrap items-center justify-between gap-3 rounded-md px-4 py-2.5">
+        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3">
+          <div className="relative h-8 w-8">
+          <div className="relative h-8 w-8">
+            <div className="absolute inset-0 animate-hud-spin rounded-full border border-primary/40" />
+            <div className="absolute inset-0 animate-hud-spin rounded-full border border-primary/40" />
+            <div className="absolute inset-1.5 rounded-full bg-primary/80 shadow-[0_0_12px_var(--hud)]" />
+            <div className="absolute inset-1.5 rounded-full bg-primary/80 shadow-[0_0_12px_var(--hud)]" />
+          </div>
+          </div>
+          <div>
+          <div>
+            <h1 className="font-heading text-lg leading-none tracking-[0.3em] text-primary hud-glow">
+            <h1 className="font-heading text-lg leading-none tracking-[0.3em] text-primary hud-glow">
+              NÅNCY
+              NÅNCY
+            </h1>
+            </h1>
+            <p className="text-[0.5rem] uppercase tracking-[0.25em] text-muted-foreground">
+            <p className="text-[0.5rem] uppercase tracking-[0.25em] text-muted-foreground">
+              Stark-class Interface
+              Stark-class Interface
+            </p>
+            </p>
+          </div>
+          </div>
+        </div>
+        </div>
+
+
+        <nav className="flex flex-wrap items-center gap-1">
+        <nav className="flex flex-wrap items-center gap-1">
+          {NAV.map(({ key, label, icon: Icon }) => (
+          {NAV.map(({ key, label, icon: Icon }) => (
+            <button
+            <button
+              key={key}
+              key={key}
+              type="button"
+              type="button"
+              onClick={() => setPanel(key)}
+              onClick={() => setPanel(key)}
+              className={cn(
+              className={cn(
+                'flex items-center gap-1.5 rounded border px-2.5 py-1.5 text-[0.58rem] uppercase tracking-widest transition-colors',
+                'flex items-center gap-1.5 rounded border px-2.5 py-1.5 text-[0.58rem] uppercase tracking-widest transition-colors',
+                panel === key
+                panel === key
+                  ? 'border-primary bg-primary/15 text-primary hud-glow'
+                  ? 'border-primary bg-primary/15 text-primary hud-glow'
+                  : 'border-border bg-secondary/30 text-muted-foreground hover:border-primary/50 hover:text-foreground',
+                  : 'border-border bg-secondary/30 text-muted-foreground hover:border-primary/50 hover:text-foreground',
+              )}
+              )}
+            >
+            >
+              <Icon className="h-3.5 w-3.5" />
+              <Icon className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">{label}</span>
+              <span className="hidden sm:inline">{label}</span>
+            </button>
+            </button>
+          ))}
+          ))}
+        </nav>
+        </nav>
+
+
+        <div className="text-right">
+        <div className="text-right">
+          <div className="font-heading text-base text-accent hud-glow-amber">
+          <div className="font-heading text-base text-accent hud-glow-amber">
+            {clock || '--:--:--'}
+            {clock || '--:--:--'}
+          </div>
+          </div>
+          <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+          <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+            System Time
+            System Time
+          </div>
+          </div>
+        </div>
+        </div>
+      </header>
+      </header>
+
+
+      {/* Main grid */}
+      {/* Main grid */}
+      <div className="grid flex-1 grid-cols-1 gap-3 lg:grid-cols-[300px_1fr_320px]">
+      <div className="grid flex-1 grid-cols-1 gap-3 lg:grid-cols-[300px_1fr_320px]">
+        {/* Left rail */}
+        {/* Left rail */}
+        <div className="order-2 lg:order-1">
+        <div className="order-2 lg:order-1">
+          <OverviewPanel />
+          <OverviewPanel />
+        </div>
+        </div>
+
+
+        {/* Center: voice-first orb, or recon map once a location is opened */}
+        {/* Center: voice-first orb, or recon map once a location is opened */}
+        <div className="order-1 min-h-[380px] lg:order-2 lg:min-h-0">
+        <div className="order-1 min-h-[380px] lg:order-2 lg:min-h-0">
+          {mapOpen ? (
+          {mapOpen ? (
+            <MapPanel place={place} loading={mapLoading} />
+            <MapPanel place={place} loading={mapLoading} />
+          ) : (
+          ) : (
+            <div className="hud-panel relative flex h-full min-h-[380px] flex-col items-center justify-center overflow-hidden rounded-md">
+            <div className="hud-panel relative flex h-full min-h-[380px] flex-col items-center justify-center overflow-hidden rounded-md">
+              <div className="pointer-events-none absolute inset-0 opacity-[0.07] [background-image:linear-gradient(var(--hud)_1px,transparent_1px),linear-gradient(90deg,var(--hud)_1px,transparent_1px)] [background-size:32px_32px]" />
+              <div className="pointer-events-none absolute inset-0 opacity-[0.07] [background-image:linear-gradient(var(--hud)_1px,transparent_1px),linear-gradient(90deg,var(--hud)_1px,transparent_1px)] [background-size:32px_32px]" />
+              <NancyOrb state={orbState} size={360} />
+              <NancyOrb state={orbState} size={360} />
+              <p className="mt-6 max-w-sm text-balance text-center text-xs leading-relaxed text-muted-foreground">
+              <p className="mt-6 max-w-sm text-balance text-center text-xs leading-relaxed text-muted-foreground">
+                Say{' '}
+                Say{' '}
+                <span className="text-primary">&ldquo;Nancy&rdquo;</span> to wake
+                <span className="text-primary">&ldquo;Nancy&rdquo;</span> to wake
+                me, then a command like{' '}
+                me, then a command like{' '}
+                <span className="text-primary">&ldquo;open a map of New York&rdquo;</span>
+                <span className="text-primary">&ldquo;open a map of New York&rdquo;</span>
+                . I respond by voice — panels only open when you need to see
+                . I respond by voice — panels only open when you need to see
+                something.
+                something.
+              </p>
+              </p>
+            </div>
+            </div>
+          )}
+          )}
+        </div>
+        </div>
+
+
+        {/* Right rail: context panel driven by nav */}
+        {/* Right rail: context panel driven by nav */}
+        <div className="order-3">
+        <div className="order-3">
+          {panel === 'core' && <CorePanel />}
+          {panel === 'core' && <CorePanel />}
+          {panel === 'agents' && <AgentsPanel />}
+          {panel === 'agents' && <AgentsPanel />}
+          {panel === 'system' && (
+          {panel === 'system' && (
+            <SystemPanel onLaunch={doLaunch} launched={launched} />
+            <SystemPanel onLaunch={doLaunch} launched={launched} />
+          )}
+          )}
+          {(panel === 'overview' || panel === 'map') && <CorePanel />}
+          {(panel === 'overview' || panel === 'map') && <CorePanel />}
+        </div>
+        </div>
+      </div>
+      </div>
+
+
+      {/* Console */}
+      {/* Console */}
+      <ConsoleBar
+      <ConsoleBar
+        logs={logs}
+        logs={logs}
+        listening={state.listening}
+        listening={state.listening}
+        awake={state.awake}
+        awake={state.awake}
+        supported={state.supported}
+        supported={state.supported}
+        interim={state.interim}
+        interim={state.interim}
+        onToggleMic={toggleMic}
+        onToggleMic={toggleMic}
+        onSubmit={onUserInput}
+        onSubmit={onUserInput}
+      />
+      />
+    </main>
+    </main>
+  )
+  )
+}
+}

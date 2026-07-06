@@ -1,0 +1,277 @@
+'use client'
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { BootSequence } from '@/components/nancy/boot-sequence'
+import { MapPanel } from '@/components/nancy/map-panel'
+import {
+  AgentsPanel,
+  CorePanel,
+  OverviewPanel,
+  SystemPanel,
+} from '@/components/nancy/panels'
+import { ConsoleBar } from '@/components/nancy/console-bar'
+import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
+import { useVoice, speak } from '@/lib/nancy/use-voice'
+import { parseCommand } from '@/lib/nancy/commands'
+import { geocode } from '@/lib/nancy/geocode'
+import type { LogEntry, PanelKey, Place } from '@/lib/nancy/types'
+import { cn } from '@/lib/utils'
+import { Brain, Bot, Globe2, LayoutDashboard, TerminalSquare } from 'lucide-react'
+
+const NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
+  { key: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { key: 'core', label: 'AI Core', icon: Brain },
+  { key: 'agents', label: 'Agents', icon: Bot },
+  { key: 'system', label: 'System', icon: TerminalSquare },
+  { key: 'map', label: 'Recon', icon: Globe2 },
+]
+
+let logSeq = 0
+
+export default function Page() {
+  const [booting, setBooting] = useState(true)
+  const [panel, setPanel] = useState<PanelKey>('overview')
+  const [place, setPlace] = useState<Place | null>(null)
+  const [mapLoading, setMapLoading] = useState(false)
+  const [launched, setLaunched] = useState<string | null>(null)
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [clock, setClock] = useState('')
+  const [speaking, setSpeaking] = useState(false)
+  const [thinking, setThinking] = useState(false)
+  const launchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const speakTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const log = useCallback((level: LogEntry['level'], text: string) => {
+    setLogs((prev) =>
+      [...prev, { id: `l${logSeq++}`, ts: Date.now(), level, text }].slice(-60),
+    )
+  }, [])
+
+  const nancySay = useCallback(
+    (text: string) => {
+      log('nancy', text)
+      speak(text)
+      // Drive the orb's "speaking" state for the estimated utterance duration.
+      setSpeaking(true)
+      if (speakTimer.current) clearTimeout(speakTimer.current)
+      const words = text.trim().split(/\s+/).length
+      const ms = Math.min(12000, 900 + words * 320)
+      speakTimer.current = setTimeout(() => setSpeaking(false), ms)
+    },
+    [log],
+  )
+
+  const doLaunch = useCallback((target: string) => {
+    setPanel('system')
+    setLaunched(target)
+    if (launchTimer.current) clearTimeout(launchTimer.current)
+    launchTimer.current = setTimeout(() => setLaunched(null), 4000)
+  }, [])
+
+  const locate = useCallback(
+    async (query: string) => {
+      setPanel('map')
+      setMapLoading(true)
+      setThinking(true)
+      const found = await geocode(query)
+      setThinking(false)
+      setMapLoading(false)
+      if (found) {
+        setPlace(found)
+        nancySay(`Target acquired. Displaying ${found.name}, ${found.country}.`)
+      } else {
+        nancySay(`I could not locate ${query}. Please try another place.`)
+      }
+    },
+    [nancySay],
+  )
+
+  const runCommand = useCallback(
+    (input: string) => {
+      const result = parseCommand(input)
+      switch (result.type) {
+        case 'navigate':
+          setPanel(result.panel)
+          nancySay(result.reply)
+          break
+        case 'locate':
+          nancySay(result.reply)
+          void locate(result.query)
+          break
+        case 'launch':
+          nancySay(result.reply)
+          doLaunch(result.target)
+          break
+        case 'scan':
+          nancySay(result.reply)
+          setPanel('overview')
+          break
+        case 'time': {
+          const now = new Date().toLocaleTimeString()
+          nancySay(`The local system time is ${now}.`)
+          break
+        }
+        case 'status':
+        case 'greet':
+        case 'unknown':
+          nancySay(result.reply)
+          break
+      }
+    },
+    [doLaunch, locate, nancySay],
+  )
+
+  const onUserInput = useCallback(
+    (text: string) => {
+      log('user', text)
+      runCommand(text)
+    },
+    [log, runCommand],
+  )
+
+  const { state, start, stop } = useVoice({
+    onCommand: runCommand,
+    onWake: () => log('info', 'Wake word detected — awaiting command'),
+  })
+
+  // Live clock
+  useEffect(() => {
+    const t = setInterval(
+      () => setClock(new Date().toLocaleTimeString('en-GB')),
+      1000,
+    )
+    return () => clearInterval(t)
+  }, [])
+
+  // Greeting after boot
+  useEffect(() => {
+    if (booting) return
+    const t = setTimeout(() => {
+      nancySay('NÅNCY online. Say "Nancy" followed by a command, or type below.')
+    }, 600)
+    return () => clearTimeout(t)
+  }, [booting, nancySay])
+
+  const toggleMic = useCallback(() => {
+    if (state.listening) {
+      stop()
+      log('info', 'Microphone disabled')
+    } else {
+      start()
+      log('info', 'Microphone armed — listening for "Nancy"')
+    }
+  }, [state.listening, start, stop, log])
+
+  const mapOpen = panel === 'map'
+  const orbState: OrbState =
+    mapLoading || launched
+      ? 'executing'
+      : speaking
+        ? 'speaking'
+        : thinking
+          ? 'thinking'
+          : state.listening
+            ? 'listening'
+            : 'idle'
+
+  if (booting) return <BootSequence onDone={() => setBooting(false)} />
+
+  return (
+    <main className="relative mx-auto flex min-h-dvh max-w-[1600px] flex-col gap-3 p-3 md:p-4">
+      {/* Header */}
+      <header className="hud-panel flex flex-wrap items-center justify-between gap-3 rounded-md px-4 py-2.5">
+        <div className="flex items-center gap-3">
+          <div className="relative h-8 w-8">
+            <div className="absolute inset-0 animate-hud-spin rounded-full border border-primary/40" />
+            <div className="absolute inset-1.5 rounded-full bg-primary/80 shadow-[0_0_12px_var(--hud)]" />
+          </div>
+          <div>
+            <h1 className="font-heading text-lg leading-none tracking-[0.3em] text-primary hud-glow">
+              NÅNCY
+            </h1>
+            <p className="text-[0.5rem] uppercase tracking-[0.25em] text-muted-foreground">
+              Stark-class Interface
+            </p>
+          </div>
+        </div>
+
+        <nav className="flex flex-wrap items-center gap-1">
+          {NAV.map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setPanel(key)}
+              className={cn(
+                'flex items-center gap-1.5 rounded border px-2.5 py-1.5 text-[0.58rem] uppercase tracking-widest transition-colors',
+                panel === key
+                  ? 'border-primary bg-primary/15 text-primary hud-glow'
+                  : 'border-border bg-secondary/30 text-muted-foreground hover:border-primary/50 hover:text-foreground',
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">{label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="text-right">
+          <div className="font-heading text-base text-accent hud-glow-amber">
+            {clock || '--:--:--'}
+          </div>
+          <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+            System Time
+          </div>
+        </div>
+      </header>
+
+      {/* Main grid */}
+      <div className="grid flex-1 grid-cols-1 gap-3 lg:grid-cols-[300px_1fr_320px]">
+        {/* Left rail */}
+        <div className="order-2 lg:order-1">
+          <OverviewPanel />
+        </div>
+
+        {/* Center: voice-first orb, or recon map once a location is opened */}
+        <div className="order-1 min-h-[380px] lg:order-2 lg:min-h-0">
+          {mapOpen ? (
+            <MapPanel place={place} loading={mapLoading} />
+          ) : (
+            <div className="hud-panel relative flex h-full min-h-[380px] flex-col items-center justify-center overflow-hidden rounded-md">
+              <div className="pointer-events-none absolute inset-0 opacity-[0.07] [background-image:linear-gradient(var(--hud)_1px,transparent_1px),linear-gradient(90deg,var(--hud)_1px,transparent_1px)] [background-size:32px_32px]" />
+              <NancyOrb state={orbState} size={360} />
+              <p className="mt-6 max-w-sm text-balance text-center text-xs leading-relaxed text-muted-foreground">
+                Say{' '}
+                <span className="text-primary">&ldquo;Nancy&rdquo;</span> to wake
+                me, then a command like{' '}
+                <span className="text-primary">&ldquo;open a map of New York&rdquo;</span>
+                . I respond by voice — panels only open when you need to see
+                something.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Right rail: context panel driven by nav */}
+        <div className="order-3">
+          {panel === 'core' && <CorePanel />}
+          {panel === 'agents' && <AgentsPanel />}
+          {panel === 'system' && (
+            <SystemPanel onLaunch={doLaunch} launched={launched} />
+          )}
+          {(panel === 'overview' || panel === 'map') && <CorePanel />}
+        </div>
+      </div>
+
+      {/* Console */}
+      <ConsoleBar
+        logs={logs}
+        listening={state.listening}
+        awake={state.awake}
+        supported={state.supported}
+        interim={state.interim}
+        onToggleMic={toggleMic}
+        onSubmit={onUserInput}
+      />
+    </main>
+  )
+}

@@ -1,0 +1,882 @@
+'use client'
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { BootSequence } from '@/components/nancy/boot-sequence'
+import { MapPanel } from '@/components/nancy/map-panel'
+import {
+  AgentsPanel,
+  CorePanel,
+  OverviewPanel,
+  SystemPanel,
+  NewsPanel,
+  MediaPanel,
+} from '@/components/nancy/panels'
+import { ProjectsPanel } from '@/components/nancy/projects-panel'
+import { MarketPanel } from '@/components/nancy/market-panel'
+import { KnowledgePanel } from '@/components/nancy/knowledge-panel'
+import { ConsoleBar } from '@/components/nancy/console-bar'
+import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
+import { EnhancedNancyOrb } from '@/components/nancy/enhanced-nancy-orb'
+import { proactiveAssistant } from '@/lib/nancy/proactive-assistant'
+import { EnvironmentalScanner } from '@/components/nancy/environmental-scanner'
+import { isAirPodsConnected } from '@/lib/nancy/bluetooth-audio'
+import { RSS } from 'lucide-react'
+import { useVoice, speak } from '@/lib/nancy/use-voice'
+import { parseCommand } from '@/lib/nancy/commands'
+import { geocode } from '@/lib/nancy/geocode'
+import type { LogEntry, PanelKey, Place, ProjectInfo, MarketData, KnowledgeCategory, NewsItem } from '@/lib/nancy/types'
+import { cn } from '@/lib/utils'
+import { Brain, Bot, CandlestickChart, Folder, Globe2, LayoutDashboard, TerminalSquare, Globe, Zap, Settings, Heart, Shield, User, Clock, BrainCog, ZapOff, TrendingUp, Users, FileText, Music, Activity } from 'lucide-react'
+import { toolRegistry } from '@/lib/nancy/agent-tools'
+import { swarmEngine } from '@/lib/nancy/swarm-intelligence'
+import { mediaEngine } from '@/lib/nancy/media-generation'
+import { voiceRoleEngine } from '@/lib/nancy/voice-role-control'
+
+// God Mode Panel Components
+import { GodModePanel } from '@/components/nancy/god-mode-panel'
+import { KnowledgeUniversePanel } from '@/components/nancy/knowledge-universe-panel'
+import { SpatialWorkspacePanel } from '@/components/nancy/spatial-workspace-panel'
+import { MemoryCrystalPanel } from '@/components/nancy/memory-crystal-panel'
+
+const NAV: { key: PanelKey; label: string; icon: any; category: 'primary' | 'secondary' }[] = [
+  { key: 'overview', label: 'Overview', icon: LayoutDashboard, category: 'primary' },
+  { key: 'core', label: 'AI Core', icon: Brain, category: 'primary' },
+  { key: 'agents', label: 'Agents', icon: Bot, category: 'primary' },
+  { key: 'system', label: 'System', icon: TerminalSquare, category: 'primary' },
+  { key: 'market', label: 'Markets', icon: CandlestickChart, category: 'primary' },
+  { key: 'projects', label: 'Projects', icon: Folder, category: 'primary' },
+  { key: 'map', label: 'Recon', icon: Globe2, category: 'primary' },
+  { key: 'news', label: 'News', icon: RSS, category: 'primary' },
+  { key: 'media', label: 'Media', icon: Music, category: 'primary' },
+  { key: 'god-mode', label: 'God Mode', icon: Zap, category: 'secondary' },
+  { key: 'knowledge-universe', label: 'Knowledge Universe', icon: Globe, category: 'secondary' },
+  { key: 'spatial-workspace', label: 'Spatial Workspace', icon: Users, category: 'secondary' },
+  { key: 'memory-crystal', label: 'Memory Crystal', icon: Heart, category: 'secondary' }
+]
+
+let logSeq = 0
+
+export default function Home() {
+  const [panel, setPanel] = useState<PanelKey>('overview')
+  const [isBootComplete, setIsBootComplete] = useState(false)
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const orbRef = useRef<EnhancedNancyOrb>(null)
+  const [isListening, setIsListening] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [lastCommand, setLastCommand] = useState<string | null>(null)
+  const [isSpeaking, setIsSpeaking] = useState(false)
+  const [orbPosition, setOrbPosition] = useState<'center' | 'bottom-right'>('center')
+  const [isAirPodsConnected, setIsAirPodsConnected] = useState(false)
+  const [godModeActive, setGodModeActive] = useState(false)
+  const [knowledgeUniverseActive, setKnowledgeUniverseActive] = useState(false)
+  const [spatialWorkspaceActive, setSpatialWorkspaceActive] = useState(false)
+  const [memoryCrystalActive, setMemoryCrystalActive] = useState(false)
+
+  const { isReady, listen, stopListening, toggleListening, isSpeaking: voiceIsSpeaking } = useVoice()
+
+  // Initialize proactive assistant and context systems
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !(window as any).__jrviss_proactive_initialized) {
+      (window as any).__jrviss_proactive_initialized = true
+      // Initialize the proactive assistant
+      proactiveAssistant.initialize()
+      
+      // Initialize agent tools system
+      toolRegistry.register(fileSystemTool)
+      toolRegistry.register(webSearchTool)
+      toolRegistry.register(systemInfoTool)
+      toolRegistry.register(calculatorTool)
+      
+      // Start swarm intelligence simulation in background
+      swarmEngine.startSimulation()
+      
+      // Initialize media generation engine (would need API key in production)
+      // mediaEngine.setApiKey('your-api-key-here')  // Would be set from secure storage
+      
+      // Initialize voice role control (already initialized on import)
+      
+      // Start listening for voice commands immediately
+      if (isReady) {
+        listen()
+        setIsListening(true)
+        // Speak initialization message
+        setTimeout(() => {
+          speak("Good day. JÄRVIS online. All systems operational.")
+        }, 1500)
+      }
+      
+      console.log('JÄRVIS Assistant Systems initialized')
+    }
+  }, [isReady, listen])
+  
+  // Check for AirPods connection periodically
+  useEffect(() => {
+    const checkAirPodsConnection = async () => {
+      if (typeof navigator !== 'undefined' && navigator.bluetooth) {
+        try {
+          // Get connected Bluetooth devices
+          const devices = await navigator.bluetooth.getDevices()
+          const airPodsDevice = devices.find(device => 
+            /airpods/i.test(device.name) || 
+            /air pods/i.test(device.name)
+          )
+          
+          setIsAirPodsConnected(!!airPodsDevice)
+        } catch (error) {
+          console.warn('Could not check Bluetooth devices:', error)
+          setIsAirPodsConnected(false)
+        }
+      } else {
+        setIsAirPodsConnected(false)
+      }
+    }
+    
+    // Check initially and then every 10 seconds
+    checkAirPodsConnection()
+    const interval = setInterval(checkAirPodsConnection, 10000)
+    
+    return () => clearInterval(interval)
+  }, [])
+  
+  // Check for and speak proactive suggestions periodically
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const checkProactiveSuggestions = async () => {
+        try {
+          const suggestions = proactiveAssistant.getSuggestions()
+          
+          // Speak the highest priority suggestion if it's important enough
+          const highPrioritySuggestions = suggestions
+            .filter(s => s.priority >= 4) // Only speak high priority suggestions
+            .filter(s => {
+              // Avoid repeating the same suggestion too frequently
+              const lastSpoken = parseInt(s.id.split('-').pop() || '0')
+              return Date.now() - lastSpoken > 300000 // 5 minutes
+            })
+          
+          if (highPrioritySuggestions.length > 0) {
+            const suggestion = highPrioritySuggestions[0]
+            
+            // Mark as spoken by updating ID (simple approach)
+            const updatedSuggestion = {
+              ...suggestion,
+              id: `${suggestion.id}-spoken-${Date.now()}`
+            }
+            
+            // Add the fact that we spoke this suggestion to context
+            proactiveAssistant.addContextEvent('proactive_suggestion_spoken', {
+              suggestionId: suggestion.id,
+              suggestionType: suggestion.type
+            })
+            
+            // Speak the suggestion
+            if (!isSpeaking && !isProcessing) { // Only speak if not already speaking or processing
+              speak(suggestion.description)
+              addLog({ level: 'info', message: `Proactive suggestion: ${suggestion.title}` })
+            }
+          }
+        } catch (error) {
+          console.error('Error checking proactive suggestions:', error)
+        }
+      }
+      
+      // Check for proactive suggestions every 60 seconds
+      const suggestionInterval = setInterval(checkProactiveSuggestions, 60000)
+      
+      return () => clearInterval(suggestionInterval)
+    }
+  }, [isSpeaking, isProcessing])
+  
+  // Send periodic context updates (in a real app, this would be more sophisticated)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const sendContextUpdates = async () => {
+        try {
+          // Gather contextual information from frontend
+          const contextData = {
+            timestamp: new Date().toISOString(),
+            environmental: {
+              // In a real implementation, this would come from actual sensors or the environmental scanner
+              // For now, we'll simulate based on time and basic heuristics
+              ambientLight: Math.random() * 0.5 + 0.3, // Simulate varying light levels
+              isUserPresent: Math.random() > 0.3, // Simulate presence detection
+              timeOfDay: new Date().getHours()
+            },
+            usage: [
+              {
+                type: "page_interaction",
+                data: {
+                  timestamp: new Date().toISOString(),
+                  action: "context_update"
+                }
+              }
+            ],
+            voice: {
+              isListening: isListening,
+              lastCommand: lastCommand,
+              isSpeaking: isSpeaking,
+              isProcessing: isProcessing
+            },
+            ui: {
+              currentPanel: panel,
+              isBootComplete: isBootComplete,
+              godModeActive,
+              knowledgeUniverseActive,
+              spatialWorkspaceActive,
+              memoryCrystalActive
+            }
+          };
+          
+          // Add this interaction to proactive assistant's context
+          proactiveAssistant.addContextEvent('frontend_interaction', {
+            panel: panel,
+            isListening: isListening,
+            isSpeaking: isSpeaking,
+            isProcessing: isProcessing,
+            lastCommand: lastCommand,
+            timestamp: new Date().toISOString(),
+            godModeActive,
+            knowledgeUniverseActive,
+            spatialWorkspaceActive,
+            memoryCrystalActive
+          })
+          
+          // Send to context bridge API
+          try {
+            await fetch('/api/context', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(contextData)
+            })
+          } catch (error) {
+            console.warn('Failed to send context data to backend:', error)
+            // Continue anyway - local processing is still valuable
+          }
+        } catch (error) {
+          console.error('Error sending context updates:', error)
+        }
+      };
+      
+      // Send updates every 30 seconds
+      const interval = setInterval(sendContextUpdates, 30000)
+      sendContextUpdates() // Initial send
+      
+      return () => clearInterval(interval)
+    }
+  }, [isListening, lastCommand, isSpeaking, isProcessing, panel, isBootComplete, godModeActive, knowledgeUniverseActive, spatialWorkspaceActive, memoryCrystalActive])
+
+  useEffect(() => {
+    setIsSpeaking(voiceIsSpeaking)
+  }, [voiceIsSpeaking])
+
+  const addLog = (entry: Omit<LogEntry, 'id'>) => {
+    const newEntry = { ...entry, id: ++logSeq }
+    setLogs(prev => [newEntry, ...prev.slice(0, 99)])
+  }
+
+  // Handle system-level commands that work across all contexts
+  const handleSystemCommand = async (parsed: any, { addLog, speak, geocode }: any) => {
+    switch (parsed.action) {
+      // Application and file control
+      case 'open':
+        if (parsed.target) {
+          // Map common terms to actual paths or apps
+          const appMap: Record<string, string> = {
+            'terminal': 'terminal',
+            'command prompt': 'terminal',
+            'cmd': 'terminal',
+            'browser': 'browser',
+            'chrome': 'browser',
+            'firefox': 'browser',
+            'edge': 'browser',
+            'files': 'files',
+            'explorer': 'files',
+            'finder': 'files',
+            'editor': 'editor',
+            'code': 'editor',
+            'vscode': 'editor',
+            'calendar': 'calendar',
+            'mail': 'mail',
+            'outlook': 'mail',
+            'music': 'media',
+            'spotify': 'media',
+            'youtube': 'media',
+            'news': 'news',
+            'map': 'map',
+            'projects': 'projects',
+            'god mode': 'god-mode',
+            'knowledge universe': 'knowledge-universe',
+            'spatial workspace': 'spatial-workspace',
+            'memory crystal': 'memory-crystal'
+          }
+          
+          const targetKey = appMap[parsed.target.toLowerCase()] || parsed.target
+          
+          // Check if it's a valid panel key
+          const validPanel = NAV.some(nav => nav.key === targetKey)
+          if (validPanel) {
+            setPanel(targetKey as PanelKey)
+            // Move orb to bottom right when navigating to any panel except overview
+            setOrbPosition(targetKey === 'overview' ? 'center' : 'bottom-right')
+            addLog({ level: 'info', message: `Opening ${parsed.target}` })
+            speak(`Opening ${parsed.target}`)
+          } else {
+            // Try to open as a file or folder
+            addLog({ level: 'info', message: `Attempting to open ${parsed.target}` })
+            speak(`Opening ${parsed.target}`)
+            // In a real implementation, this would interface with the OS file system
+          }
+        } else {
+          addLog({ level: 'error', message: 'Please specify what to open' })
+          speak('Please specify what to open')
+        }
+        break
+        
+      case 'close':
+        if (parsed.target) {
+          addLog({ level: 'info', message: `Closing ${parsed.target}` })
+          speak(`Closing ${parsed.target}`)
+          // In a real implementation, this would close the specified app/window
+          // For now, if it's a panel, we'll go back to overview
+          if (parsed.target.toLowerCase() === 'panel' || parsed.target.toLowerCase() === 'window' || 
+              parsed.target.toLowerCase() === 'god mode' || parsed.target.toLowerCase() === 'knowledge universe' ||
+              parsed.target.toLowerCase() === 'spatial workspace' || parsed.target.toLowerCase() === 'memory crystal') {
+            setPanel('overview')
+            setOrbPosition('center')
+            setGodModeActive(false)
+            setKnowledgeUniverseActive(false)
+            setSpatialWorkspaceActive(false)
+            setMemoryCrystalActive(false)
+          }
+        } else {
+          // Close current panel and go to overview
+          setPanel('overview')
+          setOrbPosition('center')
+          setGodModeActive(false)
+          setKnowledgeUniverseActive(false)
+          setSpatialWorkspaceActive(false)
+          setMemoryCrystalActive(false)
+          addLog({ level: 'info', message: 'Closing current panel' })
+          speak('Closing current panel')
+        }
+        break
+        
+      // System control
+      case 'volume':
+        if (parsed.target !== undefined) {
+          const volume = parseInt(parsed.target)
+          if (!isNaN(volume) && volume >= 0 && volume <= 100) {
+            // In a real implementation, this would set system volume
+            addLog({ level: 'info', message: `Setting volume to ${volume}%` })
+            speak(`Volume set to ${volume} percent`)
+          } else {
+            addLog({ level: 'error', message: 'Volume must be between 0 and 100' })
+            speak('Volume must be between 0 and 100')
+          }
+        } else {
+          addLog({ level: 'error', message: 'Please specify volume level' })
+          speak('Please specify volume level')
+        }
+        break
+        
+      case 'mute':
+        // In a real implementation, this would mute/unmute system audio
+        addLog({ level: 'info', message: 'Toggling mute' })
+        speak('Toggling mute')
+        break
+        
+      case 'lights':
+        if (parsed.target) {
+          const action = parsed.target.toLowerCase()
+          if (action === 'on' || action === 'off') {
+            addLog({ level: 'info', message: `Turning lights ${action}` })
+            speak(`Turning lights ${action}`)
+            // In a real implementation, this would interface with smart home systems
+          } else {
+            addLog({ level: 'error', message: 'Please specify on or off for lights' })
+            speak('Please specify on or off for lights')
+          }
+        } else {
+          addLog({ level: 'info', message: 'Toggling lights' })
+          speak('Toggling lights')
+        }
+        break
+        
+      // Communication
+      case 'call':
+        if (parsed.target) {
+          addLog({ level: 'info', message: `Calling ${parsed.target}` })
+          speak(`Calling ${parsed.target}`)
+          // In a real implementation, this would interface with telephony systems
+        } else {
+          addLog({ level: 'error', message: 'Please specify who to call' })
+          speak('Please specify who to call')
+        }
+        break
+        
+      case 'message':
+      case 'text':
+      case 'send':
+        if (parsed.target && parsed.content) {
+          addLog({ level: 'info', message: `Sending message to ${parsed.target}: ${parsed.content}` })
+          speak(`Sending message to ${parsed.target}`)
+          // In a real implementation, this would interface with messaging systems
+        } else {
+          addLog({ level: 'error', message: 'Please specify recipient and message content' })
+          speak('Please specify recipient and message content')
+        }
+        break
+        
+      // Search and query
+      case 'search':
+      case 'find':
+      case 'look up':
+        if (parsed.target) {
+          addLog({ level: 'info', message: `Searching for ${parsed.target}` })
+          speak(`Searching for ${parsed.target}`)
+          // In a real implementation, this would search local files, web, or knowledge base
+          // For now, we'll go to the knowledge panel or knowledge universe
+          setPanel('knowledge-universe')
+          setKnowledgeUniverseActive(true)
+          setOrbPosition('bottom-right')
+        } else {
+          addLog({ level: 'error', message: 'Please specify what to search for' })
+          speak('Please specify what to search for')
+        }
+        break
+        
+      // Time and date
+      case 'time':
+        const now = new Date()
+        const timeString = now.toLocaleTimeString('en-GB', { 
+          hour: '2-digit', 
+          minute: '2-digit' 
+        })
+        addLog({ level: 'info', message: `Current time is ${timeString}` })
+        speak(`The current time is ${timeString}`)
+        break
+        
+      case 'date':
+        const dateString = new Date().toLocaleDateString('en-GB', { 
+          weekday: 'long', 
+          year: 'numeric', 
+          month: 'long', 
+          day: 'numeric' 
+        })
+        addLog({ level: 'info', message: `Today is ${dateString}` })
+        speak(`Today is ${dateString}`)
+        break
+        
+      // Weather
+      case 'weather':
+        if (parsed.target) {
+          addLog({ level: 'info', message: `Checking weather for ${parsed.target}` })
+          speak(`Checking weather for ${parsed.target}`)
+          // In a real implementation, this would call a weather API
+          speak(`I'm sorry, I don't have access to real-time weather data at the moment.`)
+        } else {
+          addLog({ level: 'info', message: `Checking local weather` })
+          speak(`Checking local weather`)
+          speak(`I'm sorry, I don't have access to real-time weather data at the moment.`)
+        }
+        break
+        
+      // System status and diagnostics
+      case 'status':
+      case 'diagnostics':
+      case 'system check':
+        addLog({ level: 'info', message: 'JÄRVIS System Status: Online' })
+        addLog({ level: 'info', message: 'Components: AI Core, Agents, System, Markets, Projects, News, Media, Recon' })
+        addLog({ level: 'info', message: 'Voice Recognition: Active' })
+        addLog({ level: 'info', message: 'Proactive Assistant: Monitoring' })
+        addLog({ level: 'info', message: 'God Mode: ' + (godModeActive ? 'Active' : 'Inactive') })
+        addLog({ level: 'info', message: 'Knowledge Universe: ' + (knowledgeUniverseActive ? 'Active' : 'Inactive') })
+        speak(`All systems operational. Voice recognition active. Proactive assistant monitoring. God Mode ${godModeActive ? 'active' : 'inactive'}. Knowledge Universe ${knowledgeUniverseActive ? 'active' : 'inactive'}.`)
+        break
+        
+      // Help and information
+      case 'help':
+      case 'what can you do':
+        addLog({ level: 'info', message: 'Available voice commands:' })
+        addLog({ level: 'info', message: '  open <app/file> - Open applications or files' })
+        addLog({ level: 'info', message: '  close <app/window> - Close applications or windows' })
+        addLog({ level: 'info', message: '  volume <0-100> - Set volume level' })
+        addLog({ level: 'info', message: '  mute - Toggle mute' })
+        addLog({ level: 'info', message: '  lights <on/off> - Control lights' })
+        addLog({ level: 'info', message: '  call <contact> - Place a call' })
+        addLog({ level: 'info', message: '  message <contact> <content> - Send a message' })
+        addLog({ level: 'info', message: '  search <query> - Search for information' })
+        addLog({ level: 'info', message: '  time - Get current time' })
+        addLog({ level: 'info', message: '  date - Get current date' })
+        addLog({ level: 'info', message: '  weather <location> - Check weather' })
+        addLog({ level: 'info', message: '  status - System diagnostics' })
+        addLog({ level: 'info', message: '  help - Show this help' })
+        addLog({ level: 'info', message: '  navigate <panel> - Switch to interface panel' })
+        addLog({ level: 'info', message: '  god mode - Activate God Mode' })
+        addLog({ level: 'info', message: '  knowledge universe - Open Knowledge Universe' })
+        addLog({ level: 'info', message: '  spatial workspace - Enter Spatial Workspace' })
+        addLog({ level: 'info', message: '  memory crystal - View Memory Crystal' })
+        speak('I can help you open applications, control system settings, communicate, search for information, check time and date, get system status, and navigate interface panels. I also have special modes like God Mode for complete system oversight, Knowledge Universe for exploring your knowledge graph, Spatial Workspace for immersive application management, and Memory Crystal for deep memory exploration. All through voice commands.')
+        break
+        
+      // Navigation (keeping existing functionality but enhancing)
+      case 'navigate':
+        if (parsed.target) {
+          const targetKey = parsed.target.toLowerCase() as PanelKey
+          if (NAV.some(nav => nav.key === targetKey)) {
+            setPanel(targetKey)
+            // Move orb to bottom right when navigating to any panel except overview
+            setOrbPosition(targetKey === 'overview' ? 'center' : 'bottom-right')
+            // Special handling for special panels
+            setGodModeActive(targetKey === 'god-mode')
+            setKnowledgeUniverseActive(targetKey === 'knowledge-universe')
+            setSpatialWorkspaceActive(targetKey === 'spatial-workspace')
+            setMemoryCrystalActive(targetKey === 'memory-crystal')
+            addLog({ level: 'info', message: `Switched to ${parsed.target}` })
+            speak(`Switching to ${parsed.target}`)
+          } else {
+            addLog({ level: 'error', message: `Unknown panel: ${parsed.target}` })
+            speak(`I don't recognize the panel ${parsed.target}`)
+          }
+        } else {
+          addLog({ level: 'error', message: 'Please specify which panel to navigate to' })
+          speak('Please specify which panel to navigate to')
+        }
+        break
+        
+      // Default fallback for unrecognized commands
+      default:
+        addLog({ level: 'warn', message: `Unrecognized command: ${parsed.action}` })
+        // Try to interpret as a general query or statement
+        if (parsed.action && parsed.action.length > 2) {
+          addLog({ level: 'info', message: `Interpreting as general query: ${parsed.action}` })
+          speak(`Let me think about that.`)
+          // In a more advanced implementation, this would query a knowledge base or LLM
+          setTimeout(() => {
+            speak(`I'm not sure how to help with that specific request. You could try asking me to open applications, check the time, get system status, or explore special modes like God Mode or Knowledge Universe.`)
+          }, 1000)
+        }
+        break
+    }
+  }
+
+  const handleCommand = async (command: string) => {
+    setLastCommand(command)
+    setIsProcessing(true)
+    addLog({ level: 'info', message: `> ${command}` })
+
+    try {
+      const parsed = parseCommand(command)
+      
+      // Add context event for pattern learning
+      if (typeof window !== 'undefined' && (window as any).proactiveAssistant) {
+        (window as any).proactiveAssistant.addContextEvent('command_executed', {
+          command: command,
+          action: parsed.action,
+          timestamp: new Date().toISOString()
+        })
+      }
+      
+      if (parsed.action === 'navigate') {
+        const targetKey = parsed.target as PanelKey
+        setPanel(targetKey)
+        // Move orb to bottom right when navigating to any panel except overview
+        setOrbPosition(targetKey === 'overview' ? 'center' : 'bottom-right')
+        // Special handling for special panels
+        setGodModeActive(targetKey === 'god-mode')
+        setKnowledgeUniverseActive(targetKey === 'knowledge-universe')
+        setSpatialWorkspaceActive(targetKey === 'spatial-workspace')
+        setMemoryCrystalActive(targetKey === 'memory-crystal')
+        addLog({ level: 'info', message: `Switched to ${parsed.target}` })
+      } else if (parsed.action === 'speak') {
+        speak(parsed.content)
+        addLog({ level: 'info', message: `Speaking: ${parsed.content}` })
+        // Keep orb in current position when speaking
+      } else if (parsed.action === 'toggle_listen') {
+        toggleListening()
+        // Keep orb in current position when toggling listen
+      } else if (parsed.action === 'status') {
+        addLog({ level: 'info', message: 'JÄRVIS System Status: Online' })
+        addLog({ level: 'info', message: 'Components: AI Core, Agents, System, Markets, Projects, Recon' })
+        // Keep orb in current position when checking status
+      } else if (parsed.action === 'help') {
+        addLog({ level: 'info', message: 'Available commands:' })
+        addLog({ level: 'info', message: '  navigate <panel> - Switch to panel (overview, core, agents, system, market, projects, news, media, map, god-mode, knowledge-universe, spatial-workspace, memory-crystal)' })
+        addLog({ level: 'info', message: '  speak <text> - Speak the provided text' })
+        addLog({ level: 'info', message: '  listen - Start voice recognition' })
+        addLog({ level: 'info', message: '  stop - Stop voice recognition' })
+        addLog({ level: 'info', message: '  status - Show system status' })
+        addLog({ level: 'info', message: '  help - Show this help' })
+        // Keep orb in current position when showing help
+      } else {
+        // Handle panel-specific commands
+        const panelComponents: Record<PanelKey, any> = {
+          overview: OverviewPanel,
+          core: CorePanel,
+          agents: AgentsPanel,
+          system: SystemPanel,
+          market: MarketPanel,
+          projects: ProjectsPanel,
+          news: NewsPanel,
+          media: MediaPanel,
+          map: MapPanel,
+          'god-mode': GodModePanel,
+          'knowledge-universe': KnowledgeUniversePanel,
+          'spatial-workspace': SpatialWorkspacePanel,
+          'memory-crystal': MemoryCrystalPanel
+        }
+        
+        const PanelComponent = panelComponents[panel]
+        if (PanelComponent && typeof PanelComponent === 'object' && PanelComponent.handleCommand) {
+          await PanelComponent.handleCommand(parsed, { addLog, speak, geocode })
+          // Move orb to bottom right when executing panel commands (except overview)
+          if (panel !== 'overview') {
+            setOrbPosition('bottom-right')
+          }
+        } else {
+          // Handle system-level voice commands
+          await handleSystemCommand(parsed, { addLog, speak, geocode })
+        }
+      }
+    } catch (error) {
+      addLog({ level: 'error', message: `Error: ${error instanceof Error ? error.message : String(error)}` })
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  const handleSpeakClick = () => {
+    if (isReady) {
+      toggleListening()
+    }
+  }
+
+  useEffect(() => {
+    const checkIsListening = async () => {
+      const listening = await listen()
+      setIsListening(listening)
+    }
+
+    if (isReady) {
+      checkIsListening()
+    }
+  }, [isReady])
+
+  return (
+    <div className="min-h-screen bg-black text-white flex flex-col">
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+        <div className="flex items-center space-x-4">
+          {/* Conditionally position orb based on current panel */}
+          <div className={`relative ${orbPosition === 'bottom-right' ? 'absolute right-4 bottom-4' : ''}`}>
+            <EnhancedNancyOrb 
+              ref={orbRef} 
+              size={48} 
+              state={isListening ? 'listening' : isProcessing ? 'processing' : isSpeaking ? 'speaking' : 'idle'} 
+              enableHolographic={true} 
+              enableFluidSimulation={true} 
+            />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-hud/100 font-heading">JÄRVIS</h1>
+            <p className="text-gray-400">Autonomous AI Assistant</p>
+          </div>
+        </div>
+        <div className="flex items-center space-x-3 text-sm">
+          <div className="flex items-center space-x-2">
+            <div className="w-3 h-3 bg-green-500 rounded-full" title="Online"></div>
+            <span>Online</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            <div className="w-3 h-3 bg-yellow-500 rounded-full" title="Voice">{isListening ? '?' : ''}</div>
+            <span>{isListening ? 'Listening...' : 'Voice Ready'}</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            <div 
+              className={`w-3 h-3 ${isAirPodsConnected ? 'bg-blue-500' : 'bg-gray-500'} rounded-full`} 
+              title="Audio Device"
+              onClick={() => {
+                // In a real implementation, this would open Bluetooth settings
+                addLog({ level: 'info', message: 'Opening audio device settings...' })
+              }}
+            >
+              {isAirPodsConnected ? '🎧' : '🔊'}
+            </div>
+            <span className="text-xs">{isAirPodsConnected ? 'AirPods' : 'Speaker'}</span>
+          </div>
+          {/* Special mode indicators */}
+          {godModeActive && (
+            <div className="flex items-center space-x-2">
+              <div className="w-3 h-3 bg-red-500 rounded-full pulse" title="God Mode"></div>
+              <span className="text-xs text-red-300">GOD MODE</span>
+            </div>
+          )}
+          {knowledgeUniverseActive && (
+            <div className="flex items-center space-x-2">
+              <div className="w-3 h-3 bg-purple-500 rounded-full pulse" title="Knowledge Universe"></div>
+              <span className="text-xs text-purple-300">KNOWLEDGE UNIVERSE</span>
+            </div>
+          )}
+          {spatialWorkspaceActive && (
+            <div className="flex items-center space-x-2">
+              <div className="w-3 h-3 bg-cyan-500 rounded-full pulse" title="Spatial Workspace"></div>
+              <span className="text-xs text-cyan-300">SPATIAL WORKSPACE</span>
+            </div>
+          )}
+          {memoryCrystalActive && (
+            <div className="flex items-center space-x-2">
+              <div className="w-3 h-3 bg-pink-500 rounded-full pulse" title="Memory Crystal"></div>
+              <span className="text-xs text-pink-300">MEMORY CRYSTAL</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Sidebar Navigation */}
+        <aside className="w-64 bg-gray-900/80 border-r border-hud/20 backdrop-blur flex flex-col">
+          <nav className="flex-1 overflow-y-auto p-4">
+            {/* Primary Navigation */}
+            <div className="mb-4">
+              <h2 className="text-xs font-medium text-hud/40 uppercase tracking-wider">PRIMARY SYSTEMS</h2>
+              {NAV
+                .filter(nav => nav.category === 'primary')
+                .map(({ key, label, icon }) => (
+                  <button
+                    key={key}
+                    onClick={() => {
+                      setPanel(key)
+                      setOrbPosition(key === 'overview' ? 'center' : 'bottom-right')
+                      // Reset special modes when switching
+                    }}
+                    className={
+                      `flex w-full items-center space-x-3 px-4 py-3 text-left text-hud/60 hover:bg-hud/10 hover:text-hud/100 border-l-2 border-hud/20 hover:border-hud/40 ${panel === key ? 'bg-hud/20 text-hud/100 border-hud/40' : ''}`
+                    }
+                  >
+                    <icon size={20} className="text-hud/60 hover:text-hud/100 ${panel === key ? 'text-hud/100' : ''}" />
+                    <span className="text-hud/60 hover:text-hud/100 ${panel === key ? 'text-hud/100' : ''}">{label}</span>
+                  </button>
+                ))}
+            </div>
+            
+            {/* Secondary Navigation (Special Modes) */}
+            <div className="mb-4">
+              <h2 className="text-xs font-medium text-hud/40 uppercase tracking-wider">SYSTEM MODES</h2>
+              {NAV
+                .filter(nav => nav.category === 'secondary')
+                .map(({ key, label, icon }) => (
+                  <button
+                    key={key}
+                    onClick={() => {
+                      setPanel(key as PanelKey)
+                      setOrbPosition('bottom-right')
+                      // Set special mode flags
+                      setGodModeActive(key === 'god-mode')
+                      setKnowledgeUniverseActive(key === 'knowledge-universe')
+                      setSpatialWorkspaceActive(key === 'spatial-workspace')
+                      setMemoryCrystalActive(key === 'memory-crystal')
+                    }}
+                    className={
+                      `flex w-full items-center space-x-3 px-4 py-3 text-left text-hud/60 hover:bg-hud/10 hover:text-hud/100 border-l-2 border-hud/20 hover:border-hud/40 ${panel === key ? 'bg-hud/20 text-hud/100 border-hud/40' : ''}`
+                    }
+                  >
+                    <icon size={20} className="text-hud/60 hover:text-hud/100 ${panel === key ? 'text-hud/100' : ''}" />
+                    <span className="text-hud/60 hover:text-hud/100 ${panel === key ? 'text-hud/100' : ''}">{label}</span>
+                  </button>
+                ))}
+            </div>
+          </nav>
+          
+          {/* Console Bar */}
+          <ConsoleBar logs={logs} />
+        </aside>
+
+        {/* Panel Content */}
+        <div className="flex-1 overflow-y-auto p-6 bg-[radial-gradient(circle_at_50%_50%,transparent_0%,rgba(0,10,20,0.1)_70%,rgba(0,10,20,0.2)_100%)]">
+          {/* Boot Sequence */}
+          {!isBootComplete && (
+            <BootSequence onComplete={() => {
+              setIsBootComplete(true)
+              addLog({ level: 'info', message: 'JÄRVIS AI Assistant initialized successfully' })
+              addLog({ level: 'info', message: 'Systems online: Core, Agents, System, Markets, Projects, Recon' })
+            }} />
+          )}
+          
+          {/* Panel Content */}
+          {isBootComplete && (
+            <>
+              {panel === 'overview' && <OverviewPanel onLog={addLog} />}
+              {panel === 'core' && <CorePanel onLog={addLog} />}
+              {panel === 'agents' && <AgentsPanel onAgentSelect={(agentId) => {
+                addLog({ level: 'info', message: `Selected agent ${agentId}` });
+                // In a real implementation, this would open detailed agent view
+              }} />}
+              {panel === 'system' && <SystemPanel onLog={addLog} />}
+              {panel === 'market' && <MarketPanel onLog={addLog} />}
+              {panel === 'projects' && <ProjectsPanel onLog={addLog} />}
+              {panel === 'news' && <NewsPanel onNewsSelect={(newsId) => {
+                addLog({ level: 'info', message: `Selected news item ${newsId}` });
+                // In a real implementation, this would open detailed news view
+              }} />}
+              {panel === 'media' && <MediaPanel 
+                onPlayPause={() => addLog({ level: 'info', message: 'Toggled media playback' })}
+                onNextTrack={() => addLog({ level: 'info', message: 'Skipped to next track' })}
+                onPreviousTrack={() => addLog({ level: 'info', message: 'Skipped to previous track' })}
+                onVolumeChange={(volume) => addLog({ level: 'info', message: `Set volume to ${volume}%` })}
+                currentTrack={{
+                  title: 'Starlight Serenade',
+                  artist: 'Nancy Synth Ensemble',
+                  albumArt: 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=100&h=100&fit=crop'
+                }}
+                isPlaying={true}
+                volumeLevel={75}
+              />}
+              {panel === 'map' && <MapPanel onLog={addLog} />}
+              
+              {/* SPECIAL MODE PANELS */}
+              {panel === 'god-mode' && <GodModePanel onLog={addLog} />}
+              {panel === 'knowledge-universe' && <KnowledgeUniversePanel onLog={addLog} />}
+              {panel === 'spatial-workspace' && <SpatialWorkspacePanel onLog={addLog} />}
+              {panel === 'memory-crystal' && <MemoryCrystalPanel onLog={addLog} />}
+            </>
+          )}
+          
+          {/* Environmental Scanner (hidden but active) */}
+          <EnvironmentalScanner 
+            active={true} 
+            scanInterval={3000} 
+            range={5} 
+          />
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div className="px-6 py-3 border-t border-gray-800 text-sm text-hud/50">
+        <div className="flex justify-between">
+          <span>JÄRVIS Autonomous AI Assistant � {new Date().toLocaleTimeString()} � 
+            <span className="cursor-pointer hover:text-hud/100" onClick={() => handleCommand('help')}>
+              Help
+            </span>
+          </span>
+          <div className="flex items-center space-x-4">
+            <span className="flex items-center space-x-1">
+              <div className="w-2 h-2 bg-green-500 rounded-full" title="System Health"></div>
+              <span className="text-xs">98%</span>
+            </span>
+            <span className="flex items-center space-x-1">
+              <div className="w-2 h-2 bg-blue-500 rounded-full" title="Active Agents"></div>
+              <span className="text-xs">12/200</span>
+            </span>
+            <span className="flex items-center space-x-1">
+              <div className="w-2 h-2 bg-purple-500 rounded-full" title="Knowledge Growth"></div>
+              <span className="text-xs">+3.2%</span>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,3 @@
+
+    logger.info(f"Created {len(tools)} tools")
+    return tools

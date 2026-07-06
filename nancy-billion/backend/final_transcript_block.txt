@@ -1,0 +1,48 @@
+            elif msg_type == "final_transcript":
+                text = message.get("data", "")
+                logger.info(f"Received final transcript: {text}")
+                # Add user message to history
+                await history_manager.add({"role": "user", "content": text})
+                # Build prompt from history and system prompt
+                system_prompt = BASE_SYSTEM_PROMPT
+                history_lines = []
+                for msg in history_manager.history:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    history_lines.append(f"{role}: {content}")
+                history_text = "\n".join(history_lines)
+                prompt = f"{system_prompt}\n{history_text}\nuser: {text}\nassistant:"
+                # Process with our LLM backend
+                response = await llm_backend.generate(prompt, max_tokens=512, temperature=0.7)
+                # Add agent response to history
+                await history_manager.add({"role": "assistant", "content": response})
+                # Send response back
+                logger.info(f"Sending agent response: {response}")
+                try:
+                    await manager.send_personal_message(
+                        json.dumps({"type": "agent_response", "data": response}), websocket
+                    )
+                    logger.info("Agent response sent")
+                except Exception as e:
+                    logger.error(f"Error sending agent response: {e}")
+                    break
+                # Optionally synthesize and send audio
+                logger.info(f"Synthesizing TTS for response: {response}")
+                try:
+                    audio_wav = await tts_backend.synthesize(response)
+                    if audio_wav:
+                        audio_b64 = base64.b64encode(audio_wav).decode()
+                        logger.info(f"TTS synthesis successful, audio length: {len(audio_b64)}")
+                        try:
+                            await manager.send_personal_message(
+                                json.dumps({"type": "tts_audio", "data": audio_b64}), websocket
+                            )
+                            logger.info("TTS audio sent")
+                        except Exception as e:
+                            logger.error(f"Error sending TTS audio: {e}")
+                            break
+                    else:
+                        logger.warning("TTS synthesis returned empty audio")
+                except Exception as e:
+                    logger.error(f"Error in TTS synthesis: {e}")
+            elif msg_type == "user_text":

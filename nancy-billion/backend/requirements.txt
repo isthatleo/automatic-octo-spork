@@ -1,0 +1,21 @@
+fury-sdk>=0.1.0
+faster-whisper>=0.9.0
+pyttsx3>=2.90
+python-socketio>=5.9.0
+python-dotenv>=1.0.0
+pydantic>=2.6.0
+numpy>=1.24.0
+sounddevice>=0.4.6
+fastapi>=0.104.0
+uvicorn>=0.24.0
+aiohttp>=3.9.0
+psutil>=5.9.0
+
+# PDF extraction for agent registry generation (Phase 1.9)
+pypdf>=4.0.0
+# pdfplumber>=0.11.0  # optional; uncomment if preferred
+
+# Optional LLM provider backends (install as needed)
+# anthropic>=0.7.0
+# openai>=1.0.0
+# google-generativeai>=0.3.0

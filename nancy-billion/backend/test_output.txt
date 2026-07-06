@@ -1,0 +1,5 @@
+INFO:__main__:Connected to WebSocket
+INFO:__main__:Sent user_text
+INFO:__main__:Received: {"type": "agent_response", "data": "I've processed your request. The result is ready."}
+INFO:__main__:Agent response: I've processed your request. The result is ready.
+INFO:__main__:No TTS audio received within timeout

@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "C:\Users\leona.DESKTOP-10QNDAN\Desktop\automatic-octo-spork\nancy-billion\backend\main.py", line 16, in <module>
+    from .stt import stt_backend
+ImportError: attempted relative import with no known parent package
