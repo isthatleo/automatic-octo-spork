@@ -1,6 +1,77 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
+
+// Real psutil-backed system health (CPU/memory/disk/network/temperature).
+// Replaces the old Math.random()-jittered gauges in the Overview/System panels.
+export function useSystemHealth() {
+  const [data, setData] = useState<{
+    cpu: number | null
+    memory: number | null
+    disk: number | null
+    networkPercent: number | null
+    tempC: number | null
+  }>({ cpu: null, memory: null, disk: null, networkPercent: null, tempC: null })
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const prevNet = useRef<{ bytes: number; time: number; maxMbps: number } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const fetch_data = async () => {
+      try {
+        const res = await fetch('/api/system/health')
+        if (!res.ok) throw new Error('Failed to fetch system health')
+        const json = await res.json()
+        if (cancelled || !json.success) throw new Error('System health unavailable')
+
+        const now = Date.now()
+        const netIo = json.network ?? {}
+        const totalBytes = (netIo.bytes_sent ?? 0) + (netIo.bytes_recv ?? 0)
+        const maxMbps = Math.max(
+          1,
+          ...Object.values(netIo.interfaces ?? {})
+            .map((i: any) => (i.is_up ? i.speed_mbps : 0))
+            .filter((s: number) => s > 0),
+        )
+
+        let networkPercent: number | null = null
+        if (prevNet.current) {
+          const deltaBytes = totalBytes - prevNet.current.bytes
+          const deltaSeconds = (now - prevNet.current.time) / 1000
+          if (deltaSeconds > 0 && deltaBytes >= 0) {
+            const mbps = (deltaBytes * 8) / 1_000_000 / deltaSeconds
+            networkPercent = Math.max(0, Math.min(100, (mbps / maxMbps) * 100))
+          }
+        }
+        prevNet.current = { bytes: totalBytes, time: now, maxMbps }
+
+        setData({
+          cpu: json.cpu?.usage_percent ?? null,
+          memory: json.memory?.usage_percent ?? null,
+          disk: json.disk?.usage_percent ?? null,
+          networkPercent,
+          tempC: json.temperature?.max_temperature_celsius ?? null,
+        })
+        setError(null)
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Unknown error')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
+    fetch_data()
+    const interval = setInterval(fetch_data, 4000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
+  return { ...data, loading, error }
+}
 
 // Memory API
 export function useMemorySummary() {

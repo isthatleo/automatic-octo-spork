@@ -5,7 +5,8 @@ import os
 from abc import ABC, abstractmethod
 import numpy as np
 import sounddevice as sd
-import torch
+
+from clap_detection import clap_detector, SAMPLE_RATE as CLAP_SAMPLE_RATE
 
 
 logger = logging.getLogger(__name__)
@@ -24,89 +25,46 @@ class WakeWordDetector(ABC):
         pass
 
 class ClapWakeWord(WakeWordDetector):
+    """Listens on the backend host's own microphone via sounddevice and fires
+    the wake callback on a clap. Uses the shared clap_detector (clap_detection.py)
+    so this and the browser-side WS path (main_new.py's "clap_chunk" message,
+    for setups where the backend has no mic of its own) load one set of
+    weights instead of two independent copies of the model.
+    """
+
     def __init__(self):
-        # Reuse the existing clap detection model from clap-detection-main
-        # We'll load the model and set up the audio stream.
-        self.model = None
-        self.transform_audio = None
         self.stream = None
         self.running = False
         self.callback = None
         self.chunk_duration = 0.5  # seconds
-        self.buffer_duration = 1.0
-        self.sample_rate = 44100
+        self.sample_rate = CLAP_SAMPLE_RATE
         self.chunk_samples = int(self.chunk_duration * self.sample_rate)
-        self.buffer_samples = int(self.buffer_duration * self.sample_rate)
-        self.audio_buffer = np.zeros(self.buffer_samples, dtype=np.float32)
-        self._load_model()
+        self.audio_buffer = np.zeros(self.chunk_samples, dtype=np.float32)
 
-    def _load_model(self):
-        # Import the predict module from clap-detection-main
-        # We assume the clap-detection-main folder is accessible via PYTHONPATH or we copy the needed files.
-        # For simplicity, we'll import directly if possible.
-        try:
-            import sys
-            import torch
-
-            clap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../clap-detection-main'))
-            if clap_dir not in sys.path:
-                sys.path.append(clap_dir)
-
-            from predict import transform_audio, load_model
-
-            # clap-detection-main expects a torch checkpoint path.
-            # Provide via env or fall back to a local default filename.
-            model_path = os.getenv(
-                "CLAP_MODEL_PATH",
-                os.path.join(clap_dir, "audio_classifier.pth"),
+        if not clap_detector.is_available:
+            logger.warning(
+                "Clap wake word inactive: %s", clap_detector.status["error"]
             )
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"Clap model file not found: {model_path}")
-
-            self.model = load_model(model_path)
-            self.transform_audio = transform_audio
-            # sanity: torch model stays on CPU for compatibility
-            self.model.to(torch.device("cpu"))
-
-            logger.info(f"Clap detection model loaded from: {model_path}")
-        except Exception as e:
-            logger.error(f"Failed to load clap detection model: {e}")
-            self.model = None
-            self.transform_audio = None
-
 
     def _audio_callback(self, indata, frames, time, status):
         if status:
             logger.warning(f"Audio stream status: {status}")
+        if not clap_detector.is_available:
+            return
+
         # indata shape: (frames, channels); we take first channel
         audio_chunk = indata[:, 0].astype(np.float32) / 32768.0 if indata.dtype == np.int16 else indata[:, 0]
-        # Update buffer
         self.audio_buffer = np.roll(self.audio_buffer, -len(audio_chunk))
         self.audio_buffer[-len(audio_chunk):] = audio_chunk
-        # Process if we have enough for a chunk and model is available
-        if len(self.audio_buffer) >= self.chunk_samples and self.model is not None and self.transform_audio is not None:
-            chunk = self.audio_buffer[-self.chunk_samples:]
-            # Transform to mel spectrogram
-            try:
-                spec = self.transform_audio(chunk)
-                # spec returned by clap-detection-main/predict.transform_audio is already shaped for the model.
-                # In this repo's implementation: spec is resized and normalized, then spec.unsqueeze(0).
-                # So model expects input with shape (B, 1, H, W).
 
-                with torch.no_grad():
-                    out = self.model(spec if isinstance(spec, torch.Tensor) else torch.tensor(spec))
-                    # out is log_softmax over 2 classes; convert to probabilities.
-                    probs = torch.exp(out)
-                    # class 1 == Clap, class 0 == Noise (per README/predict.py)
-                    clap_prob = float(probs[0, 1].item())
-
-                if clap_prob > float(os.getenv("CLAP_DETECT_THRESHOLD", "0.6")):
-                    logger.info(f"Clap detected! clap_prob={clap_prob:.3f}")
-                    if self.callback:
-                        self.callback()
-
-            except Exception as e:
-                logger.error(f"Error in wake word processing: {e}")
+        try:
+            result = clap_detector.predict(self.audio_buffer)
+            if result.is_clap and result.confidence > float(os.getenv("CLAP_DETECT_THRESHOLD", "0.6")):
+                logger.info(f"Clap detected! confidence={result.confidence:.3f}")
+                if self.callback:
+                    self.callback()
+        except Exception as e:
+            logger.error(f"Error in wake word processing: {e}")
 
     def start(self, callback):
         self.callback = callback

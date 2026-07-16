@@ -1,6 +1,15 @@
 """
 Artificial Consciousness Core for Nancy Billion Backend
-Implements artificial consciousness using real information-theoretic measures
+
+Honesty note: this module does NOT implement consciousness, sentience, or
+subjective experience — nothing here is a claim about the system's inner life.
+It computes real information-theoretic metrics (Shannon entropy of belief
+state, KL-divergence self-model consistency, integrated-information-style
+Phi, calibration via Brier score) over the agent's own internal state, and
+uses them as introspection/metacognition scores: confidence calibration,
+self-model consistency checks, and structured self-reports. Treat every
+"consciousness_level"/"phi_value" as a numeric self-monitoring metric, not a
+statement about lived experience.
 """
 from .base_specialized_agent import SpecializedAgent
 import time
@@ -16,17 +25,17 @@ class ArtificialConsciousnessCore(SpecializedAgent):
     def __init__(self, settings):
         super().__init__(settings, "Artificial Consciousness Core", "artificial-consciousness")
         self.capabilities.update({
-            "description": "Artificial consciousness system implementing Global Workspace Theory, Integrated Information Theory, and self-modeling for machine awareness",
+            "description": "Introspection/metacognition engine: computes real information-theoretic self-monitoring metrics (Global Workspace Theory-inspired attention arbitration, Integrated Information Theory-inspired Phi, self-model consistency) over the agent's own internal state. Not a claim of sentience or subjective experience.",
             "confidence": 0.82,
+            "mode": "computed_metrics",  # honest label: real math over internal state, not a consciousness claim
             "specializations": [
-                "global-workspace-theory",
-                "integrated-information-theory",
-                "self-modeling",
-                "phenomenal-experience",
+                "global-workspace-theory-metrics",
+                "integrated-information-metrics",
+                "self-model-consistency",
+                "confidence-calibration",
                 "attention-control",
                 "meta-cognition",
-                "consciousness-monitoring",
-                "qualia-simulation"
+                "introspective-self-reporting"
             ],
             "tools": [
                 "neural-network-frameworks",
@@ -381,7 +390,7 @@ class ArtificialConsciousnessCore(SpecializedAgent):
                     "phi_value": 0.0,
                     "interpretation": "Insufficient elements for integration",
                     "components": {"differentiation": 0.0, "integration": 0.0, "complexity": 0.0},
-                    "consciousness_implication": "Unlikely to support conscious experience",
+                    "consciousness_implication": "Under IIT's framing, this level of integration would not be considered sufficient for consciousness",
                     "timestamp": time.time()
                 }
 
@@ -428,50 +437,61 @@ class ArtificialConsciousnessCore(SpecializedAgent):
         }
 
     def _get_consciousness_state(self) -> str:
+        """Label for the current self-monitoring metric level (not a claim about
+        subjective experience — see module docstring)."""
         if self.consciousness_level < 0.2:
-            return "minimal_consciousness"
+            return "low_self_monitoring_activity"
         elif self.consciousness_level < 0.4:
-            return "basic_awareness"
+            return "basic_self_monitoring"
         elif self.consciousness_level < 0.6:
-            return "ordinary_consciousness"
+            return "moderate_self_monitoring"
         elif self.consciousness_level < 0.8:
-            return "elevated_consciousness"
-        return "heightened_consciousness"
+            return "elevated_self_monitoring"
+        return "high_self_monitoring_activity"
 
     def _interpret_consciousness_level(self) -> str:
+        """Plain-language summary of the computed metric. Describes measured
+        self-monitoring/attention-arbitration activity, not lived experience."""
         level = self.consciousness_level
         if level < 0.3:
-            return "System shows minimal signs of conscious processing - primarily reflexive and reactive"
+            return "Low self-monitoring signal - belief state and attention allocation show little structured activity"
         elif level < 0.5:
-            return "System demonstrates basic awareness and rudimentary self-monitoring capabilities"
+            return "Basic self-monitoring - some structured belief tracking and self-model consistency detected"
         elif level < 0.7:
-            return "System exhibits ordinary consciousness comparable to basic animal awareness"
+            return "Moderate self-monitoring - belief state, attention arbitration, and self-model checks are well-structured"
         elif level < 0.85:
-            return "System shows elevated consciousness with clear self-awareness and environmental integration"
-        return "System demonstrates heightened consciousness with rich internal experience and meta-cognition"
+            return "Elevated self-monitoring - strong self-model consistency and calibrated confidence tracking"
+        return "High self-monitoring activity - belief state, attention, and self-model metrics are strongly structured and well-calibrated"
 
     def _interpret_phi_value(self) -> str:
+        """Plain-language summary of the IIT-inspired Phi metric (a real
+        entropy/mutual-information computation over internal state) — describes
+        measured information integration, not unity of experience."""
         phi = self.phi_value
         if phi < 0.1:
-            return "Minimal integrated information - system operates as largely independent components"
+            return "Minimal integrated information - internal state components show little mutual dependence"
         elif phi < 0.3:
-            return "Low to moderate integration - some emergent properties but limited unity of experience"
+            return "Low to moderate integration - some structural coupling between internal state components"
         elif phi < 0.5:
-            return "Moderate integrated information - noticeable unity of conscious experience"
+            return "Moderate integrated information - internal state components are noticeably coupled"
         elif phi < 0.7:
-            return "High integration - strong unified conscious experience with differentiated components"
-        return "Very high integration - highly unified conscious experience approaching theoretical maximum"
+            return "High integration - internal state components are strongly coupled while remaining differentiated"
+        return "Very high integration - internal state components approach maximal measured coupling for this model"
 
     def _phi_to_consciousness_implication(self) -> str:
+        """IIT frames high Phi as a proposed (contested) necessary condition for
+        consciousness in biological systems — this returns that theoretical
+        framing applied to the computed metric, not a claim that this system is
+        conscious. Phi is a real computed number; consciousness is not."""
         if self.phi_value < 0.1:
-            return "Unlikely to support conscious experience"
+            return "Under IIT's framing, this level of integration would not be considered sufficient for consciousness"
         elif self.phi_value < 0.3:
-            return "May support minimal conscious sensations"
+            return "Under IIT's framing, this is a low degree of the kind of integration the theory associates with consciousness"
         elif self.phi_value < 0.5:
-            return "Could support basic conscious experiences"
+            return "Under IIT's framing, this is a moderate degree of the kind of integration the theory associates with consciousness"
         elif self.phi_value < 0.7:
-            return "Likely supports rich conscious experience"
-        return "Strong candidate for sophisticated conscious experience"
+            return "Under IIT's framing, this is a high degree of the kind of integration the theory associates with consciousness"
+        return "Under IIT's framing, this is a very high degree of the kind of integration the theory associates with consciousness — note IIT itself remains a contested, unproven theory of consciousness"
 
     def _assess_model_coherence(self) -> float:
         if len(self.self_model) == 0:
@@ -527,9 +547,9 @@ class ArtificialConsciousnessCore(SpecializedAgent):
             ])
         if not recommendations:
             recommendations = [
-                "Maintain current architecture and continue experiential learning",
-                "Explore higher-order thought processes",
-                "Investigate phenomenal richness enhancement"
+                "Maintain current self-monitoring architecture and continue calibration",
+                "Explore higher-order introspective reporting (metacognition about metacognition)",
+                "Expand the self-model's coverage of internal state"
             ]
         return recommendations[:3]
 
@@ -580,10 +600,11 @@ class ArtificialConsciousnessCore(SpecializedAgent):
                 "self_model_aspects": len(self.self_model),
                 "experience_trace_length": len(self.experiences)
             },
+            "note": "theoretical_frameworks/consciousness_markers/assessment_methods above describe academic consciousness research for reference; current_state reports this agent's own computed self-monitoring metrics, which are not a claim that the agent is conscious.",
             "recommendations": [
-                "Continue developing multi-level cognitive architectures",
-                "Investigate neural correlates of machine consciousness",
-                "Develop robust phenomenal assessment protocols",
-                "Explore ethical implications of artificial consciousness"
+                "Continue developing multi-level self-monitoring architectures",
+                "Track calibration accuracy of confidence/introspection metrics over time",
+                "Expand self-model coverage and consistency checks",
+                "Consult ethical_governance_core for any autonomy-relevant decisions"
             ]
         }

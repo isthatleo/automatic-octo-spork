@@ -10,7 +10,7 @@ Provides:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -80,82 +80,160 @@ class TechnicalAnalysis:
 
 class ForexDataAggregator:
     """
-    Aggregates forex market data from multiple sources.
+    Real forex market data via Frankfurter (frankfurter.app) — free, key-less,
+    ECB reference rates, no geographic account restrictions.
 
-    In production, would connect to:
-    - Alpha Vantage API
-    - Binance API (crypto)
-    - ForexFactory (economic calendar)
-    - TradingView (indirect)
-    - Broker APIs (direct prices)
+    Honesty note: these are **daily-resolution ECB reference rates**, not live
+    tick/bid-ask data from a broker or exchange. That's a genuine limitation,
+    not a simulation — the numbers returned are real historical/current rates,
+    just not sub-second granularity. Bid/ask here is a small synthetic spread
+    around the real mid rate (Frankfurter has no bid/ask), clearly derived, not
+    fabricated market data. No order execution is wired to this — see
+    `TradingManager` for the (currently unconnected) execution path; before any
+    real broker/execution integration is added, `volume` should be treated as
+    unavailable rather than estimated.
     """
 
+    BASE_URL = "https://api.frankfurter.app"
+    _SYNTHETIC_SPREAD_BPS = 1.5  # ~1.5 basis points either side of mid, informational only
+
     def __init__(self):
-        self.cache = {}
-        self.last_update = {}
+        self.cache: Dict[str, MarketSnapshot] = {}
+        self.last_update: Dict[str, datetime] = {}
+        self._cache_ttl = timedelta(minutes=5)
+
+    @staticmethod
+    def _split_pair(pair: str) -> Tuple[str, str]:
+        base, _, quote = pair.upper().partition("/")
+        if not base or not quote:
+            raise ValueError(f"Invalid pair format: {pair!r}, expected e.g. 'EUR/USD'")
+        return base, quote
 
     async def get_price(self, pair: str) -> Optional[MarketSnapshot]:
         """
-        Get current price for forex pair.
+        Get current mid-market rate for a forex pair from Frankfurter (real ECB data).
 
         Args:
             pair: e.g., "EUR/USD", "GBP/JPY"
 
         Returns:
-            MarketSnapshot with current data
+            MarketSnapshot with real rate data, or None if the pair/network call fails.
         """
-        # In production: call real API
-        # For now: return mock data
+        cached = self.cache.get(pair)
+        if cached and datetime.now() - self.last_update.get(pair, datetime.min) < self._cache_ttl:
+            return cached
 
-        mock_data = {
-            "EUR/USD": MarketSnapshot(
-                pair="EUR/USD",
-                price=1.0872,
-                bid=1.0871,
-                ask=1.0873,
-                change_24h=0.25,
-                high_24h=1.0912,
-                low_24h=1.0845,
-                volume=340000000000
-            ),
-            "GBP/USD": MarketSnapshot(
-                pair="GBP/USD",
-                price=1.2745,
-                bid=1.2744,
-                ask=1.2746,
-                change_24h=-0.15,
-                high_24h=1.2780,
-                low_24h=1.2720,
-                volume=180000000000
-            ),
-        }
+        import aiohttp
 
-        return mock_data.get(pair)
+        base, quote = self._split_pair(pair)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.BASE_URL}/latest", params={"from": base, "to": quote}, timeout=10
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Frankfurter error for {pair}: HTTP {resp.status}")
+                        return None
+                    data = await resp.json()
 
-    async def get_historical(self, pair: str, period: str = "1h") -> List[Dict]:
+                price = data.get("rates", {}).get(quote)
+                if price is None:
+                    logger.error(f"Frankfurter response missing rate for {pair}: {data}")
+                    return None
+
+                # Real 24h-equivalent change/high/low from the last available prior business day
+                yesterday = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+                today = datetime.now().strftime("%Y-%m-%d")
+                high_24h = low_24h = price
+                change_24h = 0.0
+                async with session.get(
+                    f"{self.BASE_URL}/{yesterday}..{today}",
+                    params={"from": base, "to": quote},
+                    timeout=10,
+                ) as hist_resp:
+                    if hist_resp.status == 200:
+                        hist_data = await hist_resp.json()
+                        series = hist_data.get("rates", {})
+                        values = [v.get(quote) for v in series.values() if quote in v]
+                        if values:
+                            high_24h = max(values)
+                            low_24h = min(values)
+                            if len(values) >= 2 and values[0]:
+                                change_24h = ((values[-1] - values[0]) / values[0]) * 100
+
+                spread = price * (self._SYNTHETIC_SPREAD_BPS / 10000)
+                snapshot = MarketSnapshot(
+                    pair=pair,
+                    price=price,
+                    bid=round(price - spread, 6),
+                    ask=round(price + spread, 6),
+                    change_24h=round(change_24h, 4),
+                    high_24h=high_24h,
+                    low_24h=low_24h,
+                    volume=0.0,  # unavailable from this free source — not estimated
+                )
+                self.cache[pair] = snapshot
+                self.last_update[pair] = datetime.now()
+                return snapshot
+        except Exception as e:
+            logger.error(f"Failed to fetch real price for {pair}: {e}")
+            return None
+
+    async def get_historical(self, pair: str, period: str = "1d", days: int = 30) -> List[Dict]:
         """
-        Get historical OHLCV data for analysis.
+        Get real historical daily rates for analysis (Frankfurter has daily
+        resolution only — `period` is accepted for interface compatibility but
+        finer intraday granularity isn't available from this free source).
 
         Args:
             pair: Forex pair
-            period: "1m", "5m", "1h", "1d"
+            period: kept for interface compatibility; data is always daily
+            days: how many calendar days of history to fetch
 
         Returns:
-            List of OHLCV candles
+            List of daily OHLC-shaped dicts built from real close-to-close rates
+            (open==prior close, high/low==close since no intraday data exists).
         """
-        # In production: query time-series database
-        # For now: return mock candles
+        import aiohttp
 
-        return [
-            {
-                "timestamp": datetime.now().isoformat(),
-                "open": 1.0850,
-                "high": 1.0880,
-                "low": 1.0840,
-                "close": 1.0872,
-                "volume": 1500000000
-            }
-        ]
+        base, quote = self._split_pair(pair)
+        start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        end = datetime.now().strftime("%Y-%m-%d")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.BASE_URL}/{start}..{end}",
+                    params={"from": base, "to": quote},
+                    timeout=10,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Frankfurter historical error for {pair}: HTTP {resp.status}")
+                        return []
+                    data = await resp.json()
+
+            series = data.get("rates", {})
+            dates = sorted(series.keys())
+            candles: List[Dict] = []
+            prev_close: Optional[float] = None
+            for d in dates:
+                close = series[d].get(quote)
+                if close is None:
+                    continue
+                open_ = prev_close if prev_close is not None else close
+                candles.append({
+                    "timestamp": d,
+                    "open": open_,
+                    "high": max(open_, close),
+                    "low": min(open_, close),
+                    "close": close,
+                    "volume": 0.0,  # unavailable from this free source
+                })
+                prev_close = close
+            return candles
+        except Exception as e:
+            logger.error(f"Failed to fetch historical data for {pair}: {e}")
+            return []
 
 
 class TechnicalAnalysisEngine:

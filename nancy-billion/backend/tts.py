@@ -125,7 +125,15 @@ class Pyttsx3TTS(TTSBackend):
 
 
 def get_tts_backend():
-    backend_type = os.getenv("TTS_BACKEND", "pyttsx3").lower()
+    backend_type = os.getenv("TTS_BACKEND", "neutts").lower()
+    if backend_type == "neutts":
+        try:
+            from neu_tts import NeuTTSBackend
+
+            return NeuTTSBackend()
+        except Exception as e:
+            logger.warning(f"NeuTTS backend unavailable ({e}), falling back to pyttsx3")
+            return Pyttsx3TTS()
     if backend_type == "pyttsx3":
         return Pyttsx3TTS()
     logger.warning(f"Unknown TTS backend {backend_type}, falling back to pyttsx3")

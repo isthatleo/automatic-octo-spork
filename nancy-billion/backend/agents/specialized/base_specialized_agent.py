@@ -222,4 +222,10 @@ class SpecializedAgent(BaseAgent):
             "status":          "online" if self._initialized else "idle",
             "load":            min(100, len(self.task_queue) * 10 + (10 if self.is_processing else 0)),
             "total_tasks":     self._total_tasks,
+            # Honesty flags (default real/production for most agents; agents
+            # working with hardware that isn't connected, or that are pure
+            # internal simulations, override these in their own capabilities
+            # dict — see e.g. neural_interface_agent.py, multi_agent_swarm_coordinator.py).
+            "mode":              self.capabilities.get("mode", "production"),
+            "hardware_connected": self.capabilities.get("hardware_connected"),
         }

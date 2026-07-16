@@ -1,6 +1,18 @@
 """
 Multi-Agent Swarm Coordinator for Nancy Billion Backend
 Coordinates distributed intelligence and agent collaboration
+
+Honesty note: despite the name, this agent does NOT delegate tasks to the
+other 28 real specialized agents in this system — `registered_agents` is
+purely internal simulated state (populated only when a caller explicitly
+calls `register-agent`, with arbitrary self-reported capabilities), and
+`_facilitate_consensus` generates opinions via `random.uniform`, not by
+querying real agents. It's a standalone simulation of swarm-coordination
+theory (task queues, consensus protocols, load balancing), useful for
+demonstrating/prototyping those algorithms, not a live dispatcher. Real
+routing to the other 28 agents happens via `agents/agent_service.py`
+(`auto_run`/`run`), which `main_new.py`'s `/chat` and `/agents/*` endpoints
+actually use.
 """
 from .base_specialized_agent import SpecializedAgent
 import asyncio
@@ -15,8 +27,9 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
     def __init__(self, settings):
         super().__init__(settings, "Multi-Agent Swarm Coordinator", "swarm-coordinator")
         self.capabilities.update({
-            "description": "Distributed intelligence system coordinating multiple AI agents for collective problem-solving and emergent intelligence",
+            "description": "Standalone simulation of swarm-coordination algorithms (task queues, consensus protocols, load balancing) over self-reported agent metadata. Does NOT dispatch to this system's real 28 other agents — see agents/agent_service.py for real routing.",
             "confidence": 0.85,
+            "mode": "internal_simulation",
             "specializations": [
                 "swarm-intelligence",
                 "distributed-problem-solving",

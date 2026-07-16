@@ -310,10 +310,13 @@ class MoralReasoningEngine:
             score = max(-1.0, min(1.0, score))
             reasoning = f"Care ethics: preserves_trust={preserves_trust}"
 
-        # Add small noise to simulate genuine deliberation uncertainty
-        noise     = random.gauss(0, 0.03)
-        score     = max(-1.0, min(1.0, score + noise))
-        confidence = max(0.5, 1.0 - abs(noise) * 5)
+        # Confidence heuristic: clear-cut scores (near +/-1) are more confident
+        # than borderline ones (near 0) — this is a real signal derived from the
+        # score itself, not decorative randomness. (Previously this added Gaussian
+        # noise "to simulate deliberation uncertainty" and derived confidence from
+        # that same synthetic noise, which was circular and not a real uncertainty
+        # measure — removed.)
+        confidence = round(0.5 + 0.5 * abs(score), 4)
 
         return FrameworkScore(
             framework  = fw,

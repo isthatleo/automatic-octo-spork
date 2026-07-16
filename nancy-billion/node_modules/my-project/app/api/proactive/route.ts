@@ -3,6 +3,7 @@ import { proactiveAssistant } from '@/lib/nancy/proactive-assistant'
 
 export async function GET() {
   try {
+    proactiveAssistant.initialize()
     const suggestions = proactiveAssistant.getActiveSuggestions(10)
     return NextResponse.json({ suggestions })
   } catch (error) {

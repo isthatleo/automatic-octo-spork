@@ -14,6 +14,8 @@ import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
 import { LyricsTranscript } from '@/components/nancy/lyrics-transcript'
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
+import { askNancy } from '@/lib/nancy/ws-client'
+import { synthesizeSpeech } from '@/lib/nancy/tts-client'
 import { geocode } from '@/lib/nancy/geocode'
 import type { LogEntry, PanelKey, Place } from '@/lib/nancy/types'
 import { cn } from '@/lib/utils'
@@ -45,6 +47,8 @@ export default function Page() {
   const [currentUtterance, setCurrentUtterance] = useState('')
   const [wordIndex, setWordIndex] = useState(-1)
   const launchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null)
+  const wordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const log = useCallback((level: LogEntry['level'], text: string) => {
     setLogs((prev) =>
@@ -56,13 +60,19 @@ export default function Page() {
     (text: string) => {
       // Interrupt any current speech cleanly first — prevents overlap glitches.
       cancelSpeech()
+      currentAudioRef.current?.pause()
+      currentAudioRef.current = null
+      if (wordTimerRef.current) {
+        clearInterval(wordTimerRef.current)
+        wordTimerRef.current = null
+      }
       log('nancy', text)
       setCurrentUtterance(text)
       setSpeaking(true)
       setWordIndex(-1)
       sfx.confirm()
 
-      // Compute word start-char offsets so onboundary → word index maps cleanly.
+      // Compute word start-char offsets so boundary/timing → word index maps cleanly.
       const starts: number[] = []
       let cursor = 0
       const words = text.split(/(\s+)/) // keep whitespace tokens
@@ -70,22 +80,68 @@ export default function Page() {
         if (tok.trim()) starts.push(cursor)
         cursor += tok.length
       }
-      speak(text, {
-        onStart: () => setWordIndex(0),
-        onBoundary: (charIndex) => {
-          // Find the last word whose start <= charIndex
-          let idx = 0
-          for (let i = 0; i < starts.length; i++) {
-            if (starts[i] <= charIndex) idx = i
-            else break
+
+      // Fallback: browser Web Speech API (used if the backend's real neural
+      // voice — neu_tts.py — is unreachable or synthesis fails).
+      const speakLocally = () => {
+        speak(text, {
+          onStart: () => setWordIndex(0),
+          onBoundary: (charIndex) => {
+            let idx = 0
+            for (let i = 0; i < starts.length; i++) {
+              if (starts[i] <= charIndex) idx = i
+              else break
+            }
+            setWordIndex(idx)
+          },
+          onEnd: () => {
+            setSpeaking(false)
+            setWordIndex(-1)
+          },
+        })
+      }
+
+      synthesizeSpeech(text)
+        .then(({ audioUrl, durationMs }) => {
+          const audio = new Audio(audioUrl)
+          currentAudioRef.current = audio
+
+          const cleanup = () => {
+            if (wordTimerRef.current) {
+              clearInterval(wordTimerRef.current)
+              wordTimerRef.current = null
+            }
+            if (currentAudioRef.current === audio) currentAudioRef.current = null
+            setSpeaking(false)
+            setWordIndex(-1)
+            URL.revokeObjectURL(audioUrl)
           }
-          setWordIndex(idx)
-        },
-        onEnd: () => {
-          setSpeaking(false)
-          setWordIndex(-1)
-        },
-      })
+
+          audio.addEventListener('play', () => {
+            setWordIndex(0)
+            // NeuTTS doesn't emit per-word boundary events like the Web Speech
+            // API does — approximate by spreading words evenly across the
+            // real decoded audio duration instead of fabricating exact timing.
+            if (durationMs > 0 && starts.length > 0) {
+              const startedAt = Date.now()
+              wordTimerRef.current = setInterval(() => {
+                const elapsed = Date.now() - startedAt
+                const idx = Math.min(starts.length - 1, Math.floor((elapsed / durationMs) * starts.length))
+                setWordIndex(idx)
+              }, 80)
+            }
+          })
+          audio.addEventListener('ended', cleanup)
+          audio.addEventListener('error', () => {
+            cleanup()
+            speakLocally()
+          })
+          audio.play().catch(() => {
+            cleanup()
+            speakLocally()
+          })
+        })
+        .catch(() => speakLocally())
     },
     [log],
   )
@@ -152,8 +208,16 @@ export default function Page() {
           nancySay(result.reply)
           break
         case 'unknown':
-          sfx.error()
-          nancySay(result.reply)
+          setThinking(true)
+          askNancy(input)
+            .then((reply) => {
+              nancySay(reply || result.reply)
+            })
+            .catch(() => {
+              sfx.error()
+              nancySay(result.reply)
+            })
+            .finally(() => setThinking(false))
           break
       }
     },

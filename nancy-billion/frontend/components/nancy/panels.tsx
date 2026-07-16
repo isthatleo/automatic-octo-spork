@@ -5,6 +5,7 @@ import { ArcReactor, HudPanel, RadialGauge, StatBar } from './hud-bits'
 import type { AgentInfo } from '@/lib/nancy/types'
 import { listAgents, autoRouteAgent, type AgentListResponse } from '@/lib/nancy/agent-client'
 import { AgentTaskModal } from './agent-task-modal'
+import { useSystemHealth } from '@/hooks/useSystemData'
 import {
   Activity,
   Cpu,
@@ -38,7 +39,6 @@ import {
   AlertTriangle,
   Eye,
   Thermometer,
-  Gauge,
   Flame,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -69,10 +69,10 @@ function useTick(ms = 1000) {
    Big hero arc-reactor, live rings, world telemetry, comms feed.
    ═══════════════════════════════════════════════════════════════ */
 export function OverviewPanel() {
-  const cpu = useJitter(52, 8)
-  const mem = useJitter(63, 6)
-  const net = useJitter(38, 10)
-  const gpu = useJitter(74, 7)
+  const health = useSystemHealth()
+  const cpu = health.cpu ?? 0
+  const mem = health.memory ?? 0
+  const net = health.networkPercent ?? 0
   const tick = useTick(1200)
 
   return (
@@ -99,8 +99,8 @@ export function OverviewPanel() {
               </div>
               <StatBar label="Neural CPU" value={cpu.toFixed(0)} unit="%" pct={cpu} />
               <StatBar label="Memory" value={mem.toFixed(0)} unit="%" pct={mem} amber />
-              <StatBar label="GPU Cortex" value={gpu.toFixed(0)} unit="%" pct={gpu} />
-              <StatBar label="Uplink" value={`${(net * 12).toFixed(0)}`} unit="Mb/s" pct={net} />
+              <StatBar label="GPU Cortex" value="N/A" unit="" pct={0} />
+              <StatBar label="Uplink" value={net.toFixed(0)} unit="%" pct={net} />
             </div>
           </div>
         </HudPanel>
@@ -163,7 +163,7 @@ export function OverviewPanel() {
         <HudPanel title="Deep Space Uplink" right={<span className="text-primary">ACTIVE</span>}>
           <div className="flex flex-wrap items-center justify-around gap-2 py-1">
             <RadialGauge value={cpu} label="Cognition" color="var(--hud)" size={92} />
-            <RadialGauge value={gpu} label="Inference" color="var(--accent)" size={92} />
+            <RadialGauge value={0} sub="N/A" label="Inference" color="var(--accent)" size={92} />
             <RadialGauge value={94} label="Sync" color="var(--hud)" size={92} />
           </div>
         </HudPanel>
@@ -534,6 +534,20 @@ function AgentCard({ agent, onClick }: { agent: AgentInfo; onClick: () => void }
         </span>
       </div>
       <p className="text-[0.5rem] text-muted-foreground truncate">{agent.domain}</p>
+      {(agent.mode && agent.mode !== 'production') || agent.hardware_connected === false ? (
+        <div className="flex flex-wrap gap-1">
+          {agent.mode && agent.mode !== 'production' && (
+            <span className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[0.4rem] uppercase tracking-widest text-accent">
+              {agent.mode.replace(/_/g, ' ')}
+            </span>
+          )}
+          {agent.hardware_connected === false && (
+            <span className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[0.4rem] uppercase tracking-widest text-accent">
+              no hardware
+            </span>
+          )}
+        </div>
+      ) : null}
       <div className="flex items-center gap-2">
         <div className="h-1 flex-1 overflow-hidden rounded-full bg-background/60">
           <div className="h-full rounded-full transition-all duration-500"
@@ -739,10 +753,11 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
     return () => clearInterval(t)
   }, [])
 
-  const cpu = useJitter(52, 8)
-  const mem = useJitter(63, 5)
-  const disk = useJitter(41, 4)
-  const net = useJitter(38, 12)
+  const health = useSystemHealth()
+  const cpu = health.cpu ?? 0
+  const mem = health.memory ?? 0
+  const disk = health.disk ?? 0
+  const net = health.networkPercent ?? 0
 
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
@@ -754,9 +769,8 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
               { icon: Cpu, label: 'CPU', v: `${cpu.toFixed(0)}%` },
               { icon: Database, label: 'MEM', v: `${mem.toFixed(0)}%` },
               { icon: Folder, label: 'DISK', v: `${disk.toFixed(0)}%` },
-              { icon: Signal, label: 'NET', v: `${(net * 12).toFixed(0)} Mb/s` },
-              { icon: Thermometer, label: 'TEMP', v: '42° C' },
-              { icon: Gauge, label: 'RPM', v: '1420' },
+              { icon: Signal, label: 'NET', v: `${net.toFixed(0)}%` },
+              { icon: Thermometer, label: 'TEMP', v: health.tempC != null ? `${health.tempC.toFixed(0)}° C` : 'N/A' },
             ].map(({ icon: Icon, label, v }) => (
               <div key={label} className="flex items-center gap-2 rounded border border-border/50 bg-secondary/20 p-2">
                 <Icon className="h-4 w-4 text-primary" />
