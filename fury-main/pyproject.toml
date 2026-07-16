@@ -31,7 +31,7 @@ tts = [
     "phonemizer",
     "llama-cpp-python",
     "neucodec",
-    "onnxruntime>=1.17.3,<1.24",
+    "onnxruntime>=1.17.3",
     "huggingface-hub>=1.4.1",
 ]
 

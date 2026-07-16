@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+
+# Voice-cloning reference clips (including your real uploaded voice, and the
+# auto-generated synthetic placeholder) — never commit voice/biometric data.
+voice_ref/
+
+# Runtime state: conversation history (fury HistoryManager) and the memory
+# store (MEMORY_DB_PATH) — private data, not source, and grows on every run.
+data/

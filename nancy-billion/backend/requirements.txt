@@ -1,4 +1,10 @@
-fury-sdk>=0.1.0
+# fury-sdk isn't published to PyPI; install from the sibling satellite repo.
+# [tts] pulls in NeuTTS-nano's real deps (torch CPU, llama-cpp-python, neucodec,
+# onnxruntime, phonemizer) used by neu_tts.py — also needs the espeak-ng system
+# library (see the TTS section below) and, for llama-cpp-python on Windows with
+# no local C++ toolchain, a prebuilt wheel:
+#   pip install llama-cpp-python --prefer-binary --only-binary=:all: --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+-e ../../fury-main[tts]
 faster-whisper>=0.9.0
 pyttsx3>=2.90
 python-socketio>=5.9.0
@@ -18,7 +24,19 @@ nltk>=3.8.0
 pypdf>=4.0.0
 # pdfplumber>=0.11.0  # optional; uncomment if preferred
 
+# Claude backend — required for AnthropicLLM (llm.py); official SDK, not raw HTTP
+anthropic>=0.40.0
+# aiosqlite for persistent memory storage (see memory/manager.py)
+aiosqlite>=0.20.0
+
 # Optional LLM provider backends (install as needed)
-# anthropic>=0.7.0
 # openai>=1.0.0
 # google-generativeai>=0.3.0
+
+# Clap detection (clap_detection.py, satellite repo ../../clap-detection-main).
+# Heavy (~1-2GB); uncomment once you have pretrained weights (see that repo's
+# README) — without them CLAP_MODEL_PATH won't resolve and the feature reports
+# unavailable regardless of whether these are installed.
+# torch
+# torchaudio
+# torchvision

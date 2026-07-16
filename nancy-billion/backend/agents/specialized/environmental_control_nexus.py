@@ -1,6 +1,14 @@
 """
 Environmental Control Nexus - Real computation version
 Handles environmental automation and IoT orchestration with real calculations
+(thermodynamics, NOAA heat-index regression, Magnus dew-point formula, real
+regression/seasonality/correlation stats over stored sensor history).
+
+Honesty note: no smart-home hub or IoT devices are connected on this
+deployment (software-only by design). The math above is real; "devices_affected"
+in control responses lists devices that WOULD be actuated if a real hub (e.g.
+Home Assistant's REST API) were connected — no physical device is controlled.
+See `hardware_connected` in status/control responses.
 """
 from .base_specialized_agent import SpecializedAgent
 import time
@@ -20,10 +28,12 @@ class EnvironmentalControlNexus(SpecializedAgent):
     def __init__(self, settings):
         super().__init__(settings, "Environmental Control Nexus", "environmental-control")
         self.capabilities.update({
-            "description": "Environmental control system for IoT orchestration and ambient intelligence",
+            "description": "Real environmental computation (thermodynamics, heat index, dew point, regression/seasonality stats) for climate/lighting/air-quality automation. No smart-home hub or IoT devices connected — control actions are computed, not physically actuated.",
             "confidence": 0.86,
-            "specializations": ["climate_control", "lighting_automation", "air_quality", "iot_orchestration"],
-            "tools": ["smart_home_hub", "iot_devices", "sensor_networks"]
+            "mode": "simulated",  # no smart-home hub / IoT devices connected
+            "hardware_connected": False,
+            "specializations": ["climate_control_math", "lighting_automation", "air_quality_math", "iot_orchestration"],
+            "designed_for_integration": ["home_assistant_rest_api", "smart_home_hub", "iot_devices", "sensor_networks"],
         })
         self.active_scenes = {}
         self.device_status = {}
@@ -150,15 +160,16 @@ class EnvironmentalControlNexus(SpecializedAgent):
 
         return {
             "success": True,
-            "type": "environment_controlled",
+            "type": "environment_control_computed",  # no hub connected — computed command, not physically actuated
+            "hardware_connected": False,
             "command_id": command_id,
             "control_type": control_type,
             "zone": zone,
             "target_settings": target,
             "timestamp": time.time(),
             "execution_time_ms": round(hvac["energy_joules"] / 60000, 2),
-            "devices_affected": devices,
-            "status": "success",
+            "devices_that_would_be_affected": devices,
+            "status": "computed_no_hardware",
             "energy_impact": hvac,
             "feedback": ["sensor_verification", "status_confirmation"],
             "recommendations": self._get_control_recommendations(control_type, target)

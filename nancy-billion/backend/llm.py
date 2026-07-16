@@ -103,45 +103,76 @@ class OllamaLLM(LLMBackend):
                     raise Exception(f"Ollama error: {resp.status} - {text}")
 
 class AnthropicLLM(LLMBackend):
+    """Claude backend via the official `anthropic` SDK.
+
+    Sampling params (temperature/top_p/top_k) are intentionally never sent —
+    Claude Opus 4.8 and later reject them with a 400. Callers that need
+    variance should adjust the prompt, not this backend's `temperature` param
+    (kept only for LLMBackend interface compatibility).
+    """
+
     def __init__(self):
         self.api_key = os.getenv("ANTHROPIC_API_KEY")
         if not self.api_key:
             logger.warning("ANTHROPIC_API_KEY not set; Anthropic LLM will not function")
-        self.model = os.getenv("ANTHROPIC_MODEL", "claude-3-opus-20240229")
+        self.model = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
+        self._client = None
         logger.info(f"AnthropicLLM initialized with model={self.model}")
 
-    async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
-        import aiohttp
-        import json
-        url = "https://api.anthropic.com/v1/complete"
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-        # Note: Anthropic's API expects a different format, we are using the older /v1/complete for simplicity.
-        # For the newer messages API, we would use a different structure.
-        # We'll use the older one for now, but note that it is deprecated.
-        # Alternatively, we can use the newer messages API.
-        # Let's use the newer messages API as per the documentation.
-        # We'll change to the messages API.
-        url = "https://api.anthropic.com/v1/messages"
-        payload = {
+    def _get_client(self):
+        if self._client is None:
+            import anthropic
+            self._client = anthropic.AsyncAnthropic(api_key=self.api_key)
+        return self._client
+
+    async def generate(
+        self,
+        prompt: str,
+        max_tokens: int = 512,
+        temperature: float = 0.7,
+        effort: str | None = None,
+    ) -> str:
+        if not self.api_key:
+            raise Exception("ANTHROPIC_API_KEY not configured")
+        client = self._get_client()
+        kwargs: dict = {
             "model": self.model,
             "max_tokens": max_tokens,
-            "temperature": temperature,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ]
+            "messages": [{"role": "user", "content": prompt}],
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    return result["content"][0]["text"]
-                else:
-                    text = await resp.text()
-                    raise Exception(f"Anthropic error: {resp.status} - {text}")
+        if effort:
+            kwargs["output_config"] = {"effort": effort}
+        try:
+            response = await client.messages.create(**kwargs)
+        except Exception as e:
+            raise Exception(f"Anthropic error: {e}")
+        for block in response.content:
+            if block.type == "text":
+                return block.text
+        raise Exception("Anthropic returned no text content")
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        max_tokens: int = 512,
+        temperature: float = 0.7,
+        effort: str | None = None,
+    ):
+        """Yield text deltas as they arrive. Not part of the LLMBackend interface
+        (other backends don't stream yet) — call directly when streaming is wanted."""
+        if not self.api_key:
+            raise Exception("ANTHROPIC_API_KEY not configured")
+        client = self._get_client()
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if effort:
+            kwargs["output_config"] = {"effort": effort}
+        async with client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                yield text
 
 class OpenAILLM(LLMBackend):
     def __init__(self):
@@ -521,7 +552,10 @@ def select_llm_for_task(task_hint: str | None = None) -> LLMBackend:
     task = task_hint.lower().strip()
 
     # Coding-specific tasks → use Claude if available
-    if any(x in task for x in ["coding", "code", "debug", "programming", "development", "refactor"]):
+    if any(x in task for x in [
+        "coding", "code", "debug", "programming", "development", "refactor",
+        "devops", "self_improvement", "self-improv", "architecture",
+    ]):
         try:
             if os.getenv("ANTHROPIC_API_KEY"):
                 logger.info(f"Using AnthropicLLM for coding task: {task_hint}")

@@ -22,6 +22,10 @@ export interface AgentInfo {
   specializations: string[]
   total_tasks: number
   error?: string
+  /** Honesty flags from the backend (see base_specialized_agent.get_info):
+   *  'production' unless the agent runs on simulated data or unattached hardware. */
+  mode?: string
+  hardware_connected?: boolean | null
 }
 
 export interface AgentTask {

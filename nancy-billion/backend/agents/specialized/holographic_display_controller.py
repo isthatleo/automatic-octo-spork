@@ -4,15 +4,23 @@ import time
 from typing import Dict, Any, List, Tuple
 
 class HolographicDisplayController(SpecializedAgent):
-    """Compact holographic display controller"""
+    """Real optics math (projection matrices, Fraunhofer diffraction, beam-steering
+    angles) for a volumetric/holographic display. Honesty note: no light-field or
+    volumetric hardware is connected on this deployment (software-only by design)
+    — `_project_hologram` computes real render parameters but nothing physically
+    projects them. Pair with a real WebGL/three.js scene in the frontend for an
+    actual visual output; a Looking Glass or similar light-field display is a
+    documented future extension point, not a current integration."""
 
     def __init__(self, settings):
         super().__init__(settings, "Holographic Display Controller", "holographic-display")
         self.capabilities.update({
-            "description": "3D holographic display controller for spatial visualization and interaction",
+            "description": "Real optics/projection math for 3D holographic-style visualization (projection matrices, diffraction, beam steering). No physical holographic/light-field hardware connected — pair with WebGL frontend rendering for actual visual output.",
             "confidence": 0.84,
-            "specializations": ["3d_rendering", "spatial_interaction", "holographic_projection"],
-            "tools": ["light_field_display", "volumetric_display", "ar_headsets"]
+            "mode": "simulated",  # no light-field/volumetric hardware connected
+            "hardware_connected": False,
+            "specializations": ["3d_rendering", "spatial_interaction", "holographic_projection_math"],
+            "designed_for_integration": ["light_field_display", "volumetric_display", "ar_headsets"],
         })
         self.display_active = False
         self.active_holograms = {}
@@ -169,7 +177,8 @@ class HolographicDisplayController(SpecializedAgent):
 
         return {
             "success": True,
-            "type": "hologram_projected",
+            "type": "hologram_parameters_computed",  # no physical projector \u2014 computed render params only
+            "hardware_connected": False,
             "hologram_id": hologram_id,
             "hologram_type": hologram_type,
             "duration_seconds": duration,
@@ -179,10 +188,10 @@ class HolographicDisplayController(SpecializedAgent):
                 "update_rate": f"{update_rate}fps",
                 "latency_ms": f"{latency['total_pipeline_latency_ms']:.0f}ms"
             },
-            "interaction_methods": ["hand_gestures", "gaze_control", "voice_commands"],
+            "interaction_methods_if_hardware_present": ["hand_gestures", "gaze_control", "voice_commands"],
             "auto_expires_in": duration,
-            "power_consumption_watts": round(20 + abs(steering["diffraction_angle_deg"]) * 0.5, 1),
-            "recommendations": ["Ensure clear viewing zone", "Maintain adequate lighting"],
+            "estimated_power_consumption_watts": round(20 + abs(steering["diffraction_angle_deg"]) * 0.5, 1),
+            "recommendations": ["Pass technical_specs/_computation to a WebGL frontend renderer for actual visual output"],
             "_computation": {
                 "beam_steering": steering,
                 "fraunhofer_diffraction": {"angles_sampled": diffraction["angles_deg"][:5], "peak": diffraction["peak_intensity"]},

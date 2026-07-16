@@ -1,0 +1,5 @@
+# Never commit real environment files anywhere in this repo, including
+# node_modules mirrors and backup/snapshot directories -- they've leaked
+# real-looking API keys/DB passwords more than once. .env.example and
+# similar template files are unaffected (different filename).
+**/.env

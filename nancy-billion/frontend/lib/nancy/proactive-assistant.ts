@@ -80,6 +80,30 @@ export class ProactiveAssistant {
   }
 
   /**
+   * Get the top N active suggestions, highest priority first.
+   */
+  public getActiveSuggestions(limit = 10): ProactiveSuggestion[] {
+    return this.getSuggestions().slice(0, limit)
+  }
+
+  /**
+   * Accept a suggestion: removes it from the queue and returns it, or null if not found.
+   */
+  public acceptSuggestion(id: string): ProactiveSuggestion | null {
+    const index = this.suggestions.findIndex((s) => s.id === id)
+    if (index === -1) return null
+    const [suggestion] = this.suggestions.splice(index, 1)
+    return suggestion
+  }
+
+  /**
+   * Dismiss a suggestion without acting on it.
+   */
+  public dismissSuggestion(id: string): void {
+    this.suggestions = this.suggestions.filter((s) => s.id !== id)
+  }
+
+  /**
    * Start background context monitoring
    */
   private startContextMonitoring(): void {

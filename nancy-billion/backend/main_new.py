@@ -4,12 +4,13 @@ import base64
 import json
 import logging
 import threading
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
 try:
@@ -30,9 +31,11 @@ except ImportError:
 from stt import stt_backend
 from llm import llm_backend, select_llm_for_task
 from tts import tts_backend
+from neu_tts import NeuTTSBackend
 from tools import get_tools
 from wake_word import get_wake_word_detector
 from audio_decode import decode_webm_opus_b64_to_pcm, pcm_int16_to_float32
+from clap_detection import clap_detector
 from agents.agent_service import agent_service
 from context_manager import NancyContextualBrain, IntentType
 from memory import MemoryManager, MemoryType
@@ -45,6 +48,7 @@ from trading import (
     RiskMonitor,
     TradingManager,
 )
+from system_monitor import SystemMonitor
 
 try:
     from agent_executor import run_specialized_agent as fury_run_agent
@@ -61,20 +65,86 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Nancy/Billion Backend", version="2.0.0")
 
-# CORS — allow the Next.js dev server
+# CORS — explicit origins only. The previous config included "*" alongside
+# named origins, which (a) makes the named origins meaningless and (b) is
+# invalid per the CORS spec when combined with allow_credentials=True (browsers
+# reject it). Configure NANCY_ALLOWED_ORIGINS as a comma-separated list for
+# non-default deployments (e.g. LAN access) instead of adding "*" back.
+_allowed_origins = [
+    o.strip() for o in os.getenv(
+        "NANCY_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+    ).split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Lightweight security: optional shared-secret auth + per-IP rate limiting.
+# Both are no-ops by default (localhost dev) and activate via env vars, since
+# this backend may end up reachable beyond localhost (LAN, tunnel, etc.).
+# ---------------------------------------------------------------------------
+from fastapi import Request, Depends
+import time as _time
+from collections import defaultdict, deque
+
+_BACKEND_AUTH_TOKEN = os.getenv("BACKEND_AUTH_TOKEN", "").strip()
+
+
+async def require_auth(request: Request) -> None:
+    """No-op unless BACKEND_AUTH_TOKEN is set, in which case requests to
+    sensitive routes must carry `Authorization: Bearer <token>`."""
+    if not _BACKEND_AUTH_TOKEN:
+        return
+    header = request.headers.get("authorization", "")
+    token = header[7:] if header.lower().startswith("bearer ") else ""
+    if token != _BACKEND_AUTH_TOKEN:
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization bearer token")
+
+
+class _RateLimiter:
+    """Simple in-memory sliding-window limiter, per client IP. Adequate for a
+    single-instance personal deployment; not distributed-safe."""
+
+    def __init__(self, max_requests: int = 30, window_seconds: float = 60.0):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._hits: Dict[str, deque] = defaultdict(deque)
+
+    def check(self, key: str) -> bool:
+        now = _time.time()
+        hits = self._hits[key]
+        while hits and now - hits[0] > self.window_seconds:
+            hits.popleft()
+        if len(hits) >= self.max_requests:
+            return False
+        hits.append(now)
+        return True
+
+
+_rate_limiter = _RateLimiter(
+    max_requests=int(os.getenv("BACKEND_RATE_LIMIT_MAX", "30")),
+    window_seconds=float(os.getenv("BACKEND_RATE_LIMIT_WINDOW_S", "60")),
+)
+
+
+async def rate_limit(request: Request) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    if not _rate_limiter.check(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded — slow down")
 
 # Global loop reference for thread-safe async calls
 main_loop = None
 
 # Nancy's Startup Coordinator
 startup_coordinator = StartupCoordinator()
+
+# Real psutil-backed system health monitor (was defined but never wired to any route)
+system_monitor = SystemMonitor()
 
 # Nancy's Contextual Brain (handles routing, memory, context)
 nancy_brain = NancyContextualBrain(user_id="user")
@@ -202,19 +272,55 @@ def _history_to_text() -> str:
 
 
 async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
+    """Route a chat message to a real specialized agent when the text clearly
+    matches one of the 29 registered domains; otherwise fall back to the
+    general-purpose LLM.
+
+    The previous implementation imported `orchestration.integration.run_nancy_hierarchy`,
+    whose relative imports fail at runtime (`from ..llm import ...` outside package
+    context) — every call silently hit the except branch below and fell back to a
+    bare LLM call, so the "hierarchy" never actually ran. This now uses
+    `agent_service`, the genuinely working 29-agent runtime (already exercised via
+    the `/agents/run` and `/agents/auto` endpoints), with the same keyword-routing
+    table `auto_run` uses — but only delegates on an actual keyword match, so plain
+    conversational text isn't forced onto the "research" agent as `auto_run`'s own
+    fallback does.
+    """
     history_text = _history_to_text()
-    try:
-        from orchestration.integration import run_nancy_hierarchy
-        orch = await run_nancy_hierarchy(user_text, session_context=history_text)
-        return orch.get("final_response", ""), orch.get("debug", {})
-    except Exception as e:
-        logger.warning("Orchestration failed, using LLM fallback: %s", e)
-        prompt = f"{BASE_SYSTEM_PROMPT}\n{history_text}\nuser: {user_text}\nassistant:"
+
+    if agent_service.is_ready():
         try:
-            resp = await llm_backend.generate(prompt, max_tokens=512, temperature=0.7)
-        except Exception as llm_e:
-            resp = f"I'm having trouble processing that right now. ({llm_e})"
-        return resp, {}
+            from agents.agent_service import _auto_route
+            routed_key = _auto_route(user_text)
+        except Exception:
+            routed_key = None
+
+        if routed_key:
+            try:
+                result = await agent_service.run(
+                    routed_key,
+                    {"type": "query", "query": user_text, "context": history_text},
+                    timeout=30.0,
+                )
+                response_text = result.get("response") or result.get("result")
+                if response_text and result.get("success", True) is not False:
+                    return str(response_text), {
+                        "routed_to": routed_key,
+                        "agents_used": result.get("agents_used", [routed_key]),
+                    }
+                logger.warning(
+                    "Agent '%s' returned no usable response (%s); falling back to LLM",
+                    routed_key, result.get("error", "no error given"),
+                )
+            except Exception as e:
+                logger.warning("Specialized agent '%s' failed, falling back to LLM: %s", routed_key, e)
+
+    prompt = f"{BASE_SYSTEM_PROMPT}\n{history_text}\nuser: {user_text}\nassistant:"
+    try:
+        resp = await llm_backend.generate(prompt, max_tokens=512, temperature=0.7)
+    except Exception as llm_e:
+        resp = f"I'm having trouble processing that right now. ({llm_e})"
+    return resp, {}
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +340,9 @@ class ChatRequest(BaseModel):
     text: str
     history: list = []
     task_hint: str | None = None  # e.g., "coding", "fast_response", "general", "multimodal"
+
+class SynthesizeRequest(BaseModel):
+    text: str
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +521,7 @@ async def get_trades():
 # Trading Intelligence API endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/trading/analyze")
+@app.post("/trading/analyze", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def analyze_pair(payload: ChatRequest):
     """Analyze a forex pair with technical analysis"""
     if not payload.text:
@@ -487,7 +596,7 @@ async def assess_trading_risk():
     }
 
 
-@app.post("/trading/record-trade")
+@app.post("/trading/record-trade", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def record_trade(payload: Dict):
     """Record a new trade"""
     pair = payload.get("pair")
@@ -568,7 +677,7 @@ async def get_trading_report():
     }
 
 
-@app.post("/chat")
+@app.post("/chat", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def chat_endpoint(payload: ChatRequest):
     """Primary chat endpoint with intelligent context-aware routing.
 
@@ -624,7 +733,15 @@ async def chat_endpoint(payload: ChatRequest):
         selected_llm = select_llm_for_task(task_hint)
         logger.info(f"Chat endpoint using LLM: {selected_llm.__class__.__name__} (intent: {brain_decision['intent']}, task_hint: {task_hint})")
 
-        response = await selected_llm.generate(augmented_prompt, max_tokens=512, temperature=0.7)
+        # Coding/self-improvement tasks get Claude with adaptive-thinking effort
+        # cranked up — select_llm_for_task() already routes "coding" hints to
+        # AnthropicLLM; this adds the effort param that class actually knows how
+        # to use (other backends don't accept it, hence the isinstance guard).
+        from llm import AnthropicLLM
+        if isinstance(selected_llm, AnthropicLLM) and task_hint in ("coding", "self_improvement", "devops"):
+            response = await selected_llm.generate(augmented_prompt, max_tokens=2048, temperature=0.7, effort="high")
+        else:
+            response = await selected_llm.generate(augmented_prompt, max_tokens=512, temperature=0.7)
 
         # Record response in context
         nancy_brain.add_response(response)
@@ -680,7 +797,63 @@ async def agent_status(agent_key: str):
     return {"success": True, "agent_key": agent_key, "status": status}
 
 
-@app.post("/agents/run")
+@app.get("/system/health")
+async def system_health():
+    """Real psutil-backed system health (CPU/memory/disk/network/temperature).
+
+    SystemMonitor already existed (system_monitor.py) but was never wired to any
+    route — the frontend's Overview/System panels showed Math.random()-jittered
+    fake CPU/memory numbers instead. cpu_percent(interval=1) blocks for ~1s, so
+    it's run in a thread to avoid blocking the event loop.
+    """
+    loop = asyncio.get_event_loop()
+    health = await loop.run_in_executor(None, system_monitor.get_comprehensive_health)
+    return {"success": True, **health}
+
+
+@app.get("/clap/status")
+async def clap_status():
+    """Whether the clap-detection model (satellite repo ../../clap-detection-main)
+    is loaded and ready. That repo ships no pretrained weights, so this is False
+    on a fresh checkout until CLAP_MODEL_PATH is pointed at a real .pth file —
+    see clap_detection.py for the honest error this reports until then.
+    """
+    loop = asyncio.get_event_loop()
+    status = await loop.run_in_executor(None, lambda: clap_detector.status)
+    return {"success": True, **status}
+
+
+@app.get("/tts/status")
+async def tts_status():
+    """Whether TTS is using the real neural voice (NeuTTS-nano) and which
+    reference clip it cloned from ("user" vs "synthetic-placeholder") — see
+    neu_tts.py. Falls back to a generic status if TTS_BACKEND=pyttsx3.
+    """
+    if not isinstance(tts_backend, NeuTTSBackend):
+        return {"success": True, "available": True, "voice_source": "pyttsx3", "error": None}
+    loop = asyncio.get_event_loop()
+    # Access the `status` property inside the executor -- it's a property, so
+    # even `getattr`/`hasattr` on it would trigger the (possibly slow, first-load)
+    # getter synchronously on the event loop thread if called outside one.
+    status = await loop.run_in_executor(None, lambda: tts_backend.status)
+    return {"success": True, **status}
+
+
+@app.post("/tts/synthesize")
+async def tts_synthesize(req: SynthesizeRequest):
+    """Synthesize arbitrary text to speech. Used for locally-generated spoken
+    lines (nav confirmations, greetings, etc.) that never go through the chat
+    WebSocket's own tts_audio push.
+    """
+    try:
+        wav_bytes = await tts_backend.synthesize(req.text)
+    except Exception as e:
+        logger.exception("TTS synthesis failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+    return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.post("/agents/run", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def run_agent(req: AgentRunRequest):
     """
     Run a specific agent with a typed task payload.
@@ -701,7 +874,7 @@ async def run_agent(req: AgentRunRequest):
     return result
 
 
-@app.post("/agents/auto")
+@app.post("/agents/auto", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def auto_route_agent(req: AgentAutoRequest):
     """
     Auto-route a natural-language query to the best specialist agent.
@@ -743,6 +916,16 @@ async def run_fury_agent(payload: dict):
 
 @app.websocket(os.getenv("WS_PATH", "/ws"))
 async def websocket_endpoint(websocket: WebSocket):
+    # WebSocket auth: HTTPException-based Depends() doesn't apply to WS routes,
+    # so check the same shared-secret manually (no-op unless BACKEND_AUTH_TOKEN
+    # is set). Pass ?token=... on the connection URL.
+    if _BACKEND_AUTH_TOKEN and websocket.query_params.get("token") != _BACKEND_AUTH_TOKEN:
+        await websocket.close(code=4401)
+        return
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    if not _rate_limiter.check(client_ip):
+        await websocket.close(code=4429)
+        return
     await manager.connect(websocket)
     try:
         while True:
@@ -776,6 +959,43 @@ async def websocket_endpoint(websocket: WebSocket):
                             json.dumps({"type": "transcript", "data": transcript}),
                             websocket,
                         )
+
+            # ---- Audio chunk (clap detection) ----
+            elif msg_type == "clap_chunk":
+                audio_b64 = message.get("data")
+                if audio_b64:
+                    loop = asyncio.get_event_loop()
+                    # status (and the torch/model load it triggers on first call) runs in
+                    # a thread so a cold load can't freeze every other WS client's event loop.
+                    clap_status = await loop.run_in_executor(None, lambda: clap_detector.status)
+                    if not clap_status["available"]:
+                        await manager.send(
+                            json.dumps({"type": "clap_error", "error": clap_status["error"]}),
+                            websocket,
+                        )
+                    else:
+                        try:
+                            decoded = decode_webm_opus_b64_to_pcm(
+                                audio_b64,
+                                target_sample_rate=int(os.getenv("CLAP_SAMPLE_RATE", "44100")),
+                            )
+                            audio_np = pcm_int16_to_float32(decoded.pcm_int16)
+                            result = await loop.run_in_executor(None, clap_detector.predict, audio_np)
+                            threshold = float(os.getenv("CLAP_DETECT_THRESHOLD", "0.6"))
+                            await manager.send(
+                                json.dumps({
+                                    "type": "clap_result",
+                                    "is_clap": result.is_clap and result.confidence > threshold,
+                                    "confidence": result.confidence,
+                                }),
+                                websocket,
+                            )
+                        except Exception as e:
+                            logger.exception("Clap detection error: %s", e)
+                            await manager.send(
+                                json.dumps({"type": "clap_error", "error": str(e)}),
+                                websocket,
+                            )
 
             # ---- Final transcript / user text ----
             elif msg_type in ("final_transcript", "user_text"):

@@ -1,12 +1,20 @@
 """
 Recursive Self-Improvement Engine - Production-Grade Implementation
-Enables safe, verified recursive self-modification: architecture mutation,
-hyperparameter evolution, knowledge distillation, meta-learning, and
-formal-verification-gated deployment of self-modifications.
 
-Safety principle: Every proposed modification is formally verified (or
-simulation-tested) before being applied. No modification may violate the
-agent's core ethical constraints or reduce safety guarantees.
+Scope, honestly stated: this agent tunes its own in-memory config dict
+(hyperparameters, strategy weights) and simulates evaluation of proposed
+changes — see `_simulate_evaluation` / `HyperparameterOptimizer` /
+`KnowledgeDistiller`. It has NO filesystem, subprocess, or code-execution
+access (no `os`/`subprocess`/`eval`/`exec`/`open` anywhere in this module) —
+it cannot modify its own source code or any other file on disk. "Self-
+modification" here means config/knob tuning, not literal code rewriting.
+
+Safety gate: every proposed modification must (1) pass the automated
+SafetyVerifier (risk threshold, ethical-weight/safety-bound/audit-trail
+checks) to reach status=APPROVED, AND (2) receive an explicit human_approve
+call with an `approved_by` identifier, before `apply` will act on it.
+Automated verification alone is necessary but not sufficient — see
+`_handle_human_approve` / `_handle_apply`.
 """
 
 from __future__ import annotations
@@ -114,6 +122,12 @@ class ModificationProposal:
     verification_report: Optional[Dict[str, Any]] = None
     applied_at:     Optional[float]     = None
     rollback_data:  Optional[Dict[str, Any]] = None
+    # Human-in-the-loop gate: automated SafetyVerifier passing (status ->
+    # APPROVED) is necessary but not sufficient to apply a modification. A
+    # separate human_approve call is required first — see _handle_apply.
+    human_approved:      bool = False
+    human_approved_by:   Optional[str] = None
+    human_approved_at:   Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -129,6 +143,8 @@ class ModificationProposal:
             "verification":      self.verification.value,
             "verification_report": self.verification_report,
             "applied_at":        self.applied_at,
+            "human_approved":    self.human_approved,
+            "human_approved_by": self.human_approved_by,
         }
 
 
@@ -543,6 +559,7 @@ class RecursiveSelfImprovementEngine(SpecializedAgent):
             "status":             self._handle_status,
             "propose":            self._handle_propose,
             "verify":             self._handle_verify,
+            "human_approve":      self._handle_human_approve,
             "apply":              self._handle_apply,
             "rollback":           self._handle_rollback,
             "evolve":             self._handle_evolve,
@@ -672,6 +689,39 @@ class RecursiveSelfImprovementEngine(SpecializedAgent):
             "timestamp":           time.time(),
         }
 
+    async def _handle_human_approve(self, data: Dict) -> Dict[str, Any]:
+        """Explicit human-in-the-loop approval, required before _handle_apply
+        will act on a proposal — separate from (and in addition to) the
+        automated SafetyVerifier pass that sets status=APPROVED. Automated
+        verification alone is not consent to apply a change."""
+        pid = data.get("proposal_id", "")
+        if pid not in self._proposals:
+            return self._error(f"Proposal {pid!r} not found.")
+
+        proposal = self._proposals[pid]
+        if proposal.status != ModificationStatus.APPROVED:
+            return self._error(
+                f"Proposal must pass automated verification (status=APPROVED) before human approval "
+                f"(current: {proposal.status.value})."
+            )
+
+        approver = data.get("approved_by")
+        if not approver:
+            return self._error("human_approve requires 'approved_by' identifying who is approving this change.")
+
+        proposal.human_approved    = True
+        proposal.human_approved_by = str(approver)
+        proposal.human_approved_at = time.time()
+        self._audit("human_approved", pid, f"Approved by {approver}")
+
+        return {
+            "success":     True,
+            "type":        "human_approval_recorded",
+            "proposal_id": pid,
+            "approved_by": proposal.human_approved_by,
+            "timestamp":   proposal.human_approved_at,
+        }
+
     async def _handle_apply(self, data: Dict) -> Dict[str, Any]:
         pid = data.get("proposal_id", "")
         if pid not in self._proposals:
@@ -680,6 +730,12 @@ class RecursiveSelfImprovementEngine(SpecializedAgent):
         proposal = self._proposals[pid]
         if proposal.status != ModificationStatus.APPROVED:
             return self._error(f"Proposal must be APPROVED before applying (current: {proposal.status.value}).")
+        if not proposal.human_approved:
+            return self._error(
+                "Proposal has not been human-approved. Call 'human_approve' with an "
+                "'approved_by' identifier before applying — automated verification "
+                "alone does not authorize applying a self-modification."
+            )
 
         # Snapshot current config for rollback
         proposal.rollback_data = copy.deepcopy(self._config)

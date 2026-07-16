@@ -1,8 +1,16 @@
 """
 Neural Interface Agent - Complete Implementation
-Handles EEG-based brain-computer interface for thought detection
-Supports multiple EEG devices, signal processing pipelines, and machine learning models
-for real-time brain-computer interfacing
+
+Honesty note: no EEG/BCI hardware is connected on this deployment (software-
+only by design — see `hardware_connected` in status responses, which is False
+unless a real `device_config` with `type != "simulated"` is passed to
+`initialize()`). All signal processing, classification, and cognitive-state
+logic below is real, working code — it runs on real math (filters, feature
+extraction, classifiers) — but its *input* is synthetic EEG-shaped data
+(`np.random`-generated) rather than a real headset, since none is connected.
+The `tools`/`hardware_requirements` capability fields describe what this
+module is *designed to integrate with* (BrainFlow, MNE, Muse/OpenBCI/Emotiv
+SDKs) — a future extension point, not currently-active integrations.
 """
 
 import asyncio
@@ -85,8 +93,10 @@ class NeuralInterfaceAgent(SpecializedAgent):
     def __init__(self, settings):
         super().__init__(settings, "Neural Interface Agent", "neural-interface")
         self.capabilities.update({
-            "description": "Advanced brain-computer interface for EEG-based cognitive state detection, motor imagery classification, and neural command translation",
+            "description": "EEG-based brain-computer interface signal-processing pipeline (motor imagery classification, cognitive state detection, etc.). No EEG hardware connected on this deployment — runs on synthetic EEG-shaped data. See 'hardware_connected' in status responses.",
             "confidence": 0.89,
+            "mode": "simulated",  # no real EEG headset connected — see module docstring
+            "hardware_connected": False,
             "specializations": [
                 "motor_imagery_classification",
                 "cognitive_state_detection", 
@@ -101,7 +111,9 @@ class NeuralInterfaceAgent(SpecializedAgent):
                 "machine_learning_adaptation",
                 "multimodal_fusion"
             ],
-            "tools": [
+            # Designed-for integration targets, not currently-connected tools/hardware
+            # (this deployment is software-only — see hardware_connected above).
+            "designed_for_integration": [
                 "eeg_headset_muse",
                 "eeg_headset_openbci",
                 "eeg_headset_emotiv",
@@ -109,14 +121,12 @@ class NeuralInterfaceAgent(SpecializedAgent):
                 "eeg_headset_cthulhu",
                 "brainflow_library",
                 "mne_python",
-                "scikit_learn",
-                "tensorflow",
-                "pytorch",
                 "labstreaminglayer",
                 "openvibe",
                 "bci2000"
             ],
-            "hardware_requirements": [
+            "tools": ["scikit_learn", "tensorflow", "pytorch"],  # actually used for on-device classification logic
+            "hardware_requirements_if_connected": [
                 "EEG headset (minimum 4 channels, preferably 8+)",
                 "Sampling rate >= 128 Hz",
                 "Bluetooth or USB connectivity",
@@ -1173,7 +1183,10 @@ class NeuralInterfaceAgent(SpecializedAgent):
                 "initialized": self.is_initialized,
                 "calibrated": self.is_calibrated,
                 "streaming": self.is_streaming,
-                "device_connected": self.current_device is not None,
+                "device_connected": bool(
+                    self.current_device is not None
+                    and self.current_device.get("type") != "simulated"
+                ),
                 "signal_quality": signal_quality.get("signal_quality", "unknown") if signal_quality["success"] else "error"
             },
             "device_info": self.current_device,

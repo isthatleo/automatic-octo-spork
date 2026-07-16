@@ -138,10 +138,12 @@ export function parseCommand(rawInput: string): CommandResult {
     }
   }
 
-  // If it's a question we don't understand, DON'T guess a locate — respond conversationally.
+  // If it's a question we don't understand locally, DON'T guess a locate —
+  // the caller sends it to the real backend for an AI-generated answer and
+  // only falls back to this reply if that call fails.
   if (/^(what|why|how|when|who|is|are|do|does|can|could|should|will|would)\b/.test(input)) {
     return {
-      type: 'status',
+      type: 'unknown',
       reply:
         "That's outside my current toolkit, sir. Try 'locate Tokyo', 'open the dashboard', or 'system status'.",
     }

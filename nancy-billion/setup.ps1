@@ -89,6 +89,20 @@ try {
             $models = & ollama list 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Write-Host "✓ Ollama service is running" -ForegroundColor Green
+
+                # No GPU on this machine: pull a small CPU-friendly model if none installed yet
+                $modelLines = ($models | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne "" })
+                if (-not $modelLines -or $modelLines.Count -eq 0) {
+                    Write-Host "ℹ No local models found — pulling a CPU-friendly default (llama3.2:3b)..." -ForegroundColor Yellow
+                    & ollama pull llama3.2:3b
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "✓ Pulled llama3.2:3b" -ForegroundColor Green
+                    } else {
+                        Write-Host "⚠ Could not pull llama3.2:3b automatically — run 'ollama pull llama3.2:3b' manually" -ForegroundColor Yellow
+                    }
+                } else {
+                    Write-Host "✓ Found $($modelLines.Count) local model(s) already installed" -ForegroundColor Green
+                }
             } else {
                 Write-Host "⚠ Ollama not responding (will start on first use)" -ForegroundColor Yellow
             }
@@ -131,11 +145,11 @@ Write-Host ""
 Write-Host "📚 Documentation:" -ForegroundColor Blue
 Write-Host "   • README.md — Project overview" -ForegroundColor Gray
 Write-Host "   • LLM_SETUP_GUIDE.md — LLM configuration" -ForegroundColor Gray
-Write-Host "   • INTEGRATION_GUIDE.md — Frontend/Backend architecture" -ForegroundColor Gray
+Write-Host "   • CHANGELOG.md — Recent changes" -ForegroundColor Gray
 Write-Host ""
-Write-Host "🎯 Quick Start (with Ollama):" -ForegroundColor Green
+Write-Host "🎯 Quick Start (with Ollama, no GPU required):" -ForegroundColor Green
 Write-Host "   ollama serve  # Terminal 1" -ForegroundColor Gray
-Write-Host "   ollama pull mistral" -ForegroundColor Gray
+Write-Host "   ollama pull llama3.2:3b" -ForegroundColor Gray
 Write-Host "   python backend/main_new.py  # Terminal 2" -ForegroundColor Gray
 Write-Host "   cd frontend && npm run dev  # Terminal 3" -ForegroundColor Gray
 Write-Host "`n"

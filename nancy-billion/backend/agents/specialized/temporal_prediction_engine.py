@@ -195,6 +195,10 @@ class MultiTimescaleForecaster:
     def forecast(self, domain: str, timescale: Timescale,
                  context: Dict[str, Any], features: List[str]) -> Prediction:
         cfg   = self.TIMESCALE_CONFIGS[timescale]
+        # NOTE: `model` is a label naming which model family this timescale would
+        # use in a production deployment — it is NOT selecting between different
+        # running algorithms. Every timescale computes its point estimate the same
+        # way, below (linear trend + Gaussian noise), regardless of this label.
         model = random.choice(cfg["models"]) if len(cfg["models"]) > 1 else cfg["models"][0]
 
         base_value  = context.get("baseline_value", 0.5)
@@ -459,9 +463,13 @@ class TemporalPredictionEngine(SpecializedAgent):
         super().__init__(settings, "Temporal Prediction Engine", "temporal-prediction")
         self.capabilities.update({
             "description": (
-                "True foresight engine: multi-timescale forecasting from milliseconds "
-                "to centuries, causal modelling, counterfactual reasoning, and "
-                "calibrated uncertainty quantification."
+                "Multi-timescale forecasting engine (milliseconds to centuries), causal "
+                "modelling, counterfactual reasoning, and uncertainty quantification. "
+                "Point estimates use a heuristic linear-trend + Gaussian-noise model "
+                "regardless of the 'model' label attached to a given forecast (see "
+                "MultiTimescaleForecaster.forecast) — the label names the model family "
+                "a production deployment would use for that timescale, it does not mean "
+                "that specific algorithm (ARIMA/LSTM/Prophet/etc.) actually ran."
             ),
             "confidence": 0.83,
             "specializations": [
