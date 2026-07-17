@@ -454,6 +454,7 @@ export default function Page() {
             speaking={speaking}
             wordIndex={wordIndex}
             interim={state.interim}
+            audioElement={speakingAudioEl}
           />
         </section>
       )}
@@ -542,12 +543,14 @@ function HeroVoice({
   speaking,
   wordIndex,
   interim,
+  audioElement,
 }: {
   orbState: OrbState
   utterance: string
   speaking: boolean
   wordIndex: number
   interim: string
+  audioElement: HTMLAudioElement | null
 }) {
   const [orbSize, setOrbSize] = useState(420)
   useEffect(() => {
@@ -567,7 +570,7 @@ function HeroVoice({
   return (
     <div className="flex min-h-[calc(100dvh-260px)] flex-col items-center justify-center gap-6 py-6 sm:gap-8 sm:py-10">
       <div className="relative">
-        <NancyOrb state={orbState} size={orbSize} audioElement={speakingAudioEl} />
+        <NancyOrb state={orbState} size={orbSize} audioElement={audioElement} />
       </div>
 
       <div className="w-full max-w-xl px-4">

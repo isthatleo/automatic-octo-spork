@@ -86,6 +86,18 @@ export interface MarketData {
   changePercent: number
 }
 
+export interface NewsItem {
+  id: string
+  title: string
+  source: string
+  link: string
+  summary?: string
+  image?: string
+  published?: string
+  /** Embeddable video URL, present only for video-feed items. */
+  video?: string
+}
+
 export type KnowledgeCategory =
   | 'general'
   | 'finance'
