@@ -265,8 +265,20 @@ export default function Page() {
     unlockSfx()
     sfx.boot()
     sfx.startHum()
+    const fallback = 'N-Å-N-C-Y online. Say Nancy, Billion, or Jarvis followed by a command.'
     const t = setTimeout(() => {
-      nancySay('N-Å-N-C-Y online. Say Nancy, Billion, or Jarvis followed by a command.')
+      // Real personalized greeting (live forex rates, memory/projects, open
+      // trades, pending self-improvement proposals -- see
+      // backend/main_new.py's _build_real_personal_context). Falls back to
+      // the plain boot line if the backend's unreachable or has nothing to say.
+      fetch('/api/greeting/personalized', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+        .then((res) => (res.ok ? res.json() : Promise.reject(res)))
+        .then((json) => nancySay(json?.greeting || fallback))
+        .catch(() => nancySay(fallback))
     }, 1400)
     return () => clearTimeout(t)
   }, [booting, nancySay])

@@ -88,9 +88,21 @@ class AgentService:
 
         logger.info("AgentService: initialising all specialized agents…")
         from agents.specialized.registry import SPECIALIZED_AGENTS
+        from agents.specialized.dynamic_registry import DYNAMIC_AGENTS
+
+        if DYNAMIC_AGENTS:
+            logger.info("Loading %d self-created dynamic agent(s): %s",
+                        len(DYNAMIC_AGENTS), list(DYNAMIC_AGENTS.keys()))
+
+        all_agents = {**SPECIALIZED_AGENTS}
+        for key, cls in DYNAMIC_AGENTS.items():
+            if key in all_agents:
+                logger.warning("Dynamic agent key '%s' collides with a curated agent, skipping", key)
+                continue
+            all_agents[key] = cls
 
         tasks = []
-        for key, cls in SPECIALIZED_AGENTS.items():
+        for key, cls in all_agents.items():
             tasks.append(self._init_one(key, cls, settings))
 
         await asyncio.gather(*tasks, return_exceptions=True)

@@ -51,6 +51,7 @@ except ImportError:
 from stt import stt_backend
 from llm import llm_backend, select_llm_for_task, AnthropicLLM
 import file_access
+import subagent_factory
 from tts import tts_backend
 from neu_tts import NeuTTSBackend
 from tools import get_tools
@@ -436,8 +437,46 @@ FILE_TOOLS: List[Dict[str, Any]] = [
 
 _FILE_WRITE_TOOLS = {"write_file", "delete_file", "move_file"}
 
+# ---------------------------------------------------------------------------
+# Subagent creation (Claude tool-use only, same as file access -- see
+# subagent_factory.py for why this is a materially higher risk tier than
+# read/write/delete on individual files: a new agent is arbitrary Python that
+# gets imported and its methods called, not a bounded I/O operation).
+# ---------------------------------------------------------------------------
+CREATE_SUBAGENT_TOOL: Dict[str, Any] = {
+    "name": "create_subagent",
+    "description": (
+        "Create a brand new specialized agent for Nancy's own roster. Generate a COMPLETE, "
+        "working Python module defining a class that subclasses SpecializedAgent "
+        "(from agents.specialized.base_specialized_agent import SpecializedAgent). Contract: "
+        "__init__(self, settings) must call "
+        "super().__init__(settings, '<Agent Display Name>', '<domain-slug>'); you MUST implement "
+        "'async def process_task(self, task_data: dict) -> dict' handling at least "
+        "task_data.get('type') == 'query' using task_data.get('query', ''), returning a dict with "
+        "at least {'success': bool, ...}. Keep the agent self-contained (computation, text "
+        "generation, data transformation) -- do not use subprocess, eval, exec, sockets, ctypes, "
+        "or other unrestricted system access; that code will be statically rejected. This also "
+        "requires the user's explicit approval before anything is saved, and only takes effect "
+        "after the backend is restarted -- it does not go live immediately."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string", "description": "lowercase_snake_case identifier, e.g. 'weather_forecaster'"},
+            "class_name": {"type": "string", "description": "PascalCase class name, e.g. 'WeatherForecasterAgent'"},
+            "domain": {"type": "string", "description": "human-readable domain slug, e.g. 'weather-forecasting'"},
+            "description": {"type": "string", "description": "one-sentence description of what this agent does"},
+            "code": {"type": "string", "description": "the complete Python module source code"},
+        },
+        "required": ["key", "class_name", "domain", "description", "code"],
+    },
+}
+
 
 async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    if name == "create_subagent":
+        return await _execute_create_subagent_tool(tool_input)
+
     if name in _FILE_WRITE_TOOLS:
         description = {
             "write_file": f"Write to file: {tool_input.get('path')}",
@@ -461,6 +500,38 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str,
     if name == "move_file":
         return file_access.move_file(tool_input["src"], tool_input["dst"])
     return {"success": False, "error": f"Unknown tool {name}"}
+
+
+async def _execute_create_subagent_tool(tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    key = str(tool_input.get("key", ""))
+    class_name = str(tool_input.get("class_name", ""))
+    domain = str(tool_input.get("domain", ""))
+    description = str(tool_input.get("description", ""))
+    code = str(tool_input.get("code", ""))
+
+    validation = subagent_factory.validate_agent_code(key, class_name, code)
+    if not validation["ok"]:
+        return {"success": False, "error": validation["error"]}
+
+    preview = code[:1200] + ("...(truncated)" if len(code) > 1200 else "")
+    approved = await telegram_notifier.request_approval(
+        f"Nancy wants to create a new agent:\n\n"
+        f"Key: {key}\nClass: {class_name}\nDomain: {domain}\nDescription: {description}\n\n"
+        f"Code preview:\n{preview}\n\n"
+        f"Passed static safety checks (valid syntax, correct base class, no "
+        f"subprocess/eval/exec/sockets). Will NOT be active until you approve here AND "
+        f"the backend is restarted.",
+        timeout=300.0,
+    )
+    if not approved:
+        return {"success": False, "error": "User did not approve creating this agent."}
+
+    result = subagent_factory.write_agent_file(key, code)
+    if result.get("success"):
+        await telegram_notifier.send(
+            f"Created agent '{key}' at {result['path']}. Restart the backend to bring it online."
+        )
+    return result
 
 
 async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
@@ -520,7 +591,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
         try:
             claude = AnthropicLLM()
             resp = await claude.generate_with_tools(
-                prompt, FILE_TOOLS, _execute_file_tool, max_tokens=1024
+                prompt, FILE_TOOLS + [CREATE_SUBAGENT_TOOL], _execute_file_tool, max_tokens=1024
             )
             return resp, {"tool_use": True}
         except Exception as e:
@@ -618,36 +689,85 @@ async def set_persona(persona_name: str):
     }
 
 
-@app.post("/greeting/personalized")
-async def get_personalized_greeting(payload: Dict):
+async def _build_real_personal_context() -> "PersonalContext":
+    """Populate PersonalContext from Nancy's actual data sources instead of
+    the hardcoded demo data in intelligent_greeting.py's own __main__ block
+    (that demo is exactly the "Docker build"/"Roxan deployment" example
+    text -- illustrative of the tone, not real data). No calendar/meetings
+    integration exists, so meetings_today is intentionally always empty
+    rather than fabricated. Every other field is best-effort: any source
+    that errors or has nothing to report is just omitted, not faked.
     """
-    Get Nancy's intelligent personalized greeting.
+    market_alerts: list = []
+    for pair in ("EUR/USD", "GBP/USD"):
+        try:
+            snapshot = await forex_aggregator.get_price(pair)
+            if snapshot:
+                direction = "up" if snapshot.change_24h > 0 else "down" if snapshot.change_24h < 0 else "flat"
+                market_alerts.append(
+                    f"{pair} is trading at {snapshot.price:.4f}, {direction} {abs(snapshot.change_24h):.2f}% on the day"
+                )
+        except Exception as e:
+            logger.debug("Greeting: market data unavailable for %s: %s", pair, e)
 
-    Nancy analyzes your context and gives you a smart greeting with:
-    - Your meetings today
-    - Build/deployment status
-    - Market alerts you're watching
-    - Project updates
-    - Open trades
-    - Tasks due
+    project_updates: list = []
+    try:
+        for p in memory_manager.get_project_context()[:2]:
+            name = p.get("name") or p.get("project") or "a project"
+            project_updates.append(f"{name} is active in memory")
+    except Exception as e:
+        logger.debug("Greeting: project context unavailable: %s", e)
 
-    Example response:
-    "Morning. You have two meetings today, your overnight Docker build
-     finished successfully, EUR/USD is approaching the level you've been
-     watching, and Roxan's latest deployment completed without errors."
-    """
+    active_trades: list = []
+    try:
+        open_trades = [t for t in trading_manager.trades if t.status == "open"]
+        active_trades = [f"{t.pair} {t.direction} @ {t.entry_price}" for t in open_trades]
+    except Exception as e:
+        logger.debug("Greeting: trade data unavailable: %s", e)
 
-    # Extract context from payload
-    context = PersonalContext(
-        meetings_today=payload.get("meetings_today", []),
-        build_status=payload.get("build_status"),
-        market_alerts=payload.get("market_alerts", []),
-        project_updates=payload.get("project_updates", []),
-        active_trades=payload.get("active_trades", []),
-        tasks_due=payload.get("tasks_due", [])
+    tasks_due: list = []
+    try:
+        si_result = await agent_service.run("self_improvement", {"type": "status"}, timeout=5.0)
+        pending = si_result.get("pending_proposals", 0)
+        if pending:
+            tasks_due.append(f"{pending} self-improvement proposal{'s' if pending != 1 else ''} awaiting your approval")
+    except Exception as e:
+        logger.debug("Greeting: self-improvement status unavailable: %s", e)
+
+    return PersonalContext(
+        meetings_today=[],  # no calendar integration -- honestly empty, not fabricated
+        build_status=None,  # no CI/build system integration exists
+        market_alerts=market_alerts,
+        project_updates=project_updates,
+        active_trades=active_trades,
+        tasks_due=tasks_due,
     )
 
-    # Create coordinator and generate greeting
+
+@app.post("/greeting/personalized")
+async def get_personalized_greeting(payload: Dict = None):
+    """
+    Get Nancy's intelligent personalized greeting, built from real data:
+    live forex rates, memory/projects, open trades, and pending
+    self-improvement proposals. No meetings/build-status fields are
+    fabricated -- those sources (calendar, CI) aren't connected, so they're
+    honestly omitted rather than invented.
+
+    Optional request body fields override/extend the real-data context
+    (e.g. to add a meeting once a calendar integration exists).
+    """
+    context = await _build_real_personal_context()
+
+    overrides = payload or {}
+    if overrides.get("meetings_today"):
+        context.meetings_today = overrides["meetings_today"]
+    if overrides.get("build_status"):
+        context.build_status = overrides["build_status"]
+    context.market_alerts = overrides.get("market_alerts") or context.market_alerts
+    context.project_updates = overrides.get("project_updates") or context.project_updates
+    context.active_trades = overrides.get("active_trades") or context.active_trades
+    context.tasks_due = overrides.get("tasks_due") or context.tasks_due
+
     coordinator = IntelligentStartupCoordinator(persona=startup_coordinator.persona)
     startup_data = await coordinator.startup_with_context(context)
 
