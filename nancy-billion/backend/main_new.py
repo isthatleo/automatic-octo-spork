@@ -1,13 +1,33 @@
 import os
+
+from dotenv import load_dotenv
+
+# Must run before any local import below -- several modules (llm.py's
+# get_llm_backends(), telegram_bot.py's TelegramNotifier) build module-level
+# singletons that read os.getenv(...) at import time. Loading .env after
+# those imports (as this file used to) meant ANTHROPIC_API_KEY, the Telegram
+# credentials, etc. were silently empty for the singleton's whole lifetime,
+# even though the same values worked fine in an isolated script that called
+# load_dotenv() first.
+load_dotenv()
+
+import logging
+
+# Also before any local import: a module-level logger.info/warning call made
+# before basicConfig() configures the root logger's handler is not just
+# unstyled -- Python's handler-of-last-resort silently drops anything below
+# WARNING, so those early messages (e.g. "Adding AnthropicLLM as primary
+# backend") never appeared anywhere, not even unformatted.
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
+
 import asyncio
 import base64
 import json
-import logging
 import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
@@ -29,13 +49,15 @@ except ImportError:
 
 # Local imports
 from stt import stt_backend
-from llm import llm_backend, select_llm_for_task
+from llm import llm_backend, select_llm_for_task, AnthropicLLM
+import file_access
 from tts import tts_backend
 from neu_tts import NeuTTSBackend
 from tools import get_tools
 from wake_word import get_wake_word_detector
 from audio_decode import decode_webm_opus_b64_to_pcm, pcm_int16_to_float32
 from clap_detection import clap_detector
+from telegram_bot import telegram_notifier
 from agents.agent_service import agent_service
 from context_manager import NancyContextualBrain, IntentType
 from memory import MemoryManager, MemoryType
@@ -57,11 +79,6 @@ except Exception:
     _AGENT_EXEC_AVAILABLE = False
     async def fury_run_agent(*a, **kw):  # type: ignore
         raise RuntimeError("Fury agent executor not available")
-
-load_dotenv()
-
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Nancy/Billion Backend", version="2.0.0")
 
@@ -262,6 +279,70 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+LONG_RUNNING_NOTIFY_THRESHOLD_S = float(os.getenv("LONG_RUNNING_NOTIFY_THRESHOLD_S", "15"))
+
+
+async def _notify_if_long_running(label: str, started_at: float, result: Any) -> None:
+    """Push a Telegram summary if a REST-triggered agent task took long enough
+    that the user plausibly stepped away before it finished. No-op if
+    Telegram isn't configured -- this is a best-effort convenience, not a
+    hard requirement for the endpoint to work."""
+    elapsed = _time.monotonic() - started_at
+    if elapsed < LONG_RUNNING_NOTIFY_THRESHOLD_S:
+        return
+    summary = str(result.get("response") or result.get("result") or result)[:300]
+    await telegram_notifier.send(f"Finished {label} ({elapsed:.0f}s):\n\n{summary}")
+
+
+def _maybe_gate_self_improvement(agent_key: str, result: Dict[str, Any]) -> None:
+    """RecursiveSelfImprovementEngine requires an explicit human_approve call
+    before applying any self-modification, on top of its own automated
+    SafetyVerifier pass (agents/specialized/recursive_self_improvement_engine.py)
+    -- but until now nothing ever told a human a proposal was waiting, so that
+    gate had no real notification channel. Once a proposal clears automated
+    verification (status=approved), text the user for a real yes/no and, on
+    approval, call human_approve on their behalf. Fire-and-forget: this must
+    not block the REST response that triggered the verify call.
+    """
+    if agent_key != "self_improvement":
+        return
+    if result.get("type") != "verification_result":
+        return
+    if not result.get("verification_passed") or result.get("status") != "approved":
+        return
+
+    proposal_id = result.get("proposal_id")
+    if not proposal_id:
+        return
+
+    async def _gate() -> None:
+        approved = await telegram_notifier.request_approval(
+            f"Nancy's self-improvement engine has a proposal that passed automated "
+            f"safety verification and is awaiting your sign-off.\n\nProposal ID: {proposal_id}\n\n"
+            f"This will NOT be applied unless you approve it here."
+        )
+        if not approved:
+            logger.info("Self-improvement proposal %s not approved via Telegram", proposal_id)
+            return
+        approval_result = await agent_service.run(
+            "self_improvement",
+            {"type": "human_approve", "proposal_id": proposal_id, "approved_by": "telegram"},
+            timeout=10.0,
+        )
+        if approval_result.get("success"):
+            await telegram_notifier.send(
+                f"Approved proposal {proposal_id}. It's marked human-approved but still "
+                f"requires a separate 'apply' call -- it won't auto-apply from here."
+            )
+        else:
+            await telegram_notifier.send(
+                f"Tried to record your approval for {proposal_id} but it failed: "
+                f"{approval_result.get('error', 'unknown error')}"
+            )
+
+    asyncio.create_task(_gate())
+
+
 def _history_to_text() -> str:
     if history_manager is None:
         return ""
@@ -269,6 +350,117 @@ def _history_to_text() -> str:
     for msg in history_manager.history:
         history_lines.append(f"{msg.get('role','?')}: {msg.get('content','')}")
     return "\n".join(history_lines)
+
+
+def _live_system_context() -> str:
+    """A compact, real snapshot of backend state, injected into every chat
+    prompt so meta-questions ('how many agents are running?') get grounded
+    answers instead of the LLM guessing from the system prompt alone -- which
+    is why 'how many agents are running' previously got 'none': nothing in
+    the prompt ever told the model any agents existed at all."""
+    if not agent_service.is_ready():
+        return "Live system status: the specialized agent service is still initialising."
+    stats = agent_service.get_service_stats()
+    domains = ", ".join(a.get("domain", a.get("key", "?")) for a in agent_service.list_agents())
+    return (
+        f"Live system status: {stats['agents_online']} specialized agents online, "
+        f"{stats['agents_offline']} offline, {stats['total_tasks']} tasks completed so far "
+        f"({stats['success_rate'] * 100:.1f}% success rate). "
+        f"Available agent domains: {domains}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# File access tools (Claude tool-use only -- see AnthropicLLM.generate_with_tools)
+#
+# Per explicit user choice this session: no folder sandbox (any path Nancy's
+# process can reach is fair game), but every write/delete/move is gated
+# behind a real Telegram yes/no before it executes. Reads are immediate.
+# ---------------------------------------------------------------------------
+FILE_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "read_file",
+        "description": "Read the text content of a file on the user's computer, given an absolute or ~-relative path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "list_directory",
+        "description": "List files and subdirectories inside a directory on the user's computer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": (
+            "Create or overwrite a text file on the user's computer. "
+            "Requires the user's explicit yes/no approval (sent to their phone) before it takes effect."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "delete_file",
+        "description": (
+            "Delete a file or directory (recursively) on the user's computer. "
+            "Requires the user's explicit yes/no approval (sent to their phone) before it takes effect."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "move_file",
+        "description": (
+            "Move or rename a file/directory on the user's computer. "
+            "Requires the user's explicit yes/no approval (sent to their phone) before it takes effect."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"src": {"type": "string"}, "dst": {"type": "string"}},
+            "required": ["src", "dst"],
+        },
+    },
+]
+
+_FILE_WRITE_TOOLS = {"write_file", "delete_file", "move_file"}
+
+
+async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    if name in _FILE_WRITE_TOOLS:
+        description = {
+            "write_file": f"Write to file: {tool_input.get('path')}",
+            "delete_file": f"Delete: {tool_input.get('path')}",
+            "move_file": f"Move {tool_input.get('src')} -> {tool_input.get('dst')}",
+        }[name]
+        approved = await telegram_notifier.request_approval(
+            f"Nancy wants to: {description}", timeout=120.0
+        )
+        if not approved:
+            return {"success": False, "error": "User did not approve this file operation."}
+
+    if name == "read_file":
+        return file_access.read_file(tool_input["path"])
+    if name == "list_directory":
+        return file_access.list_directory(tool_input["path"])
+    if name == "write_file":
+        return file_access.write_file(tool_input["path"], tool_input["content"])
+    if name == "delete_file":
+        return file_access.delete_file(tool_input["path"])
+    if name == "move_file":
+        return file_access.move_file(tool_input["src"], tool_input["dst"])
+    return {"success": False, "error": f"Unknown tool {name}"}
 
 
 async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
@@ -315,7 +507,25 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             except Exception as e:
                 logger.warning("Specialized agent '%s' failed, falling back to LLM: %s", routed_key, e)
 
-    prompt = f"{BASE_SYSTEM_PROMPT}\n{history_text}\nuser: {user_text}\nassistant:"
+    prompt = f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{history_text}\nuser: {user_text}\nassistant:"
+
+    # File access (read/list/write/delete/move real files on this computer,
+    # per this session's explicit scope: no folder sandbox, writes/deletes
+    # gated on a real Telegram approval) only works through Claude's native
+    # tool-use -- the other backends in the fallback chain are plain text
+    # completion with no tool-calling loop. Try that path first when
+    # Anthropic is configured; anything that fails (including "no credits")
+    # falls through to the ordinary no-tools chain below.
+    if os.getenv("ANTHROPIC_API_KEY"):
+        try:
+            claude = AnthropicLLM()
+            resp = await claude.generate_with_tools(
+                prompt, FILE_TOOLS, _execute_file_tool, max_tokens=1024
+            )
+            return resp, {"tool_use": True}
+        except Exception as e:
+            logger.warning("Claude tool-use path failed, falling back to plain chain: %s", e)
+
     try:
         resp = await llm_backend.generate(prompt, max_tokens=512, temperature=0.7)
     except Exception as llm_e:
@@ -839,6 +1049,14 @@ async def tts_status():
     return {"success": True, **status}
 
 
+@app.get("/telegram/status")
+async def telegram_status():
+    """Whether Telegram is configured and the reply-polling loop is running —
+    see telegram_bot.py. TelegramNotifier's status is a plain attribute (not
+    a property doing I/O), so no executor offload is needed here."""
+    return {"success": True, **telegram_notifier.status}
+
+
 @app.post("/tts/synthesize")
 async def tts_synthesize(req: SynthesizeRequest):
     """Synthesize arbitrary text to speech. Used for locally-generated spoken
@@ -870,7 +1088,10 @@ async def run_agent(req: AgentRunRequest):
         raise HTTPException(status_code=503, detail="AgentService not yet initialised")
 
     task_data = {"type": req.task_type, **req.payload}
+    started = _time.monotonic()
     result = await agent_service.run(req.agent_key, task_data, timeout=req.timeout)
+    await _notify_if_long_running(f"agent '{req.agent_key}' ({req.task_type})", started, result)
+    _maybe_gate_self_improvement(req.agent_key, result)
     return result
 
 
@@ -886,7 +1107,10 @@ async def auto_route_agent(req: AgentAutoRequest):
     if not agent_service.is_ready():
         raise HTTPException(status_code=503, detail="AgentService not yet initialised")
 
+    started = _time.monotonic()
     result = await agent_service.auto_run(req.text, timeout=req.timeout)
+    await _notify_if_long_running(f"auto-routed task: {req.text[:80]}", started, result)
+    _maybe_gate_self_improvement(result.get("agent_key", ""), result)
     return result
 
 
@@ -1154,6 +1378,17 @@ async def websocket_endpoint(websocket: WebSocket):
 # Startup / Shutdown
 # ---------------------------------------------------------------------------
 
+async def _telegram_chat_handler(text: str) -> str:
+    """Routes a Telegram message through the same chat pipeline the voice/web
+    UI uses, so 'chat with Billion from Telegram' means the same Billion --
+    same context history, same agent routing, same LLM fallback chain."""
+    response, _debug = await _generate_response_via_hierarchy(text)
+    if history_manager:
+        await history_manager.add({"role": "user", "content": f"[telegram] {text}"})
+        await history_manager.add({"role": "assistant", "content": response})
+    return response
+
+
 @app.on_event("startup")
 async def startup_event():
     global main_loop
@@ -1161,6 +1396,8 @@ async def startup_event():
     logger.info("Nancy/Billion backend starting up…")
     # Initialise all 29 specialized agents in background so startup is fast
     asyncio.create_task(_init_agents())
+    telegram_notifier.set_chat_handler(_telegram_chat_handler)
+    telegram_notifier.start_polling()
 
 
 async def _init_agents():
@@ -1178,6 +1415,7 @@ async def _init_agents():
 @app.on_event("shutdown")
 async def shutdown_event():
     await agent_service.shutdown()
+    await telegram_notifier.stop_polling()
     logger.info("Nancy/Billion backend shut down.")
 
 
