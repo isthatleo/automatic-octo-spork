@@ -86,7 +86,16 @@ export interface MarketData {
   changePercent: number
 }
 
-export type KnowledgeCategory = 'finance' | 'medicine' | 'science' | 'physics' | 'astrophysics' | 'history' | 'literature'
+export type KnowledgeCategory =
+  | 'general'
+  | 'finance'
+  | 'medicine'
+  | 'science'
+  | 'physics'
+  | 'astrophysics'
+  | 'documentaries'
+  | 'history'
+  | 'literature'
 
 export interface MarketAnalysis {
   symbol: string

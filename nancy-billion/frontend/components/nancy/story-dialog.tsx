@@ -120,16 +120,16 @@ export function StoryDialog({
       </div>
 
       <div className="hud-panel relative z-10 flex max-h-[92dvh] w-full max-w-4xl flex-col overflow-hidden rounded-lg duration-300 animate-in fade-in zoom-in-95">
-        <CornerTicks />)
+        <CornerTicks />
 
         {/* header */}
         <div className="flex items-center justify-between gap-2 border-b border-border/60 px-4 py-2.5">
           <div className="flex min-w-0 items-center gap-2">
             <span className="h-1.5 w-1.5 shrink-0 animate-hud-pulse rounded-full bg-primary" />
-            <span className="truncate font-heading text-[0.6rem] uppercase tracking-[0.25em] text-primary hud-glow">)
+            <span className="truncate font-heading text-[0.6rem] uppercase tracking-[0.25em] text-primary hud-glow">
               {source || 'Newsfeed'}
             </span>
-            <span className="shrink-0 text-[0.55rem] uppercase tracking-widest text-muted-foreground">)
+            <span className="shrink-0 text-[0.55rem] uppercase tracking-widest text-muted-foreground">
               {timeAgo(item.published)}
             </span>
           </div>

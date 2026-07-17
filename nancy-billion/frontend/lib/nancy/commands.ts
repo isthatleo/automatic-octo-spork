@@ -1,4 +1,4 @@
-import type { PanelKey } from './types'
+import type { KnowledgeCategory, PanelKey } from './types'
 
 export type CommandResult =
   | { type: 'navigate'; panel: PanelKey; reply: string }
@@ -8,7 +8,28 @@ export type CommandResult =
   | { type: 'time'; reply: string }
   | { type: 'status'; reply: string }
   | { type: 'greet'; reply: string }
+  | {
+      type: 'news'
+      category: KnowledgeCategory | null
+      topic: string | null
+      media: 'articles' | 'videos'
+      reply: string
+    }
   | { type: 'unknown'; reply: string }
+
+// Category keyword → real KnowledgeCategory (drives /api/news's `category`
+// param, see knowledge-panel.tsx's CATS list). `null` means the general/
+// top-stories feed.
+const NEWS_CATEGORY_WORDS: [RegExp, KnowledgeCategory | null][] = [
+  [/\b(finance|stock|market|crypto|bitcoin|economy|nasdaq|dow)\b/, 'finance'],
+  [/\b(medicine|medical|health|disease|clinical)\b/, 'medicine'],
+  [/\b(physics|quantum|particle)\b/, 'physics'],
+  [/\b(astrophysics|astronomy|nasa|galaxy|planet|star|cosmos)\b/, 'astrophysics'],
+  [/\b(documentary|documentaries)\b/, 'documentaries'],
+  [/\b(history|historical)\b/, 'history'],
+  [/\b(literature|novel|author)\b/, 'literature'],
+  [/\b(science|scientific|research|discovery)\b/, 'science'],
+]
 
 const PANEL_WORDS: Record<string, PanelKey> = {
   overview: 'overview',
@@ -51,11 +72,6 @@ const CONVERSATIONAL_TOPICS: { pattern: RegExp; reply: string }[] = [
     pattern: /\b(weather|forecast|rain|snow|temperature|humidity|wind|storm|sunny|cloudy)\b/,
     reply:
       "I don't have a live meteorological feed wired in yet, sir. I can pull satellite imagery, run system diagnostics, or take you to any city on the map — say the word.",
-  },
-  {
-    pattern: /\b(news|headlines|briefing|market|stock|price|crypto|bitcoin)\b/,
-    reply:
-      "Newswire and market feeds aren't connected on this build. I can still put a city on screen, spin up an agent, or open a panel — your call.",
   },
   {
     pattern: /\b(joke|funny|entertain|sing|song|music|movie)\b/,
@@ -101,6 +117,26 @@ export function parseCommand(rawInput: string): CommandResult {
 
   if (/\b(time|clock)\b/.test(input) && !/\b(weather|forecast)\b/.test(input)) {
     return { type: 'time', reply: 'Pulling local chronometer data.' }
+  }
+
+  // News/briefing — real feed (see knowledge-panel.tsx → /api/news), checked
+  // before the conversational fallbacks below so it doesn't get swallowed by
+  // the generic "not connected" style replies.
+  if (/\b(news|headlines|briefing)\b/.test(input)) {
+    const media: 'articles' | 'videos' = /\b(video|videos|watch|documentary|documentaries)\b/.test(input)
+      ? 'videos'
+      : 'articles'
+    const category = NEWS_CATEGORY_WORDS.find(([re]) => re.test(input))?.[1] ?? null
+    const topicMatch = input.match(/\b(?:about|on|regarding)\s+(.+)/)
+    const topic = topicMatch ? clean(topicMatch[1]) : null
+    const subject = topic || (category ? `${category}` : 'top stories')
+    return {
+      type: 'news',
+      category,
+      topic,
+      media,
+      reply: `Pulling up the latest ${media === 'videos' ? 'briefings' : 'coverage'} on ${subject}.`,
+    }
   }
 
   // Conversational fallbacks BEFORE locate — so "weather in Tokyo" doesn't try

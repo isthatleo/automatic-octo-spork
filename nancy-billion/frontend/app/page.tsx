@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { BootSequence } from '@/components/nancy/boot-sequence'
 import { MapPanel } from '@/components/nancy/map-panel'
+import { KnowledgePanel } from '@/components/nancy/knowledge-panel'
 import {
   AgentsPanel,
   CorePanel,
@@ -17,11 +18,11 @@ import { parseCommand } from '@/lib/nancy/commands'
 import { askNancy } from '@/lib/nancy/ws-client'
 import { synthesizeSpeech } from '@/lib/nancy/tts-client'
 import { geocode } from '@/lib/nancy/geocode'
-import type { LogEntry, PanelKey, Place } from '@/lib/nancy/types'
+import type { KnowledgeCategory, LogEntry, PanelKey, Place } from '@/lib/nancy/types'
 import { cn } from '@/lib/utils'
 import { sfx, unlockSfx, duckSfx } from '@/lib/nancy/sfx'
 
-import { Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, X, Mic, MicOff, Keyboard, ChevronDown } from 'lucide-react'
+import { Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, Newspaper, X, Mic, MicOff, Keyboard, ChevronDown } from 'lucide-react'
 
 const NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -29,6 +30,7 @@ const NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
   { key: 'agents', label: 'Agents', icon: Bot },
   { key: 'system', label: 'System', icon: TerminalSquare },
   { key: 'map', label: 'Recon', icon: Globe2 },
+  { key: 'news', label: 'Newsfeed', icon: Newspaper },
 ]
 
 let logSeq = 0
@@ -53,6 +55,13 @@ export default function Page() {
   const launchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const currentAudioRef = useRef<HTMLAudioElement | null>(null)
   const wordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // News/briefing panel state, set by voice commands ("Nancy, news on
+  // Nvidia") and read by KnowledgePanel (see WorkspaceLayout below).
+  const [newsCategory, setNewsCategory] = useState<KnowledgeCategory | null>(null)
+  const [newsTopic, setNewsTopic] = useState<string | null>(null)
+  const [newsMedia, setNewsMedia] = useState<'articles' | 'videos'>('articles')
+  const [newsAutoOpenTop, setNewsAutoOpenTop] = useState(false)
+  const [newsRequestId, setNewsRequestId] = useState(0)
   // Mirrors currentAudioRef as state (not just a ref) so NancyOrb re-renders
   // with the live <audio> element and can analyze its real playback level —
   // only set for the real NeuTTS path, stays null for the Web Speech fallback.
@@ -203,6 +212,16 @@ export default function Page() {
         case 'launch':
           nancySay(result.reply)
           doLaunch(result.target)
+          break
+        case 'news':
+          sfx.whooshIn()
+          setNewsCategory(result.category)
+          setNewsTopic(result.topic)
+          setNewsMedia(result.media)
+          setNewsAutoOpenTop(true)
+          setNewsRequestId((n) => n + 1)
+          setPanel('news')
+          nancySay(result.reply)
           break
         case 'scan':
           sfx.whooshIn()
@@ -419,6 +438,12 @@ export default function Page() {
             clock={clock}
             navItems={NAV}
             onNav={openPanel}
+            newsCategory={newsCategory}
+            newsTopic={newsTopic}
+            newsMedia={newsMedia}
+            newsAutoOpenTop={newsAutoOpenTop}
+            newsRequestId={newsRequestId}
+            onNewsReadout={nancySay}
           />
         </div>
       ) : (
@@ -574,6 +599,12 @@ function WorkspaceLayout({
   clock,
   navItems,
   onNav,
+  newsCategory,
+  newsTopic,
+  newsMedia,
+  newsAutoOpenTop,
+  newsRequestId,
+  onNewsReadout,
 }: {
   panel: PanelKey
   place: Place | null
@@ -584,14 +615,22 @@ function WorkspaceLayout({
   clock: string
   navItems: { key: PanelKey; label: string; icon: typeof Brain }[]
   onNav: (k: PanelKey) => void
+  newsCategory: KnowledgeCategory | null
+  newsTopic: string | null
+  newsMedia: 'articles' | 'videos'
+  newsAutoOpenTop: boolean
+  newsRequestId: number
+  onNewsReadout: (text: string) => void
 }) {
   const isMap = panel === 'map'
+  const isNews = panel === 'news'
   const TITLE: Partial<Record<PanelKey, string>> = {
     overview: 'Command Overview',
     core: 'Neural Core',
     agents: 'Autonomous Agents',
     system: 'Command Layer',
     map: place ? `Recon · ${place.name}` : 'Global Recon',
+    news: newsTopic ? `Newsfeed · ${newsTopic}` : 'Newsfeed',
   }
   return (
     <div className="flex h-dvh w-full flex-col bg-transparent">
@@ -640,6 +679,18 @@ function WorkspaceLayout({
         {isMap ? (
           <div className="absolute inset-0">
             <MapPanel place={place} loading={mapLoading} />
+          </div>
+        ) : isNews ? (
+          <div className="absolute inset-0 p-3 md:p-4">
+            <KnowledgePanel
+              category={newsCategory ?? 'general'}
+              topic={newsTopic}
+              media={newsMedia}
+              autoOpenTop={newsAutoOpenTop}
+              requestId={newsRequestId}
+              onReadout={onNewsReadout}
+              onClose={onClose}
+            />
           </div>
         ) : (
           <div className="absolute inset-0 overflow-y-auto px-4 py-4 pb-32 md:px-8 md:py-6">
