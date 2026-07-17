@@ -1,9 +1,11 @@
 import logging
 import os
 import asyncio
+import json
 import random
 import subprocess
 from abc import ABC, abstractmethod
+from typing import Any, Awaitable, Callable, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +176,63 @@ class AnthropicLLM(LLMBackend):
             async for text in stream.text_stream:
                 yield text
 
+    async def generate_with_tools(
+        self,
+        prompt: str,
+        tools: List[Dict[str, Any]],
+        tool_executor: Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]],
+        max_tokens: int = 1024,
+        max_rounds: int = 5,
+    ) -> str:
+        """Full Claude tool-use loop: send `prompt` + `tools`, execute any
+        requested tool calls via `tool_executor(name, input) -> result_dict`,
+        feed results back as tool_result blocks, repeat until Claude stops
+        requesting tools or `max_rounds` is hit.
+
+        Not part of the LLMBackend interface (other backends don't do tool
+        use yet) -- call directly when tool-enabled generation is wanted, same
+        pattern as generate_stream.
+        """
+        if not self.api_key:
+            raise Exception("ANTHROPIC_API_KEY not configured")
+        client = self._get_client()
+        messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
+
+        for _ in range(max_rounds):
+            try:
+                response = await client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    messages=messages,
+                    tools=tools,
+                )
+            except Exception as e:
+                raise Exception(f"Anthropic error: {e}")
+
+            if response.stop_reason != "tool_use":
+                for block in response.content:
+                    if block.type == "text":
+                        return block.text
+                return ""
+
+            messages.append({"role": "assistant", "content": response.content})
+            tool_results = []
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+                try:
+                    result = await tool_executor(block.name, block.input)
+                except Exception as e:
+                    result = {"success": False, "error": str(e)}
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(result),
+                })
+            messages.append({"role": "user", "content": tool_results})
+
+        raise Exception("Exceeded max tool-use rounds without a final answer")
+
 class OpenAILLM(LLMBackend):
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY")
@@ -306,6 +365,56 @@ class GroqLLM(LLMBackend):
                 else:
                     text = await resp.text()
                     raise Exception(f"Groq error: {resp.status} - {text}")
+
+
+class OpenCodeLLM(LLMBackend):
+    """OpenCode Zen (opencode.ai/zen) -- a curated, pay-per-use gateway to
+    GPT/Claude/open-source models aimed at coding agents, one API key for all
+    of them. OpenAI-chat-completions-compatible endpoint. See
+    https://opencode.ai/docs/zen/ -- model ids are bare (e.g. 'big-pickle',
+    'gpt-5.5'), confirmed against the live /v1/models list; the 'opencode/'
+    -prefixed form in some docs examples is only their JS AI-SDK provider
+    registry convention, not what this raw REST endpoint expects.
+    """
+
+    def __init__(self):
+        self.api_key = os.getenv("OPENCODE_API_KEY")
+        if not self.api_key:
+            logger.warning("OPENCODE_API_KEY not set; OpenCode Zen LLM will not function")
+        self.model = os.getenv("OPENCODE_MODEL", "big-pickle")
+        logger.info(f"OpenCodeLLM initialized with model={self.model}")
+
+    async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+        import aiohttp
+        url = "https://opencode.ai/zen/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise Exception(f"OpenCode Zen error: {resp.status} - {text}")
+                result = await resp.json()
+                content = result["choices"][0]["message"].get("content")
+                if not content:
+                    # Reasoning models (e.g. big-pickle) can spend the whole
+                    # max_tokens budget on internal reasoning and never reach
+                    # a final answer (finish_reason: "length", content: null).
+                    # Treat that as a failure so FallbackLLM moves on, instead
+                    # of returning None/empty as if it were a real reply.
+                    reason = result["choices"][0].get("finish_reason", "unknown")
+                    raise Exception(f"OpenCode Zen returned no content (finish_reason={reason})")
+                return content
 
 # =============================================================================
 # Fallback LLM Backend
@@ -452,31 +561,27 @@ class FallbackLLM(LLMBackend):
 def get_llm_backends():
     """Build backend chain in priority order.
 
-    Default chain (Nancy-optimized for speed + quality):
-    1) Ollama: try ALL locally installed models (fast, free, instant response)
-    2) Anthropic: Claude for complex/coding tasks (if ANTHROPIC_API_KEY set)
-    3) Groq: Fast cloud inference (if GROQ_API_KEY set)
-    4) OpenAI: GPT for general tasks (if OPENAI_API_KEY set)
-    5) Gemini: Google's LLM (if GEMINI_API_KEY set)
-    6) OpenRouter: Multi-model aggregator (if OPENROUTER_API_KEY set)
-    7) Fury: Local Fury model if available
-    8) DummyLLM: Fallback for testing
+    Default chain (quality-first; local Ollama is the offline fallback, not primary):
+    1) Anthropic: Claude for complex/coding tasks (if ANTHROPIC_API_KEY set)
+    2) Groq: Fast cloud inference (if GROQ_API_KEY set)
+    3) OpenAI: GPT for general tasks (if OPENAI_API_KEY set)
+    4) Gemini: Google's LLM (if GEMINI_API_KEY set)
+    5) OpenRouter: Multi-model aggregator (if OPENROUTER_API_KEY set)
+    6) OpenCode Zen: Coding-focused model gateway (if OPENCODE_API_KEY set)
+    7) Ollama: try ALL locally installed models (free, works offline, lower quality/speed
+       on CPU-only hardware) -- used when no cloud backend is configured or all of them fail
+    8) Fury: Local Fury model if available
+    9) DummyLLM: Fallback for testing
 
     If a backend succeeds, we stop searching (enforced by FallbackLLM).
     """
 
     backends: list[LLMBackend] = []
 
-    # ---- PHASE 1: Local (fastest, free) ----
-    disable_auto_ollama = os.getenv("DISABLE_AUTO_OLLAMA", "0").strip() == "1"
-    if not disable_auto_ollama:
-        logger.info("Adding OllamaAutoModelsLLM as primary backend (fastest for local models)")
-        backends.append(OllamaAutoModelsLLM())
-
-    # ---- PHASE 2: Cloud (fast, specialized) ----
+    # ---- PHASE 1: Cloud (best quality first) ----
     # Anthropic: Claude is excellent for coding, complex reasoning, writing
     if os.getenv("ANTHROPIC_API_KEY"):
-        logger.info("Adding AnthropicLLM as high-quality cloud backend")
+        logger.info("Adding AnthropicLLM as primary backend (best quality)")
         backends.append(AnthropicLLM())
 
     # Groq: Lightning-fast inference (best for quick responses)
@@ -498,6 +603,17 @@ def get_llm_backends():
     if os.getenv("OPENROUTER_API_KEY"):
         logger.info("Adding OpenRouterLLM as aggregator backend")
         backends.append(OpenRouterLLM())
+
+    # OpenCode Zen: coding-focused model gateway
+    if os.getenv("OPENCODE_API_KEY"):
+        logger.info("Adding OpenCodeLLM as coding-focused cloud backend")
+        backends.append(OpenCodeLLM())
+
+    # ---- PHASE 2: Local (free, offline fallback) ----
+    disable_auto_ollama = os.getenv("DISABLE_AUTO_OLLAMA", "0").strip() == "1"
+    if not disable_auto_ollama:
+        logger.info("Adding OllamaAutoModelsLLM as offline fallback backend")
+        backends.append(OllamaAutoModelsLLM())
 
     # ---- PHASE 3: Local advanced (if available) ----
     disable_fury = os.getenv("DISABLE_FURY", "0").strip() == "1"
@@ -551,17 +667,27 @@ def select_llm_for_task(task_hint: str | None = None) -> LLMBackend:
 
     task = task_hint.lower().strip()
 
-    # Coding-specific tasks → use Claude if available
+    # Coding-specific tasks → Claude first, then OpenCode Zen (a gateway
+    # curated for coding agents), then a local coding-specialized Ollama
+    # model if one's been pulled. A real fallback chain, not a single
+    # backend with nothing to catch it failing (e.g. Anthropic out of credits
+    # -- previously this returned a bare AnthropicLLM() with no fallback at
+    # all for coding-hinted tasks specifically).
     if any(x in task for x in [
         "coding", "code", "debug", "programming", "development", "refactor",
         "devops", "self_improvement", "self-improv", "architecture",
     ]):
-        try:
-            if os.getenv("ANTHROPIC_API_KEY"):
-                logger.info(f"Using AnthropicLLM for coding task: {task_hint}")
-                return AnthropicLLM()
-        except Exception as e:
-            logger.warning(f"Failed to select Anthropic for coding: {e}")
+        coding_backends: list[LLMBackend] = []
+        if os.getenv("ANTHROPIC_API_KEY"):
+            coding_backends.append(AnthropicLLM())
+        if os.getenv("OPENCODE_API_KEY"):
+            coding_backends.append(OpenCodeLLM())
+        coding_model = os.getenv("OLLAMA_CODING_MODEL", "qwen2.5-coder:3b")
+        if coding_model in _get_ollama_models():
+            coding_backends.append(OllamaLLM(model=coding_model))
+        if coding_backends:
+            logger.info(f"Using coding-task fallback chain for: {task_hint}")
+            return FallbackLLM(coding_backends)
 
     # Fast/chat tasks → use Groq if available
     if any(x in task for x in ["fast", "quick", "chat", "conversation", "response"]):

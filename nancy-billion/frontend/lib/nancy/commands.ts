@@ -71,10 +71,11 @@ const CONVERSATIONAL_TOPICS: { pattern: RegExp; reply: string }[] = [
     pattern: /\b(thank(s| you)|cheers|appreciate)\b/,
     reply: "Always a pleasure. Standing by.",
   },
-  {
-    pattern: /\b(how are you|how('?s| is) it going|you okay|you alright)\b/,
-    reply: "All systems nominal on my end. What can I get you?",
-  },
+  // Deliberately NOT here: "how are you" / "how's it going" style small talk.
+  // Unlike weather/news/jokes (topics with no real data feed wired in), these
+  // have no reason to be a fixed canned line — they fall through to the
+  // 'unknown' branch below, which asks the real backend LLM for a genuine,
+  // context-aware reply instead of the same static sentence every time.
 ]
 
 export function parseCommand(rawInput: string): CommandResult {
