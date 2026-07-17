@@ -21,7 +21,7 @@ import type { LogEntry, PanelKey, Place } from '@/lib/nancy/types'
 import { cn } from '@/lib/utils'
 import { sfx, unlockSfx, duckSfx } from '@/lib/nancy/sfx'
 
-import { Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, X } from 'lucide-react'
+import { Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, X, Mic, MicOff, Keyboard, ChevronDown } from 'lucide-react'
 
 const NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -46,9 +46,17 @@ export default function Page() {
   const [thinking, setThinking] = useState(false)
   const [currentUtterance, setCurrentUtterance] = useState('')
   const [wordIndex, setWordIndex] = useState(-1)
+  // Voice is the primary interaction; the full terminal (scrollback + typed
+  // input) is hidden until explicitly summoned, so voice-first actually
+  // means voice-first instead of a permanent command bar under everything.
+  const [consoleOpen, setConsoleOpen] = useState(false)
   const launchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const currentAudioRef = useRef<HTMLAudioElement | null>(null)
   const wordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Mirrors currentAudioRef as state (not just a ref) so NancyOrb re-renders
+  // with the live <audio> element and can analyze its real playback level —
+  // only set for the real NeuTTS path, stays null for the Web Speech fallback.
+  const [speakingAudioEl, setSpeakingAudioEl] = useState<HTMLAudioElement | null>(null)
 
   const log = useCallback((level: LogEntry['level'], text: string) => {
     setLogs((prev) =>
@@ -62,6 +70,7 @@ export default function Page() {
       cancelSpeech()
       currentAudioRef.current?.pause()
       currentAudioRef.current = null
+      setSpeakingAudioEl(null)
       if (wordTimerRef.current) {
         clearInterval(wordTimerRef.current)
         wordTimerRef.current = null
@@ -112,12 +121,14 @@ export default function Page() {
               wordTimerRef.current = null
             }
             if (currentAudioRef.current === audio) currentAudioRef.current = null
+            setSpeakingAudioEl((cur) => (cur === audio ? null : cur))
             setSpeaking(false)
             setWordIndex(-1)
             URL.revokeObjectURL(audioUrl)
           }
 
           audio.addEventListener('play', () => {
+            setSpeakingAudioEl(audio)
             setWordIndex(0)
             // NeuTTS doesn't emit per-word boundary events like the Web Speech
             // API does — approximate by spreading words evenly across the
@@ -433,7 +444,7 @@ export default function Page() {
           className="group fixed bottom-24 right-6 z-40 flex flex-col items-center gap-2 animate-orb-dock focus:outline-none"
         >
           <div className="relative transition-transform duration-300 group-hover:scale-105 group-active:scale-95">
-            <NancyOrb state={orbState} size={200} />
+            <NancyOrb state={orbState} size={200} audioElement={speakingAudioEl} />
             <div className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-primary/50 shadow-[0_0_60px_var(--hud)] group-hover:ring-primary/90 group-hover:shadow-[0_0_80px_var(--hud)]" />
             <div className="pointer-events-none absolute -inset-3 rounded-full border border-dashed border-primary/30 animate-hud-spin-slow" />
           </div>
@@ -443,17 +454,56 @@ export default function Page() {
         </button>
       )}
 
-      {/* Bottom fixed command console */}
+      {/* Bottom dock: voice-first by default (just a mic toggle + a summon
+          affordance for the rare case you want to type). The full terminal
+          only appears once you actually ask for it. */}
       <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-[1680px] px-3 pb-3 md:px-4">
-        <ConsoleBar
-          logs={logs}
-          listening={state.listening}
-          awake={state.awake}
-          supported={state.supported}
-          interim={state.interim}
-          onToggleMic={toggleMic}
-          onSubmit={onUserInput}
-        />
+        {consoleOpen ? (
+          <div className="flex flex-col items-center gap-1.5">
+            <ConsoleBar
+              logs={logs}
+              listening={state.listening}
+              awake={state.awake}
+              supported={state.supported}
+              interim={state.interim}
+              onToggleMic={toggleMic}
+              onSubmit={onUserInput}
+            />
+            <button
+              type="button"
+              onClick={() => setConsoleOpen(false)}
+              className="flex items-center gap-1 rounded border border-border/50 bg-background/50 px-2.5 py-1 text-[0.5rem] uppercase tracking-widest text-muted-foreground backdrop-blur-sm transition-colors hover:border-primary/50 hover:text-primary"
+            >
+              <ChevronDown className="h-3 w-3" /> Hide console
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-center gap-3 pb-1">
+            <button
+              type="button"
+              onClick={toggleMic}
+              disabled={!state.supported}
+              title={state.supported ? 'Toggle microphone' : 'Speech recognition not supported in this browser'}
+              className={cn(
+                'flex h-11 w-11 items-center justify-center rounded-full border backdrop-blur-sm transition-colors',
+                !state.supported && 'cursor-not-allowed opacity-40',
+                state.listening
+                  ? 'border-primary bg-primary/20 text-primary shadow-[0_0_16px_var(--hud)]'
+                  : 'border-border bg-secondary/40 text-foreground hover:border-primary/60',
+              )}
+            >
+              {state.listening ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConsoleOpen(true)}
+              title="Type a command"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-border/50 bg-background/40 text-muted-foreground backdrop-blur-sm transition-colors hover:border-primary/50 hover:text-primary"
+            >
+              <Keyboard className="h-4 w-4" />
+            </button>
+          </div>
+        )}
       </div>
     </main>
   )
@@ -492,7 +542,7 @@ function HeroVoice({
   return (
     <div className="flex min-h-[calc(100dvh-260px)] flex-col items-center justify-center gap-6 py-6 sm:gap-8 sm:py-10">
       <div className="relative">
-        <NancyOrb state={orbState} size={orbSize} />
+        <NancyOrb state={orbState} size={orbSize} audioElement={speakingAudioEl} />
       </div>
 
       <div className="w-full max-w-xl px-4">
