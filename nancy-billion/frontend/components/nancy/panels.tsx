@@ -2,6 +2,7 @@
 
 import { useEffect, useCallback, useMemo, useState } from 'react'
 import { ArcReactor, HudPanel, RadialGauge, StatBar } from './hud-bits'
+import { GlobeView } from './globe-view'
 import type { AgentInfo } from '@/lib/nancy/types'
 import { listAgents, autoRouteAgent, type AgentListResponse } from '@/lib/nancy/agent-client'
 import { AgentTaskModal } from './agent-task-modal'
@@ -440,42 +441,15 @@ function AgentDomainChart({ agents }: { agents: AgentInfo[] }) {
   )
 }
 
-/* ─── Simple world tracker (SVG blips over a globe silhouette) ─── */
+/* ─── Mini live globe (reuses the real three.js/globe.gl instance from
+   globe-view.tsx instead of a flat SVG placeholder — same asset the Recon
+   map uses, just ambient-rotating with no active target). Only mounts
+   while the Overview tab is actually visible, since OverviewPanel itself
+   is conditionally rendered by page.tsx. ─── */
 function WorldTracker() {
-  const tick = useTick(1600)
-  const blips = Array.from({ length: 8 }).map((_, i) => ({
-    x: 15 + ((i * 37 + tick * 3) % 130),
-    y: 30 + ((i * 19 + tick * 2) % 60),
-    hot: i % 3 === 0,
-  }))
   return (
     <div className="relative aspect-[3/2] w-full overflow-hidden rounded border border-border/50 bg-background/40">
-      <svg viewBox="0 0 160 100" className="h-full w-full">
-        <defs>
-          <radialGradient id="g" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="oklch(0.32 0.09 215)" />
-            <stop offset="100%" stopColor="transparent" />
-          </radialGradient>
-        </defs>
-        {/* latitude/longitude grid */}
-        {Array.from({ length: 7 }).map((_, i) => (
-          <line key={`h${i}`} x1="0" x2="160" y1={(i + 1) * 12.5} y2={(i + 1) * 12.5} stroke="var(--hud)" strokeOpacity="0.12" />
-        ))}
-        {Array.from({ length: 12 }).map((_, i) => (
-          <line key={`v${i}`} y1="0" y2="100" x1={(i + 1) * 13.3} x2={(i + 1) * 13.3} stroke="var(--hud)" strokeOpacity="0.12" />
-        ))}
-        <ellipse cx="80" cy="50" rx="70" ry="42" fill="url(#g)" stroke="var(--hud)" strokeOpacity="0.35" />
-        {blips.map((b, i) => (
-          <g key={i}>
-            <circle cx={b.x} cy={b.y} r={b.hot ? 2.4 : 1.6} fill={b.hot ? 'var(--accent)' : 'var(--hud)'}
-              style={{ filter: `drop-shadow(0 0 4px ${b.hot ? 'var(--accent)' : 'var(--hud)'})` }} />
-            <circle cx={b.x} cy={b.y} r={b.hot ? 6 : 4} fill="none" stroke={b.hot ? 'var(--accent)' : 'var(--hud)'} strokeOpacity="0.4">
-              <animate attributeName="r" from={b.hot ? 3 : 2} to={b.hot ? 10 : 8} dur="2s" repeatCount="indefinite" />
-              <animate attributeName="opacity" from="0.6" to="0" dur="2s" repeatCount="indefinite" />
-            </circle>
-          </g>
-        ))}
-      </svg>
+      <GlobeView place={null} active={false} />
     </div>
   )
 }
