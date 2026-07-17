@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ollama --version)",
+      "Bash(timeout 20 du -sh \"/c/Users/leona.DESKTOP-10QNDAN/Desktop/automatic-octo-spork/nancy-billion/node_modules/my-project\")",
+      "Bash(echo \"exit: $?\")",
+      "Bash(npm cache *)",
+      "Bash(pnpm store *)",
+      "Read(//c/Users/leona.DESKTOP-10QNDAN/AppData/Local/hermes/**)",
+      "Bash(curl -s -o /dev/null -w \"ollama status: %{http_code}\\\\n\" http://localhost:11434 --max-time 5)",
+      "Bash(ollama pull *)",
+      "Bash(ollama list *)",
+      "Bash(curl -s http://localhost:11434/api/generate -d '{\"model\":\"llama3.2:3b\",\"prompt\":\"Say hello in one short sentence.\",\"stream\":false}' --max-time 60)",
+      "Bash(python -c \"import json,sys; print\\(json.load\\(sys.stdin\\).get\\('response'\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/system/health --max-time 3)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/system/health --max-time 10)",
+      "Bash(curl -s http://localhost:8000/system/health --max-time 10)",
+      "Bash(curl -s \"https://api.telegram.org/bot8800980703:AAHNmik3u-r1R35qrtPHtirIctjS4WAIs_4/getUpdates\")",
+      "Bash(curl -s \"https://api.telegram.org/bot8800980703:AAHNmik3u-r1R35qrtPHtirIctjS4WAIs_4/getMe\")",
+      "Bash(curl -s \"https://api.telegram.org/bot8800980703:AAHNmik3u-r1R35qrtPHtirIctjS4WAIs_4/sendMessage\" -d \"chat_id=1915879925\" -d \"text=Nancy/Billion here — Telegram connection confirmed. This is a one-time test message from setup.\")",
+      "Bash(curl -s \"https://api.telegram.org/bot8800980703:AAHNmik3u-r1R35qrtPHtirIctjS4WAIs_4/sendMessage\" --data-urlencode \"chat_id=1915879925\" --data-urlencode \"text=Nancy/Billion here - Telegram connection confirmed. This is a one-time test message from setup.\")",
+      "Bash(python -c \"import PIL; print\\('PIL', PIL.__version__\\)\")",
+      "Bash(python -c \"import requests; print\\('requests OK'\\)\")",
+      "Bash(curl -s \"https://api.telegram.org/bot8800980703:AAHNmik3u-r1R35qrtPHtirIctjS4WAIs_4/sendMessage\" --data-urlencode \"chat_id=1915879925\" --data-urlencode \"text=What model are you running on right now?\")",
+      "Bash(curl -s \"https://api.telegram.org/bot8800980703:AAHNmik3u-r1R35qrtPHtirIctjS4WAIs_4/getUpdates?offset=-5\")",
+      "Read(//c/Users/leona.DESKTOP-10QNDAN/Desktop/**)",
+      "Bash(echo \"EXIT CODE: $?\")"
+    ]
+  }
+}

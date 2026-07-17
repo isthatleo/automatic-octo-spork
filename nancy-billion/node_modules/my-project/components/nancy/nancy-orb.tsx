@@ -98,19 +98,78 @@ function useMicLevel(active: boolean) {
   return levelRef
 }
 
+/** Reads live amplitude (0..1) from a playing <audio> element -- the real
+ * NeuTTS output (see page.tsx's nancySay), not a fake "speaking" wiggle.
+ * Falls back to 0 for the browser Web Speech API path, which exposes no
+ * analyzable media element. */
+function useElementAudioLevel(el: HTMLAudioElement | null) {
+  const levelRef = useRef(0)
+  useEffect(() => {
+    if (!el) {
+      levelRef.current = 0
+      return
+    }
+    let raf = 0
+    let ctx: AudioContext | null = null
+    let cancelled = false
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const AC = window.AudioContext || (window as any).webkitAudioContext
+      ctx = new AC()
+      const source = ctx.createMediaElementSource(el)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+      analyser.connect(ctx.destination) // keep the audio actually audible
+      const data = new Uint8Array(analyser.frequencyBinCount)
+      const tick = () => {
+        if (cancelled) return
+        analyser.getByteTimeDomainData(data)
+        let sum = 0
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128
+          sum += v * v
+        }
+        const rms = Math.sqrt(sum / data.length)
+        levelRef.current = Math.min(1, rms * 3.5)
+        raf = requestAnimationFrame(tick)
+      }
+      tick()
+    } catch {
+      // createMediaElementSource throws if called twice on the same element,
+      // or if the browser blocks it -- fail silently, orb just shows no
+      // audio-reactivity for this utterance rather than crashing.
+      levelRef.current = 0
+    }
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+      ctx?.close().catch(() => {})
+      levelRef.current = 0
+    }
+  }, [el])
+  return levelRef
+}
+
 export function NancyOrb({
   state = 'idle',
   name = 'NÅNCY',
   size = 360,
+  audioElement = null,
 }: {
   state?: OrbState
   name?: string
   size?: number
+  /** The <audio> element currently playing Nancy's real TTS output, if any
+   * (see page.tsx's nancySay) -- drives real audio-reactivity while
+   * speaking instead of a fixed decorative wobble. */
+  audioElement?: HTMLAudioElement | null
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stateRef = useRef<OrbState>(state)
   stateRef.current = state
   const micLevel = useMicLevel(state === 'listening')
+  const speakingLevel = useElementAudioLevel(audioElement)
 
   // Particle + waveform engine on canvas.
   useEffect(() => {
@@ -193,7 +252,11 @@ export function NancyOrb({
 
       // ---- audio-reactive waveform ring ----
       const live =
-        stateRef.current === 'listening' ? micLevel.current : 0
+        stateRef.current === 'listening'
+          ? micLevel.current
+          : stateRef.current === 'speaking'
+            ? speakingLevel.current
+            : 0
       const amp = (p.waveAmp + live * 0.6) * R * 0.16
       const baseR = R * 0.6
       const segs = 160

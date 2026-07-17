@@ -12,12 +12,12 @@ import {
   Clapperboard,
   Clock,
   FlaskConical,
-  Galaxy,
   Globe2,
   Landmark,
   List,
   Loader2,
   Newspaper,
+  Orbit,
   PlayCircle,
   Rocket,
   Search,
@@ -190,7 +190,7 @@ export function KnowledgePanel({
                   : 'bg-secondary/30 text-muted-foreground hover:text-foreground'
               }`}
             >
-              <Galaxy className="h-3 w-3" /> Galaxy
+              <Orbit className="h-3 w-3" /> Galaxy
             </button>
             <button
               type="button"
@@ -341,63 +341,76 @@ export function KnowledgePanel({
         {!isLoading && viewMode === 'galaxy' && items.length > 0 && (
           <div className="relative h-full w-full">
             {/* Galaxy background */}
-            <div className="absolute inset-0 -z-10" style={{
-              background: 'radial-gradient(circle at center, transparent 0%, oklch(0.1 0 0 / 0.8) 70%, oklch(0.05 0 0 / 0.9) 100%)',
-              backgroundImage: 'radial-gradient(circle at center, transparent 0%, oklch(0.1 0 0 / 0.8) 70%, oklch(0.05 0 0 / 0.9) 100%), repeating-radial-gradient(circle at center, oklch(0.1 0 0 / 0.1) 0%, oklch(0.1 0 0 / 0.1) 1%, transparent 1%, transparent 100%)'
-            }}></div>
-            
-            {/* Constellation lines */}
-            <div className="absolute inset-0 -z-5 pointer-events-none" style={{
-              opacity: 0.3
-            }}>
-              {items.map((item, index) => 
-                items.map((otherItem, otherIndex) => 
-                  index < otherIndex && (
-                    <div
-                      key={`constellation-${index}-${otherIndex}`}
-                      className="absolute"
-                      style={{
-                        left: `${(index / items.length) * 100}%`,
-                        top: `${(index / items.length) * 100}%`,
-                        width: `${Math.abs((otherIndex - index) / items.length) * 100}%`,
-                        height: `${Math.abs((otherIndex - index) / items.length) * 100}%`,
-                        background: 'linear-gradient(45deg, transparent, oklch(0.3 0.2 250 / 0.5), transparent)',
-                        transformOrigin: '0 0'
-                      }}
-                    />
-                  ))
-                ).flat()
-              }
-            </div>
-            
-            {/* Knowledge nodes (stars) */}
-            <div className="relative h-full w-full">
-              {items.map((item, index) => (
-                <div
-                  key={`star-${item.id}`}
-                  className="absolute"
-                  style={{
-                    left: `${(index / items.length) * 100}%`,
-                    top: `${(index / items.length) * 100}%`,
-                    transform: 'translate(-50%, -50%)'
-                  }}
-                >
-                  <div
-                    className="flex items-center justify-center w-10 h-10 rounded-full bg-primary/20 border border-primary/30 hover:bg-primary/30 transition-all duration-300"
-                    onClick={() => setSpotlight(item)}
-                    title={item.title}
+            <div
+              className="absolute inset-0 -z-10"
+              style={{
+                background:
+                  'radial-gradient(circle at center, transparent 0%, oklch(0.1 0 0 / 0.8) 70%, oklch(0.05 0 0 / 0.9) 100%)',
+              }}
+            />
+
+            {(() => {
+              // Golden-angle spiral scatter -- deterministic (same items always
+              // land in the same spots), not a fabricated data layout, just a
+              // real algorithm for spreading N nodes without overlap.
+              const GOLDEN_ANGLE = 137.508 * (Math.PI / 180)
+              const n = items.length
+              const nodes = items.map((item, i) => {
+                const angle = i * GOLDEN_ANGLE
+                const radius = 6 + (Math.sqrt(i + 1) / Math.sqrt(n)) * 40
+                return {
+                  item,
+                  x: 50 + radius * Math.cos(angle),
+                  y: 50 + radius * Math.sin(angle),
+                }
+              })
+
+              return (
+                <>
+                  {/* Constellation lines -- real SVG segments between
+                      consecutive nodes in spiral order, not overlapping divs. */}
+                  <svg
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                    className="pointer-events-none absolute inset-0 h-full w-full"
                   >
-                    <div className="flex-1 h-1 w-1 bg-primary" />
-                    <div className="text-[0.5rem] text-primary">●</div>
-                  </div>
-                  
-                  {/* Tooltip/label */}
-                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-2 py-1 rounded bg-primary/90 text-[0.45rem] text-primary whitespace-nowrap">
-                    {item.title.length > 15 ? item.title.substring(0, 15) + '...' : item.title}
-                  </div>
-                </div>
-              ))}
-            </div>
+                    {nodes.slice(1).map((n0, i) => {
+                      const prev = nodes[i]
+                      return (
+                        <line
+                          key={`line-${n0.item.id}`}
+                          x1={prev.x}
+                          y1={prev.y}
+                          x2={n0.x}
+                          y2={n0.y}
+                          stroke="oklch(0.6 0.15 240 / 0.35)"
+                          strokeWidth={0.15}
+                        />
+                      )
+                    })}
+                  </svg>
+
+                  {/* Knowledge nodes (stars) */}
+                  {nodes.map(({ item, x, y }) => (
+                    <button
+                      key={`star-${item.id}`}
+                      type="button"
+                      onClick={() => setSpotlight(item)}
+                      title={item.title}
+                      className="group absolute flex flex-col items-center"
+                      style={{ left: `${x}%`, top: `${y}%`, transform: 'translate(-50%, -50%)' }}
+                    >
+                      <span className="flex h-8 w-8 items-center justify-center rounded-full border border-primary/40 bg-primary/15 text-primary shadow-[0_0_10px_rgba(56,211,235,0.35)] transition-all duration-300 group-hover:scale-125 group-hover:bg-primary/30">
+                        <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                      </span>
+                      <span className="mt-1 max-w-[6rem] truncate rounded bg-background/80 px-1.5 py-0.5 text-[0.45rem] text-primary opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100">
+                        {item.title}
+                      </span>
+                    </button>
+                  ))}
+                </>
+              )
+            })()}
           </div>
         )}
         
