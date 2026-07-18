@@ -48,6 +48,15 @@ import {
   ShieldCheck,
   Eye,
   Thermometer,
+  Brain,
+  FlaskConical,
+  Scale,
+  Server,
+  Palette,
+  ChevronDown,
+  ChevronRight,
+  X,
+  Play,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -177,123 +186,117 @@ export function OverviewPanel() {
   ]
 
   return (
-    <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
-      {/* ── LEFT: bento mosaic — reactor is genuinely taller than its
-          neighbors (row-span-2 against a 2x2 stat mosaic of matching
-          height), not just another equal-height card in a row. ── */}
-      <div className="col-span-12 grid grid-cols-12 gap-4 xl:col-span-8">
-        <HudPanel
-          hero
-          title="Central Reactor · Nancy Core"
-          right={<span className="text-primary animate-hud-breathe">ONLINE</span>}
-          className="col-span-12 row-span-2 md:col-span-7"
-        >
-          <div className="flex h-full flex-col items-center justify-center gap-4">
-            <ArcReactor size={200} />
-            <div className="w-full space-y-3">
-              <div className="text-center">
-                <div className="font-display text-3xl tracking-tight text-primary">
-                  <AnimatedNumber value={successPct} decimals={1} /> <span className="text-base text-muted-foreground">%</span>
-                </div>
-                <div className="text-[0.55rem] text-muted-foreground">
-                  Fleet Success Rate · {stats ? `${stats.total_tasks} tasks` : '…'}
-                </div>
+    <div className="mx-auto flex max-w-[1680px] flex-col gap-4">
+      {/* slim briefing strip -- same language as the Fleet Console header,
+          so pages read as one product instead of one-off box grids */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/60 px-4 py-3">
+        <div className="flex items-center gap-3">
+          <span className="font-display text-xl text-foreground">Mission Briefing</span>
+          <span className="flex items-center gap-1.5 text-[0.62rem] text-muted-foreground">
+            <Activity className="h-3 w-3 text-primary animate-hud-breathe" /> Session {uptime}
+          </span>
+        </div>
+        <div className="flex items-center gap-4 text-[0.68rem]">
+          {bigStats.map((s) => (
+            <span key={s.label} className="flex items-center gap-1.5">
+              <s.icon className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="font-display text-base text-foreground"><AnimatedNumber value={s.v} /></span>
+              <span className="text-muted-foreground">{s.label.toLowerCase()}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* spotlight core -- a deliberately distinct card (gradient ring
+          border, asymmetric split), not another hairline HudPanel box */}
+      <div className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-br from-card via-card to-primary/5 p-5">
+        <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-primary/10 blur-3xl" aria-hidden />
+        <div className="relative grid grid-cols-1 gap-6 md:grid-cols-[auto_1fr]">
+          <div className="flex flex-col items-center justify-center gap-2">
+            <ArcReactor size={168} />
+            <div className="text-center">
+              <div className="font-display text-2xl tracking-tight text-primary">
+                <AnimatedNumber value={successPct} decimals={1} /> <span className="text-sm text-muted-foreground">%</span>
               </div>
-              <StatBar label="Neural CPU" value={cpu.toFixed(0)} unit="%" pct={cpu} />
-              <StatBar label="Memory" value={mem.toFixed(0)} unit="%" pct={mem} amber />
-              <StatBar label="Uplink" value={net.toFixed(0)} unit="%" pct={net} />
+              <div className="text-[0.55rem] text-muted-foreground">fleet success</div>
             </div>
           </div>
-        </HudPanel>
+          <div className="flex flex-col justify-center gap-3">
+            <StatBar label="Neural CPU" value={cpu.toFixed(0)} unit="%" pct={cpu} />
+            <StatBar label="Memory" value={mem.toFixed(0)} unit="%" pct={mem} amber />
+            <StatBar label="Uplink" value={net.toFixed(0)} unit="%" pct={net} />
+          </div>
+        </div>
+      </div>
 
-        {/* 2x2 stat mosaic — stretches to match the reactor's row-span-2 height */}
-        <div className="col-span-12 row-span-2 grid grid-cols-2 grid-rows-2 gap-3 md:col-span-5">
-          {bigStats.map((s) => (
-            <div key={s.label} className="hud-panel flex h-full flex-col justify-between rounded-md p-3 transition-transform hover:-translate-y-0.5">
-              <div className="flex items-center gap-2">
-                <span className={cn(
-                  'flex h-8 w-8 items-center justify-center rounded-md',
-                  s.tone === 'primary' && 'bg-primary/15 text-primary',
-                  s.tone === 'accent'  && 'bg-accent/15 text-accent',
-                  s.tone === 'ok'      && 'bg-primary/15 text-primary',
-                )}>
-                  <s.icon className="h-4 w-4" />
-                </span>
-                <span className="text-[0.5rem] text-muted-foreground">{s.label}</span>
-              </div>
-              <div className="font-display text-2xl tracking-tight text-foreground">
-                <AnimatedNumber value={s.v} />
-              </div>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        {/* LEFT column */}
+        <div className="flex flex-col gap-4">
+          <HudPanel title="System Telemetry · Live" right={<span className="text-primary text-[0.5rem]">Δ {tick}</span>}>
+            <SystemTelemetryChart history={telemetryHistory} height={208} />
+            <div className="mt-3 flex items-center gap-3 text-[0.5rem] text-muted-foreground">
+              <LegendDot color="var(--hud)" label="cpu" />
+              <LegendDot color="var(--accent)" label="memory" />
+              <LegendDot color="oklch(0.7 0.16 160)" label="uplink" />
             </div>
-          ))}
-          <div className="hud-panel flex h-full flex-col justify-between rounded-md p-3 transition-transform hover:-translate-y-0.5">
-            <div className="flex items-center gap-2">
-              <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/15 text-primary">
-                <Activity className="h-4 w-4" />
-              </span>
-              <span className="text-[0.5rem] text-muted-foreground">Session</span>
+          </HudPanel>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <HudPanel title="Agent Domains" accent="violet">
+              <AgentDomainChart agents={agents} />
+            </HudPanel>
+            <HudPanel title="Fleet & System Vitals">
+              <div className="flex flex-wrap items-center justify-around gap-2 py-1">
+                <RadialGauge value={cpu} label="CPU" color="var(--hud)" size={72} />
+                <RadialGauge value={fleetOnlinePct} label="Fleet" color="var(--accent)" size={72} />
+                <RadialGauge value={health.disk ?? 0} label="Disk" color="var(--tertiary)" size={72} />
+              </div>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                {[
+                  { icon: Cpu, label: 'Cores', v: cores != null ? `${cores}` : '…' },
+                  { icon: Database, label: 'Mem', v: `${mem.toFixed(0)}%` },
+                  { icon: Thermometer, label: 'Temp', v: health.tempC != null ? `${health.tempC.toFixed(0)}°C` : 'N/A' },
+                ].map(({ icon: Icon, label, v }) => (
+                  <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/60 bg-secondary/30 py-2">
+                    <Icon className="h-4 w-4 text-primary" />
+                    <span className="font-heading text-xs text-foreground">{v}</span>
+                    <span className="text-[0.45rem] text-muted-foreground">{label}</span>
+                  </div>
+                ))}
+              </div>
+            </HudPanel>
+          </div>
+
+          {/* Activity as a real timeline (connecting rail + dots), not a
+              bordered box of list rows -- visually distinct from every
+              other panel on this page. */}
+          <div className="rounded-xl border border-border bg-card/60 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="flex items-center gap-2 font-heading text-[0.72rem] font-medium text-foreground/90">
+                <span className="h-1.5 w-1.5 rounded-full bg-primary" /> Activity
+              </h2>
+              <span className="text-primary text-xs">Live</span>
             </div>
-            <div className="font-display text-xl tracking-tight text-foreground">{uptime}</div>
+            <ActivityTimeline cpu={cpu} mem={mem} net={net} stats={stats} />
           </div>
         </div>
 
-        {/* Telemetry gets more room + more height than before — the actual
-            live chart, not a stat card, deserves to be the visual anchor
-            of the second row. */}
-        <HudPanel title="System Telemetry · Live" right={<span className="text-primary text-[0.5rem]">Δ {tick}</span>} className="col-span-12 md:col-span-8">
-          <SystemTelemetryChart history={telemetryHistory} height={208} />
-          <div className="mt-3 flex items-center gap-3 text-[0.5rem] text-muted-foreground">
-            <LegendDot color="var(--hud)" label="cpu" />
-            <LegendDot color="var(--accent)" label="memory" />
-            <LegendDot color="oklch(0.7 0.16 160)" label="uplink" />
+        {/* RIGHT rail -- one continuous card with internal dividers instead
+            of three stacked, identical boxes. */}
+        <div className="flex flex-col gap-4 rounded-xl border border-border bg-card/60 p-4 xl:sticky xl:top-4 xl:self-start">
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="font-heading text-[0.72rem] font-medium text-foreground/90">Global Track</h2>
+              <span className="text-primary text-[0.6rem]">Active</span>
+            </div>
+            <WorldTracker tall />
           </div>
-        </HudPanel>
-
-        <HudPanel title="Agent Domains" accent="violet" className="col-span-12 md:col-span-4">
-          <AgentDomainChart agents={agents} />
-        </HudPanel>
-
-        <HudPanel
-          title="Activity"
-          right={<span className="text-primary text-xs">Live</span>}
-          className="col-span-12"
-        >
-          <CommsFeed cpu={cpu} mem={mem} net={net} stats={stats} />
-        </HudPanel>
-      </div>
-
-      {/* ── RIGHT: recon rail — the globe leads (strongest real asset),
-          uplink + quick stats merged into one composed panel instead of
-          two near-identical stacked cards. ── */}
-      <div className="col-span-12 grid grid-cols-1 gap-4 xl:col-span-4">
-        <HudPanel title="Global Track Sys" right={<span className="text-primary">ACTIVE</span>}>
-          <WorldTracker tall />
-        </HudPanel>
-
-        <HudPanel title="Trading P/L · Recent" accent="amber">
-          <TradePLChart />
-        </HudPanel>
-
-        <HudPanel title="Fleet & System Vitals">
-          <div className="flex flex-wrap items-center justify-around gap-2 py-1">
-            <RadialGauge value={cpu} label="CPU" color="var(--hud)" size={80} />
-            <RadialGauge value={fleetOnlinePct} label="Fleet" color="var(--accent)" size={80} />
-            <RadialGauge value={health.disk ?? 0} label="Disk" color="var(--tertiary)" size={80} />
+          <div className="h-px bg-border/60" />
+          <div>
+            <h2 className="mb-2 font-heading text-[0.72rem] font-medium text-foreground/90">Trading P/L · Recent</h2>
+            <TradePLChart />
           </div>
-          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-            {[
-              { icon: Cpu, label: 'Cores', v: cores != null ? `${cores}` : '…' },
-              { icon: Database, label: 'MEM', v: `${mem.toFixed(0)}%` },
-              { icon: Thermometer, label: 'TEMP', v: health.tempC != null ? `${health.tempC.toFixed(0)}°C` : 'N/A' },
-            ].map(({ icon: Icon, label, v }) => (
-              <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/60 bg-secondary/30 py-2">
-                <Icon className="h-4 w-4 text-primary" />
-                <span className="font-heading text-xs text-foreground">{v}</span>
-                <span className="text-[0.45rem] text-muted-foreground">{label}</span>
-              </div>
-            ))}
-          </div>
-        </HudPanel>
+        </div>
       </div>
     </div>
   )
@@ -344,11 +347,13 @@ function SystemTelemetryChart({ history, height = 160 }: { history: Array<{ t: n
   )
 }
 
-/* ─── Live ops feed -- real derived events, not scripted flavor text.
-   Appends a real line whenever the actual polled system/fleet values
+/* ─── Live activity timeline -- real derived events, not scripted flavor
+   text. Appends a real line whenever the actual polled system/fleet values
    change, instead of cycling through fabricated "SIGINT"/"orbital satellite"
-   copy that never corresponded to anything the backend does. ─── */
-function CommsFeed({
+   copy that never corresponded to anything the backend does. Rendered as a
+   connecting-rail timeline instead of a bordered list, distinct from the
+   panel/box vocabulary used everywhere else on the page. ─── */
+function ActivityTimeline({
   cpu, mem, net, stats,
 }: {
   cpu: number
@@ -380,24 +385,33 @@ function CommsFeed({
     ].slice(0, 6))
   }, [stats])
 
+  if (rows.length === 0) {
+    return <p className="text-xs text-muted-foreground">Waiting for the first real reading…</p>
+  }
+
   return (
-    <ul className="flex flex-col gap-1 font-mono text-xs">
-      {rows.length === 0 && <li className="text-muted-foreground">Waiting for the first real reading…</li>}
+    <ol className="relative flex flex-col gap-4 pl-4">
+      <div className="absolute bottom-1 left-[3px] top-1 w-px bg-border" aria-hidden />
       {rows.map((row, i) => (
-        <li
-          key={row.id}
-          className="flex items-center gap-3 border-b border-border/40 pb-1 last:border-none"
-          style={{ opacity: 1 - i * 0.13 }}
-        >
-          <span className="w-12 shrink-0 text-muted-foreground">{row.tag}</span>
-          <span className="flex-1 truncate text-foreground">{row.text}</span>
-          <span className={cn('text-xs', row.tone === 'warn' ? 'text-destructive' : 'text-primary')}>●</span>
-          <span className="w-16 shrink-0 text-right text-xs text-muted-foreground">
-            {new Date(row.at).toLocaleTimeString('en-GB').slice(0, 8)}
-          </span>
+        <li key={row.id} className="relative flex items-start gap-3" style={{ opacity: 1 - i * 0.12 }}>
+          <span
+            className={cn(
+              'absolute -left-4 top-1 h-2 w-2 shrink-0 rounded-full ring-4 ring-card',
+              row.tone === 'warn' ? 'bg-destructive' : 'bg-primary',
+            )}
+          />
+          <div className="flex min-w-0 flex-1 items-center justify-between gap-3">
+            <div className="min-w-0">
+              <span className="mr-2 font-mono text-[0.55rem] text-muted-foreground">{row.tag}</span>
+              <span className="text-xs text-foreground">{row.text}</span>
+            </div>
+            <span className="shrink-0 font-mono text-[0.6rem] text-muted-foreground">
+              {new Date(row.at).toLocaleTimeString('en-GB').slice(0, 8)}
+            </span>
+          </div>
         </li>
       ))}
-    </ul>
+    </ol>
   )
 }
 
@@ -652,8 +666,18 @@ function ThoughtTrace() {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   AGENTS — largely unchanged behaviour, but a richer 2-col layout
+   AGENTS — Fleet Console: a grouped roster + persistent detail rail,
+   not another grid of equal-sized boxes. Categories are a display-only
+   grouping decision (the backend has no category field) built from the
+   29 real domains actually returned by /agents/list.
    ═══════════════════════════════════════════════════════════════ */
+const STATUS_DOT: Record<string, string> = {
+  online: 'bg-primary',
+  idle: 'bg-muted-foreground',
+  training: 'bg-accent',
+  offline: 'bg-destructive/60',
+  error: 'bg-destructive',
+}
 const STATUS_COLOR: Record<string, string> = {
   online: 'text-primary',
   idle: 'text-muted-foreground',
@@ -662,21 +686,50 @@ const STATUS_COLOR: Record<string, string> = {
   error: 'text-destructive',
 }
 const DOMAIN_ICON: Record<string, React.ElementType> = {
+  'artificial-consciousness': Brain,
   'quantum-reasoning': Zap,
-  'consciousness': Activity,
-  'ethics': Shield,
-  'temporal-prediction': BarChart3,
-  'swarm-coordination': Rss,
-  'self-improvement': RefreshCw,
+  'quantum-computing': Cpu,
   'embodied-cognition': Bot,
+  'neural-interface': Activity,
+  'self-improvement': RefreshCw,
+  'temporal-prediction': BarChart3,
   'data-science': Database,
-  'crypto-trading': BarChart3,
-  'security': Shield,
-  'devops': Terminal,
   'research': Search,
+  'market-research': BarChart3,
+  'business-intelligence': BarChart3,
+  'bioinformatics': FlaskConical,
+  'astrophysics': Globe2,
+  'healthcare-analytics': FlaskConical,
+  'operations-research': Server,
+  'security': Shield,
+  'ethics': Scale,
+  'legal-compliance': Scale,
+  'qa-testing': ShieldCheck,
+  'devops': Terminal,
+  'system-monitoring': Signal,
+  'file-management': Folder,
+  'swarm-coordinator': Rss,
+  'communication': Radio,
+  'environmental-control': Thermometer,
+  'holographic-display': Eye,
+  'nanotechnology': Sparkles,
+  'crypto-trading': BarChart3,
+  'creative-design': Palette,
+}
+interface AgentCategory { label: string; icon: React.ElementType; domains: string[] }
+const AGENT_CATEGORIES: AgentCategory[] = [
+  { label: 'Cognition & Reasoning', icon: Brain, domains: ['artificial-consciousness', 'quantum-reasoning', 'quantum-computing', 'embodied-cognition', 'neural-interface', 'self-improvement', 'temporal-prediction'] },
+  { label: 'Data & Research', icon: FlaskConical, domains: ['data-science', 'research', 'market-research', 'business-intelligence', 'bioinformatics', 'astrophysics', 'healthcare-analytics', 'operations-research'] },
+  { label: 'Security & Governance', icon: Scale, domains: ['security', 'ethics', 'legal-compliance', 'qa-testing'] },
+  { label: 'Infrastructure & Ops', icon: Server, domains: ['devops', 'system-monitoring', 'file-management', 'swarm-coordinator', 'communication'] },
+  { label: 'Physical & Interface', icon: Cpu, domains: ['environmental-control', 'holographic-display', 'nanotechnology'] },
+  { label: 'Business & Creative', icon: Palette, domains: ['crypto-trading', 'creative-design'] },
+]
+function categoryFor(domain: string): string {
+  return AGENT_CATEGORIES.find((c) => c.domains.includes(domain))?.label ?? 'Other'
 }
 
-function AgentCard({ agent, onClick }: { agent: AgentInfo; onClick: () => void }) {
+function AgentRow({ agent, selected, onClick }: { agent: AgentInfo; selected: boolean; onClick: () => void }) {
   const Icon = DOMAIN_ICON[agent.domain] ?? Bot
   const isOnline = agent.status === 'online'
   const loadPct = Math.min(100, agent.load)
@@ -684,60 +737,133 @@ function AgentCard({ agent, onClick }: { agent: AgentInfo; onClick: () => void }
     <li
       onClick={agent.status !== 'offline' ? onClick : undefined}
       className={cn(
-        'group flex cursor-pointer flex-col gap-2 rounded border p-2.5 transition-all duration-200',
-        isOnline
-          ? 'glow-ring border-transparent bg-secondary/50 hover:-translate-y-0.5 hover:bg-secondary/70'
-          : agent.status === 'offline'
-          ? 'cursor-default border-border/30 bg-background/20 opacity-50'
-          : 'border-border bg-secondary/30 hover:border-primary/50 hover:bg-secondary/40',
+        'flex items-center gap-3 rounded-lg border p-2 transition-all duration-200',
+        agent.status === 'offline'
+          ? 'cursor-default border-border/20 bg-background/10 opacity-45'
+          : 'cursor-pointer',
+        selected
+          ? 'border-primary/70 bg-primary/10'
+          : isOnline
+          ? 'glow-ring border-transparent bg-secondary/40 hover:bg-secondary/60'
+          : agent.status !== 'offline'
+          ? 'border-border bg-secondary/20 hover:border-primary/40'
+          : '',
       )}
     >
-      <div className="flex items-center justify-between gap-1">
-        <span className="flex items-center gap-1.5 font-heading text-[0.7rem] text-foreground">
-          <Icon className="h-3.5 w-3.5 text-primary shrink-0" />
-          <span className="truncate">{agent.name}</span>
-        </span>
-        <span className={cn('shrink-0 text-[0.45rem] ', STATUS_COLOR[agent.status] ?? 'text-muted-foreground')}>
-          {agent.status}
-        </span>
+      <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-background/70">
+        <Icon className="h-4 w-4 text-primary" />
+        <span className={cn('absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full border border-background', STATUS_DOT[agent.status] ?? 'bg-muted-foreground')} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate font-heading text-[0.72rem] text-foreground">{agent.name}</span>
+          <span className={cn('shrink-0 text-[0.5rem]', STATUS_COLOR[agent.status] ?? 'text-muted-foreground')}>{agent.status}</span>
+        </div>
+        <div className="mt-1 h-1 overflow-hidden rounded-full bg-background/60">
+          <div
+            className="h-full rounded-full transition-all duration-500"
+            style={{ width: `${loadPct}%`, background: isOnline ? 'var(--hud)' : '#555' }}
+          />
+        </div>
       </div>
-      <p className="text-[0.5rem] text-muted-foreground truncate">{agent.domain}</p>
+    </li>
+  )
+}
+
+function AgentDetailRail({
+  agent, fallbackAgents, autoQuery, setAutoQuery, handleAutoRun, autoRunning, autoResult, onRunTask,
+}: {
+  agent: AgentInfo | null
+  fallbackAgents: AgentInfo[]
+  autoQuery: string
+  setAutoQuery: (v: string) => void
+  handleAutoRun: () => void
+  autoRunning: boolean
+  autoResult: string | null
+  onRunTask: (agent: AgentInfo) => void
+}) {
+  if (!agent) {
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="rounded-xl border border-border bg-card/60 p-4">
+          <h3 className="mb-1 font-heading text-xs text-foreground">Auto-route</h3>
+          <p className="mb-2 text-[0.6rem] text-muted-foreground">Ask anything — Nancy picks the right specialist.</p>
+          <div className="flex gap-1.5">
+            <input
+              value={autoQuery}
+              onChange={(e) => setAutoQuery(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleAutoRun()}
+              placeholder="e.g. analyse BTC volatility…"
+              className="flex-1 rounded border border-border bg-background/60 px-2 py-1.5 text-[0.65rem] text-foreground outline-none focus:border-primary/60"
+            />
+            <button type="button" onClick={handleAutoRun} disabled={autoRunning}
+              className="rounded border border-tertiary bg-tertiary/15 px-2.5 py-1.5 text-tertiary hover:bg-tertiary/25 disabled:opacity-50">
+              {autoRunning ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+            </button>
+          </div>
+          {autoResult && (
+            <p className="mt-2 rounded border border-border bg-background/40 px-2 py-1.5 text-[0.55rem] text-muted-foreground">{autoResult}</p>
+          )}
+        </div>
+        <div className="rounded-xl border border-border bg-card/60 p-4">
+          <h3 className="mb-2 font-heading text-xs text-foreground">Fleet load</h3>
+          <AgentLoadChart agents={fallbackAgents} />
+        </div>
+        <p className="px-1 text-[0.6rem] text-muted-foreground">Select an agent from the roster for full detail and to run a task.</p>
+      </div>
+    )
+  }
+  const Icon = DOMAIN_ICON[agent.domain] ?? Bot
+  return (
+    <div className="flex flex-col gap-3 rounded-xl border border-primary/40 bg-card/70 p-4">
+      <div className="flex items-center gap-3">
+        <span className="glow-ring flex h-11 w-11 shrink-0 items-center justify-center rounded-full border-transparent bg-secondary/60">
+          <Icon className="h-5 w-5 text-primary" />
+        </span>
+        <div className="min-w-0">
+          <div className="truncate font-display text-lg text-foreground">{agent.name}</div>
+          <div className="truncate text-[0.6rem] text-muted-foreground">{agent.domain} · {categoryFor(agent.domain)}</div>
+        </div>
+      </div>
+      <p className="text-[0.65rem] leading-relaxed text-muted-foreground">
+        {agent.description || `${agent.role || 'Specialist agent'} handling ${agent.domain.replace(/-/g, ' ')} tasks.`}
+      </p>
+      <div className="grid grid-cols-2 gap-2 text-center">
+        <div className="rounded-lg border border-border/60 bg-secondary/20 py-2">
+          <div className="font-display text-base text-foreground">{agent.total_tasks}</div>
+          <div className="text-[0.5rem] text-muted-foreground">tasks run</div>
+        </div>
+        <div className="rounded-lg border border-border/60 bg-secondary/20 py-2">
+          <div className="font-display text-base text-accent">{(agent.confidence * 100).toFixed(0)}%</div>
+          <div className="text-[0.5rem] text-muted-foreground">confidence</div>
+        </div>
+      </div>
       {(agent.mode && agent.mode !== 'production') || agent.hardware_connected === false ? (
         <div className="flex flex-wrap gap-1">
           {agent.mode && agent.mode !== 'production' && (
-            <span className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[0.4rem] text-accent">
-              {agent.mode.replace(/_/g, ' ')}
-            </span>
+            <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[0.5rem] text-accent">{agent.mode.replace(/_/g, ' ')}</span>
           )}
           {agent.hardware_connected === false && (
-            <span className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[0.4rem] text-accent">
-              no hardware
-            </span>
+            <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[0.5rem] text-accent">no hardware attached</span>
           )}
         </div>
       ) : null}
-      <div className="flex items-center gap-2">
-        <div className="h-1 flex-1 overflow-hidden rounded-full bg-background/60">
-          <div className="h-full rounded-full transition-all duration-500"
-            style={{
-              width: `${loadPct}%`,
-              background: agent.status === 'training' ? 'var(--accent)' : isOnline ? 'var(--hud)' : '#555',
-              boxShadow: isOnline ? '0 0 4px var(--hud)' : 'none',
-            }} />
-        </div>
-        <span className="shrink-0 text-[0.45rem] text-muted-foreground">{loadPct}%</span>
-      </div>
       {agent.specializations.length > 0 && (
-        <div className="flex flex-wrap gap-0.5">
-          {agent.specializations.slice(0, 3).map((s) => (
-            <span key={s} className="rounded bg-secondary/40 px-1 py-px text-[0.4rem] text-muted-foreground">{s}</span>
+        <div className="flex flex-wrap gap-1">
+          {agent.specializations.map((s) => (
+            <span key={s} className="rounded-full bg-secondary/50 px-2 py-0.5 text-[0.5rem] text-muted-foreground">{s}</span>
           ))}
-          {agent.specializations.length > 3 && (
-            <span className="text-[0.4rem] text-muted-foreground self-center">+{agent.specializations.length - 3}</span>
-          )}
         </div>
       )}
-    </li>
+      <button
+        type="button"
+        onClick={() => onRunTask(agent)}
+        disabled={agent.status === 'offline'}
+        className="mt-1 flex items-center justify-center gap-1.5 rounded-lg border border-primary bg-primary/15 py-2 text-xs text-primary transition-colors hover:bg-primary/25 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <Play className="h-3.5 w-3.5" /> Run task
+      </button>
+    </div>
   )
 }
 
@@ -746,11 +872,13 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null)
+  const [taskAgent, setTaskAgent] = useState<AgentInfo | null>(null)
   const [filter, setFilter] = useState('')
   const [autoQuery, setAutoQuery] = useState('')
   const [autoRunning, setAutoRunning] = useState(false)
   const [autoResult, setAutoResult] = useState<string | null>(null)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   const fetchAgents = useCallback(async () => {
     setLoading(true); setError(null)
@@ -786,107 +914,124 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
     a.specializations.some((s) => s.toLowerCase().includes(filter.toLowerCase())),
   )
 
+  const grouped = useMemo(() => {
+    const map = new Map<string, AgentInfo[]>()
+    for (const a of filteredAgents) {
+      const cat = categoryFor(a.domain)
+      if (!map.has(cat)) map.set(cat, [])
+      map.get(cat)!.push(a)
+    }
+    return map
+  }, [filteredAgents])
+
+  const toggleCategory = (label: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(label)) next.delete(label); else next.add(label)
+      return next
+    })
+  }
+
+  const selectAgent = (agent: AgentInfo) => {
+    setSelectedAgent((prev) => (prev?.key === agent.key ? null : agent))
+    onAgentSelect?.(agent.key)
+  }
+
   return (
-    <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
-      {/* ── Hero band: fleet stats + activity chart lead full-width,
-          instead of being buried in a narrow left column. ── */}
-      <HudPanel
-        hero
-        title="Agent Fleet · Overview"
-        className="col-span-12 lg:col-span-7"
-        right={
-          <button type="button" onClick={fetchAgents} disabled={loading} className="text-muted-foreground hover:text-primary">
-            <RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} />
-          </button>
-        }
-      >
-        <div className="mb-3 flex items-center gap-1.5 text-[0.55rem]">
-          {error ? (<><WifiOff className="h-3 w-3 text-destructive" /><span className="text-destructive">Backend offline</span></>)
-            : (<><Wifi className="h-3 w-3 text-primary animate-hud-breathe" /><span className="text-muted-foreground">Connected · {data?.total ?? '?'} · {lastRefresh.toLocaleTimeString('en-GB')}</span></>)}
+    <div className="mx-auto flex max-w-[1680px] flex-col gap-4">
+      {/* slim title strip, not a boxed hero panel -- fleet vitals at a glance */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/60 px-4 py-3">
+        <div className="flex items-center gap-3">
+          <span className="font-display text-xl text-foreground">Fleet Console</span>
+          <span className={cn('flex items-center gap-1.5 text-[0.62rem]', error ? 'text-destructive' : 'text-muted-foreground')}>
+            {error ? <WifiOff className="h-3 w-3" /> : <Wifi className="h-3 w-3 text-primary animate-hud-breathe" />}
+            {error ? 'Backend offline' : `${data?.total ?? '…'} agents · updated ${lastRefresh.toLocaleTimeString('en-GB')}`}
+          </span>
         </div>
-        {data && (
-          <div className="grid grid-cols-3 gap-2 text-center">
-            {[
-              { label: 'Online',  v: data.stats.agents_online, tone: 'text-primary' },
-              { label: 'Tasks',   v: data.stats.total_tasks, tone: 'text-foreground' },
-              { label: 'Success', v: `${(data.stats.success_rate * 100).toFixed(0)}%`, tone: 'text-accent' },
-            ].map(({ label, v, tone }) => (
-              <div key={label} className="rounded border border-border/60 bg-secondary/20 py-2">
-                <div className={cn('font-display text-lg', tone)}>{v}</div>
-                <div className="text-[0.5rem] text-muted-foreground">{label}</div>
-              </div>
-            ))}
-          </div>
-        )}
-      </HudPanel>
-
-      <HudPanel title="Fleet Activity" accent="amber" className="col-span-12 lg:col-span-5">
-        <AgentLoadChart agents={data?.agents ?? []} />
-      </HudPanel>
-
-      {/* ── Second row: auto-router (narrow, action-first) beside the
-          browsable grid (wide) ── */}
-      <div className="col-span-12 grid grid-cols-1 gap-4 lg:col-span-4">
-        <HudPanel title="Auto-Route Query" accent="violet" right={<Sparkles className="h-3 w-3 text-tertiary" />}>
-          <p className="mb-2 text-[0.55rem] text-muted-foreground">
-            Ask anything — Nancy picks the right specialist agent.
-          </p>
-          <div className="flex gap-1.5">
-            <input
-              value={autoQuery}
-              onChange={(e) => setAutoQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleAutoRun()}
-              placeholder="e.g. analyse the current BTC volatility profile…"
-              className="flex-1 rounded border border-border bg-background/60 px-2 py-1.5 text-[0.65rem] text-foreground outline-none focus:border-primary/60"
-            />
-            <button type="button" onClick={handleAutoRun} disabled={autoRunning}
-              className="rounded border border-tertiary bg-tertiary/15 px-2.5 py-1.5 text-tertiary hover:bg-tertiary/25 disabled:opacity-50">
-              {autoRunning ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-            </button>
-          </div>
-          {autoResult && (
-            <p className="mt-2 rounded border border-border bg-background/40 px-2 py-1.5 text-[0.55rem] text-muted-foreground">
-              {autoResult}
-            </p>
-          )}
-        </HudPanel>
+        <div className="flex items-center gap-4 text-[0.68rem]">
+          <span><span className="font-display text-base text-primary">{data?.stats.agents_online ?? '…'}</span> <span className="text-muted-foreground">online</span></span>
+          <span><span className="font-display text-base text-foreground">{data?.stats.total_tasks ?? '…'}</span> <span className="text-muted-foreground">tasks</span></span>
+          <span><span className="font-display text-base text-accent">{data ? `${(data.stats.success_rate * 100).toFixed(0)}%` : '…'}</span> <span className="text-muted-foreground">success</span></span>
+          <button type="button" onClick={fetchAgents} disabled={loading} className="text-muted-foreground hover:text-primary">
+            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+          </button>
+        </div>
       </div>
 
-      <div className="col-span-12 lg:col-span-8">
-        <HudPanel title="Autonomous Agents · Fleet"
-          right={data && <span className="text-primary text-[0.55rem]">{data.stats.agents_online} ONLINE</span>}>
-          <div className="relative mb-2">
-            <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
-            <input value={filter} onChange={(e) => setFilter(e.target.value)}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+        {/* LEFT: grouped roster, browsable by category */}
+        <div className="flex flex-col gap-3">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
               placeholder="Filter by name, domain, or specialisation…"
-              className="w-full rounded border border-border bg-background/60 py-1.5 pl-7 pr-2 text-[0.65rem] text-foreground outline-none focus:border-primary/60" />
+              className="w-full rounded-lg border border-border bg-background/60 py-2 pl-8 pr-3 text-[0.68rem] text-foreground outline-none focus:border-primary/60"
+            />
           </div>
 
           {loading && !data ? (
-            <div className="flex items-center justify-center py-8 text-[0.6rem] text-muted-foreground">
+            <div className="flex items-center justify-center rounded-xl border border-border bg-card/40 py-10 text-[0.62rem] text-muted-foreground">
               <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading agents…
             </div>
           ) : error && !data ? (
-            <div className="py-6 text-center text-[0.6rem] text-destructive">
+            <div className="rounded-xl border border-border bg-card/40 py-6 text-center text-[0.62rem] text-destructive">
               {error}<br />
               <button onClick={fetchAgents} className="mt-2 text-primary underline">Retry</button>
             </div>
+          ) : filteredAgents.length === 0 ? (
+            <div className="rounded-xl border border-border bg-card/40 py-6 text-center text-[0.62rem] text-muted-foreground">No agents match filter.</div>
           ) : (
-            <ul className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-              {filteredAgents.length === 0 ? (
-                <li className="col-span-full py-4 text-center text-[0.6rem] text-muted-foreground">No agents match filter.</li>
-              ) : (
-                filteredAgents.map((agent) => (
-                  <AgentCard key={agent.key} agent={agent}
-                    onClick={() => { setSelectedAgent(agent); onAgentSelect?.(agent.key) }} />
-                ))
-              )}
-            </ul>
+            AGENT_CATEGORIES.map((cat) => {
+              const items = grouped.get(cat.label) ?? []
+              if (items.length === 0) return null
+              const isCollapsed = collapsed.has(cat.label)
+              const onlineCount = items.filter((a) => a.status === 'online').length
+              return (
+                <div key={cat.label} className="overflow-hidden rounded-xl border border-border bg-card/40">
+                  <button
+                    type="button"
+                    onClick={() => toggleCategory(cat.label)}
+                    className="flex w-full items-center justify-between gap-2 px-3 py-2.5 hover:bg-secondary/20"
+                  >
+                    <span className="flex items-center gap-2 text-xs font-medium text-foreground">
+                      <cat.icon className="h-3.5 w-3.5 text-primary" />
+                      {cat.label}
+                      <span className="text-muted-foreground">({onlineCount}/{items.length} online)</span>
+                    </span>
+                    {isCollapsed ? <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
+                  </button>
+                  {!isCollapsed && (
+                    <ul className="grid grid-cols-1 gap-1.5 border-t border-border/60 p-2 md:grid-cols-2">
+                      {items.map((agent) => (
+                        <AgentRow key={agent.key} agent={agent} selected={selectedAgent?.key === agent.key} onClick={() => selectAgent(agent)} />
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )
+            })
           )}
-        </HudPanel>
+        </div>
+
+        {/* RIGHT: persistent detail rail -- selection updates it in place,
+            no modal takeover for just looking at an agent. */}
+        <div className="lg:sticky lg:top-4 lg:self-start">
+          <AgentDetailRail
+            agent={selectedAgent}
+            fallbackAgents={data?.agents ?? []}
+            autoQuery={autoQuery}
+            setAutoQuery={setAutoQuery}
+            handleAutoRun={handleAutoRun}
+            autoRunning={autoRunning}
+            autoResult={autoResult}
+            onRunTask={setTaskAgent}
+          />
+        </div>
       </div>
 
-      {selectedAgent && <AgentTaskModal agent={selectedAgent} onClose={() => setSelectedAgent(null)} />}
+      {taskAgent && <AgentTaskModal agent={taskAgent} onClose={() => setTaskAgent(null)} />}
     </div>
   )
 }
