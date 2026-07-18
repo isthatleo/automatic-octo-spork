@@ -191,20 +191,20 @@ export function KanbanPanel() {
       {/* Header strip -- real counts, not decorative */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2 text-[0.6rem]">
-          <span className="rounded-full border border-border/60 bg-secondary/30 px-3 py-1 uppercase tracking-widest text-muted-foreground">
+          <span className="rounded-full border border-border/60 bg-secondary/30 px-3 py-1 text-muted-foreground">
             {agents.filter((a) => a.status === 'online').length} agents active
           </span>
-          <span className="rounded-full border border-border/60 bg-secondary/30 px-3 py-1 uppercase tracking-widest text-muted-foreground">
+          <span className="rounded-full border border-border/60 bg-secondary/30 px-3 py-1 text-muted-foreground">
             {cards.filter((c) => c.column !== 'done').length} tasks in queue
           </span>
-          <span className="rounded-full border border-primary/40 bg-primary/10 px-3 py-1 uppercase tracking-widest text-primary">
+          <span className="rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-primary">
             {doneToday} done today
           </span>
         </div>
         <button
           type="button"
           onClick={() => { setEditingCard(null); setComposerOpen(true) }}
-          className="flex items-center gap-1.5 rounded border border-primary bg-primary/15 px-3 py-1.5 text-[0.6rem] uppercase tracking-widest text-primary transition-colors hover:bg-primary/25"
+          className="flex items-center gap-1.5 rounded border border-primary bg-primary/15 px-3 py-1.5 text-[0.6rem] text-primary transition-colors hover:bg-primary/25"
         >
           <Plus className="h-3.5 w-3.5" /> New Task
         </button>
@@ -230,7 +230,7 @@ export function KanbanPanel() {
               )}
             >
               <div className="flex items-center justify-between px-1">
-                <span className="font-heading text-[0.6rem] uppercase tracking-[0.2em] text-muted-foreground">{col.label}</span>
+                <span className="font-heading text-[0.6rem] text-muted-foreground">{col.label}</span>
                 <span className="rounded-full bg-secondary/50 px-1.5 py-0.5 text-[0.5rem] text-muted-foreground">{grouped[col.key].length}</span>
               </div>
               <div className="flex flex-1 flex-col gap-2">
@@ -249,7 +249,7 @@ export function KanbanPanel() {
                     >
                       <div className="mb-1.5 flex items-start justify-between gap-2">
                         <p className="text-[0.65rem] font-medium leading-snug text-foreground">{card.title}</p>
-                        <span className={cn('shrink-0 rounded border px-1.5 py-0.5 text-[0.4rem] uppercase tracking-widest', PRIORITY_COLOR[card.priority])}>
+                        <span className={cn('shrink-0 rounded border px-1.5 py-0.5 text-[0.4rem] ', PRIORITY_COLOR[card.priority])}>
                           {card.priority}
                         </span>
                       </div>
@@ -259,7 +259,7 @@ export function KanbanPanel() {
                       {card.tags.length > 0 && (
                         <div className="mb-1.5 flex flex-wrap gap-1">
                           {card.tags.map((t) => (
-                            <span key={t} className="rounded bg-primary/10 px-1 py-px text-[0.42rem] uppercase tracking-widest text-primary/80">{t}</span>
+                            <span key={t} className="rounded bg-primary/10 px-1 py-px text-[0.42rem] text-primary/80">{t}</span>
                           ))}
                         </div>
                       )}
@@ -311,7 +311,7 @@ export function KanbanPanel() {
                   )
                 })}
                 {grouped[col.key].length === 0 && (
-                  <p className="py-4 text-center text-[0.5rem] uppercase tracking-widest text-muted-foreground/50">Empty</p>
+                  <p className="py-4 text-center text-[0.5rem] text-muted-foreground/50">Empty</p>
                 )}
               </div>
             </div>
@@ -389,7 +389,7 @@ function CardComposer({
       <button type="button" aria-label="Dismiss" onClick={onClose} className="absolute inset-0 cursor-default bg-background/80 backdrop-blur-md" />
       <div className="hud-panel glow-ring relative z-10 w-full max-w-md rounded-lg border-transparent p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="font-heading text-xs uppercase tracking-[0.22em] text-primary hud-glow">
+          <h3 className="font-heading text-xs text-primary">
             {card ? 'Edit Task' : 'New Task'}
           </h3>
           <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground">
@@ -413,7 +413,7 @@ function CardComposer({
             className="resize-none rounded border border-border bg-background/60 px-2.5 py-2 text-[0.65rem] text-foreground outline-none focus:border-primary/60"
           />
           <div className="grid grid-cols-2 gap-2">
-            <label className="flex flex-col gap-1 text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+            <label className="flex flex-col gap-1 text-[0.5rem] text-muted-foreground">
               <span className="flex items-center gap-1"><Bot className="h-3 w-3" /> Assign agent</span>
               <select
                 value={assignedAgent}
@@ -426,7 +426,7 @@ function CardComposer({
                 ))}
               </select>
             </label>
-            <label className="flex flex-col gap-1 text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+            <label className="flex flex-col gap-1 text-[0.5rem] text-muted-foreground">
               <span className="flex items-center gap-1"><Flag className="h-3 w-3" /> Priority</span>
               <select
                 value={priority}
@@ -439,7 +439,7 @@ function CardComposer({
                 <option value="critical">Critical</option>
               </select>
             </label>
-            <label className="flex flex-col gap-1 text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+            <label className="flex flex-col gap-1 text-[0.5rem] text-muted-foreground">
               <span className="flex items-center gap-1"><CalendarClock className="h-3 w-3" /> Due date</span>
               <input
                 type="date"
@@ -448,7 +448,7 @@ function CardComposer({
                 className="rounded border border-border bg-background/60 px-2 py-1.5 text-[0.6rem] text-foreground outline-none focus:border-primary/60"
               />
             </label>
-            <label className="flex flex-col gap-1 text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+            <label className="flex flex-col gap-1 text-[0.5rem] text-muted-foreground">
               <span>Column</span>
               <select
                 value={column}
@@ -459,7 +459,7 @@ function CardComposer({
               </select>
             </label>
           </div>
-          <label className="flex flex-col gap-1 text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+          <label className="flex flex-col gap-1 text-[0.5rem] text-muted-foreground">
             <span className="flex items-center gap-1"><Tag className="h-3 w-3" /> Tags (comma-separated)</span>
             <input
               value={tagsInput}
@@ -471,14 +471,14 @@ function CardComposer({
         </div>
 
         <div className="mt-4 flex items-center justify-end gap-2">
-          <button type="button" onClick={onClose} className="rounded border border-border px-3 py-1.5 text-[0.6rem] uppercase tracking-widest text-muted-foreground hover:text-foreground">
+          <button type="button" onClick={onClose} className="rounded border border-border px-3 py-1.5 text-[0.6rem] text-muted-foreground hover:text-foreground">
             Cancel
           </button>
           <button
             type="button"
             onClick={submit}
             disabled={!title.trim()}
-            className="rounded border border-primary bg-primary/15 px-3 py-1.5 text-[0.6rem] uppercase tracking-widest text-primary transition-colors hover:bg-primary/25 disabled:opacity-40"
+            className="rounded border border-primary bg-primary/15 px-3 py-1.5 text-[0.6rem] text-primary transition-colors hover:bg-primary/25 disabled:opacity-40"
           >
             {card ? 'Save' : 'Create'}
           </button>

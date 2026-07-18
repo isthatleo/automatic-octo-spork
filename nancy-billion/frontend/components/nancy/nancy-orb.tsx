@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 export type OrbState =
@@ -11,61 +11,114 @@ export type OrbState =
   | 'executing'
   | 'alert'
 
-// "Aurora Circuit" palette -- matches globals.css's design tokens
-// (--hud/--tertiary/--magenta/--gold), precisely converted from their
-// oklch() values to sRGB (via the standard OKLab conversion matrices) for
-// use as canvas fillStyle/strokeStyle strings. rgba() rather than oklch()
-// deliberately: Canvas 2D's color parser has historically lagged CSS's, and
-// a parse failure here would silently break the entire orb, so this trades
-// a few points of gamut for guaranteed support.
-const HUD = 'rgba(0, 228, 231, 1)'
-const HUD_SOFT = 'rgba(0, 228, 231, 0.55)'
-const GOLD = 'rgba(249, 163, 0, 1)'
-// Matches the design system's --tertiary token -- gives "thinking" its own
-// identity instead of looking identical to idle/listening (both cyan).
-const VIOLET = 'rgba(188, 99, 255, 1)'
-// New: hot magenta, matches --magenta -- a bolder, more distinct secondary
-// than the old muted amber, used where the orb needs real "hot" energy.
-const MAGENTA = 'rgba(255, 37, 181, 1)'
-// A real degraded-mode signal (e.g. speech recognition unsupported in this
-// browser) gets its own honest color instead of pretending everything's fine.
-const ALERT = 'rgba(255, 45, 70, 1)'
+/*
+  Arc-reactor identity: a mechanical power core, not an organic blob and not
+  the old cockpit instrument (multiple decorative rings, a radar sweep, tick
+  marks, orbiting particle debris, a glass "readout" plate).
 
-// Per-state animation parameters driving the canvas + plasma core.
-const PARAMS: Record<
-  OrbState,
-  {
-    ringSpeed: number
-    particleSpeed: number
-    particleCount: number
-    waveAmp: number
-    waveSpeed: number
-    color: string
-    secondary: string
-  }
-> = {
-  idle:      { ringSpeed: 0.15, particleSpeed: 0.2, particleCount: 48, waveAmp: 0.05, waveSpeed: 1.2, color: HUD, secondary: VIOLET },
-  listening: { ringSpeed: 0.35, particleSpeed: 0.5, particleCount: 64, waveAmp: 0.35, waveSpeed: 3,   color: HUD, secondary: HUD_SOFT },
-  thinking:  { ringSpeed: 1.1,  particleSpeed: 1.4, particleCount: 90, waveAmp: 0.18, waveSpeed: 4.5, color: VIOLET, secondary: MAGENTA },
-  speaking:  { ringSpeed: 0.5,  particleSpeed: 0.7, particleCount: 72, waveAmp: 0.45, waveSpeed: 6,   color: HUD, secondary: MAGENTA },
-  executing: { ringSpeed: 0.9,  particleSpeed: 1.8, particleCount: 110, waveAmp: 0.3, waveSpeed: 5,   color: GOLD, secondary: HUD },
-  alert:     { ringSpeed: 0.6,  particleSpeed: 0.4, particleCount: 40, waveAmp: 0.22, waveSpeed: 2.5, color: ALERT, secondary: GOLD },
+  The core is a faceted housing -- hexagon casing, a ring of segmented teeth,
+  a triangular power cell at the centre -- surrounded by two wave rings and a
+  spinning spoke collar. None of it is decorative filler: every reactive
+  piece (teeth brightness, spoke length, wave radius, core flare) is driven
+  by the same real, smoothed mic/TTS amplitude signal, so the whole assembly
+  visibly "runs hotter" exactly when Nancy is actually listening or speaking.
+*/
+
+// "Graphite & Ember" palette, matching globals.css's tokens -- precisely
+// converted from the same oklch values (via the real OKLab conversion
+// matrices, not eyeballed) to rgba for guaranteed Canvas/SVG support.
+const HUD = 'rgba(241, 129, 84, 1)'       // ember (--hud / --primary)
+const HUD_SOFT = 'rgba(241, 129, 84, 0.5)'
+const GOLD = 'rgba(218, 178, 73, 1)'      // mustard gold (--gold)
+const PLUM = 'rgba(151, 140, 173, 1)'     // muted plum (--tertiary) -- "thinking"
+const ROSE = 'rgba(225, 113, 116, 1)'     // warm rose (--magenta)
+const ALERT = 'rgba(229, 76, 74, 1)'      // --destructive
+
+const PARAMS: Record<OrbState, { ringSpeed: number; waveAmp: number; color: string; secondary: string }> = {
+  idle:      { ringSpeed: 0.12, waveAmp: 0.04, color: HUD, secondary: PLUM },
+  listening: { ringSpeed: 0.3,  waveAmp: 0.3,  color: HUD, secondary: HUD_SOFT },
+  thinking:  { ringSpeed: 0.9,  waveAmp: 0.14, color: PLUM, secondary: ROSE },
+  speaking:  { ringSpeed: 0.4,  waveAmp: 0.38, color: HUD, secondary: ROSE },
+  executing: { ringSpeed: 0.7,  waveAmp: 0.22, color: GOLD, secondary: HUD },
+  alert:     { ringSpeed: 0.5,  waveAmp: 0.18, color: ALERT, secondary: GOLD },
 }
 
 const STATE_LABEL: Record<OrbState, string> = {
-  idle: 'Standing By',
+  idle: 'Standing by',
   listening: 'Listening',
-  thinking: 'Processing',
-  speaking: 'Responding',
-  executing: 'Executing',
+  thinking: 'Thinking',
+  speaking: 'Speaking',
+  executing: 'Working',
   alert: 'Degraded',
 }
 
-/** Strips the alpha channel off an `rgba(r,g,b,a)` string and substitutes a
- * new one -- used everywhere below to derive translucent variants of a
- * state's color without hardcoding a parallel palette. */
 function alpha(color: string, a: number): string {
   return color.replace(/[\d.]+\)$/, `${a})`)
+}
+
+/** Builds a smooth closed wave ring as an SVG path -- two overlaid sine
+ * harmonics whose amplitude scales with real (mic/TTS) sound level, so the
+ * ring visibly breathes at idle and genuinely reacts once something's
+ * actually being heard, rather than looping a canned wobble. */
+function wavePath(cx: number, cy: number, base: number, t: number, amp: number, points = 72): string {
+  const pts: [number, number][] = []
+  for (let i = 0; i <= points; i++) {
+    const a = (i / points) * Math.PI * 2
+    const r =
+      base +
+      Math.sin(a * 3 + t * 1.6) * (0.9 + amp * 3.2) +
+      Math.sin(a * 5 - t * 2.3) * (0.5 + amp * 1.8) +
+      Math.sin(a * 8 + t * 0.7) * (0.25 + amp * 0.8)
+    pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r])
+  }
+  return 'M' + pts.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join('L') + 'Z'
+}
+
+const COLLAR_COUNT = 28
+
+/** Reactor collar as one path of independent spoke segments -- each spoke's
+ * outer reach jitters on its own phase, weighted by real amplitude, so the
+ * whole ring reads as an equalizer responding to actual sound rather than a
+ * uniformly-pulsing decoration. The group housing this path still spins in
+ * the render loop for the "physically rotating" read. */
+function collarPath(cx: number, cy: number, t: number, amp: number): string {
+  let d = ''
+  for (let i = 0; i < COLLAR_COUNT; i++) {
+    const a = (i / COLLAR_COUNT) * Math.PI * 2
+    const long = i % 4 === 0
+    const rInner = long ? 30.5 : 32.5
+    const jitter = Math.sin(t * 3.4 + i * 0.9) * amp * 3.5
+    const rOuter = (long ? 39 : 36) + jitter
+    const x1 = cx + Math.cos(a) * rInner
+    const y1 = cy + Math.sin(a) * rInner
+    const x2 = cx + Math.cos(a) * rOuter
+    const y2 = cy + Math.sin(a) * rOuter
+    d += `M${x1.toFixed(2)},${y1.toFixed(2)}L${x2.toFixed(2)},${y2.toFixed(2)}`
+  }
+  return d
+}
+
+/** Turbine-blade iris ring for the core -- short blades canted tangentially
+ * (not plain radial ticks, which read as a toy sunburst) so the shape reads
+ * as a precision aperture. Each blade's reach reacts to real amplitude on
+ * its own phase, and the whole ring is independently rotated in the render
+ * loop for a slow, deliberate spin distinct from the outer collar's. */
+function irisPath(cx: number, cy: number, t: number, amp: number, count = 22): string {
+  const rInner = 8.5
+  const cant = 0.34 // radians of tangential tilt per blade
+  let d = ''
+  for (let i = 0; i < count; i++) {
+    const a = (i / count) * Math.PI * 2
+    const pulse = 0.5 + 0.5 * Math.sin(t * 2.2 + i * 1.1)
+    const len = 2.6 + pulse * (1.4 + amp * 3.2)
+    const a2 = a + cant
+    const x1 = cx + Math.cos(a) * rInner
+    const y1 = cy + Math.sin(a) * rInner
+    const x2 = cx + Math.cos(a2) * (rInner + len)
+    const y2 = cy + Math.sin(a2) * (rInner + len)
+    d += `M${x1.toFixed(2)},${y1.toFixed(2)}L${x2.toFixed(2)},${y2.toFixed(2)}`
+  }
+  return d
 }
 
 /** Reads live microphone amplitude (0..1). Falls back to 0 silently. */
@@ -163,9 +216,6 @@ function useElementAudioLevel(el: HTMLAudioElement | null) {
       }
       tick()
     } catch {
-      // createMediaElementSource throws if called twice on the same element,
-      // or if the browser blocks it -- fail silently, orb just shows no
-      // audio-reactivity for this utterance rather than crashing.
       levelRef.current = 0
     }
     return () => {
@@ -187,7 +237,7 @@ export interface OrbQuickNavItem {
 
 export function NancyOrb({
   state = 'idle',
-  name = 'NÅNCY',
+  name = 'Nancy',
   size = 360,
   audioElement = null,
   quickNav,
@@ -196,206 +246,124 @@ export function NancyOrb({
   state?: OrbState
   name?: string
   size?: number
-  /** The <audio> element currently playing Nancy's real TTS output, if any
-   * (see page.tsx's nancySay) -- drives real audio-reactivity while
-   * speaking instead of a fixed decorative wobble. */
   audioElement?: HTMLAudioElement | null
-  /** When provided, clicking the orb's core fans these out as a radial
-   * quick-nav menu around it instead of doing nothing. Omit to keep an orb
-   * purely decorative (e.g. the floating workspace-dock orb). */
+  /** When provided, clicking the sphere fans these out as a quick-nav ring
+   * around it. Omit to keep an orb purely a status indicator (e.g. the
+   * floating workspace-dock orb). */
   quickNav?: OrbQuickNavItem[]
   onQuickNav?: (key: string) => void
 }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const coreRef = useRef<HTMLDivElement>(null)
+  const hotRef = useRef<HTMLDivElement>(null)
+  const ringRef = useRef<SVGCircleElement>(null)
+  const waveRef = useRef<SVGPathElement>(null)
+  const waveOuterRef = useRef<SVGPathElement>(null)
+  const collarRef = useRef<SVGGElement>(null)
+  const collarPathRef = useRef<SVGPathElement>(null)
+  const irisGroupRef = useRef<SVGGElement>(null)
+  const irisPathRef = useRef<SVGPathElement>(null)
+  const lensOuterRef = useRef<SVGCircleElement>(null)
+  const lensInnerRef = useRef<SVGCircleElement>(null)
+  const coreDiscRef = useRef<SVGCircleElement>(null)
   const stateRef = useRef<OrbState>(state)
   stateRef.current = state
   const micLevel = useMicLevel(state === 'listening')
   const speakingLevel = useElementAudioLevel(audioElement)
   const [menuOpen, setMenuOpen] = useState(false)
   const [hovered, setHovered] = useState(false)
-  const [liveAmp, setLiveAmp] = useState(0)
+  const gradId = useId().replace(/:/g, '')
 
-  // Particle + waveform engine on canvas, plus the plasma core's animated
-  // multi-blob background (driven from the same rAF loop so they never
-  // drift out of sync with each other).
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    // Low-end heuristic: cap DPR + shrink particle pool on small viewports/mobile.
-    const isSmall = Math.min(window.innerWidth, window.innerHeight) < 640
-    const hwCores = (navigator as unknown as { hardwareConcurrency?: number }).hardwareConcurrency ?? 8
-    const lowPower = isSmall || hwCores <= 4
-    const dpr = Math.min(lowPower ? 1.25 : 1.75, window.devicePixelRatio || 1)
-    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const reduce = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
     let raf = 0
     let t = 0
-    let frame = 0
-    // Cap effective FPS to ~40 on low-power to save GPU without visible jank.
-    const frameSkip = lowPower ? 1 : 0
-
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect()
-      canvas.width = rect.width * dpr
-      canvas.height = rect.height * dpr
-    }
-    resize()
-    const ro = new ResizeObserver(resize)
-    ro.observe(canvas)
-
-    type P = { angle: number; radius: number; speed: number; sz: number; off: number }
-    const poolSize = reduce ? 40 : lowPower ? 70 : 120
-    const particles: P[] = Array.from({ length: poolSize }).map(() => ({
-      angle: Math.random() * Math.PI * 2,
-      radius: 0.55 + Math.random() * 0.42,
-      speed: 0.2 + Math.random() * 0.8,
-      sz: 0.6 + Math.random() * 1.8,
-      off: Math.random() * Math.PI * 2,
-    }))
-
-    let pulse = 0 // expanding shockwave for "executing"
-    let prevState: OrbState = stateRef.current
     let ampSmoothed = 0
-    let ampTickCounter = 0
+    let frame = 0
 
     const draw = () => {
-      const w = canvas.width
-      const h = canvas.height
-      const cx = w / 2
-      const cy = h / 2
-      const R = Math.min(w, h) / 2
       const p = PARAMS[stateRef.current]
-
-      ctx.clearRect(0, 0, w, h)
-
-      // trigger a shockwave when entering "executing"
-      if (stateRef.current === 'executing' && prevState !== 'executing') {
-        pulse = 0.001
-      }
-      prevState = stateRef.current
-
-      // ---- outer glow halo ----
-      const breathe = 1 + Math.sin(t * 1.5) * 0.03
-      const haloR = R * 0.9 * breathe
-      const halo = ctx.createRadialGradient(cx, cy, R * 0.2, cx, cy, haloR)
-      halo.addColorStop(0, alpha(p.color, 0.18))
-      halo.addColorStop(0.6, alpha(p.color, 0.06))
-      halo.addColorStop(1, 'rgba(0,0,0,0)')
-      ctx.fillStyle = halo
-      ctx.fillRect(0, 0, w, h)
-
-      // ---- expanding pulse waves (executing) ----
-      if (pulse > 0) {
-        pulse += 0.012
-        const pr = R * pulse
-        ctx.beginPath()
-        ctx.arc(cx, cy, pr, 0, Math.PI * 2)
-        ctx.strokeStyle = alpha(GOLD, Math.max(0, 0.6 - pulse * 0.6))
-        ctx.lineWidth = 2 * dpr
-        ctx.stroke()
-        if (pulse >= 1) pulse = stateRef.current === 'executing' ? 0.001 : 0
-      }
-
-      // ---- audio-reactive waveform ring ----
       const live =
-        stateRef.current === 'listening'
-          ? micLevel.current
-          : stateRef.current === 'speaking'
-            ? speakingLevel.current
-            : 0
-      const amp = (p.waveAmp + live * 0.6) * R * 0.16
-      const baseR = R * 0.6
-      const segs = 160
-      ctx.beginPath()
-      for (let i = 0; i <= segs; i++) {
-        const a = (i / segs) * Math.PI * 2
-        const wobble =
-          Math.sin(a * 6 + t * p.waveSpeed) * 0.6 +
-          Math.sin(a * 11 - t * p.waveSpeed * 0.7) * 0.4
-        const rr = baseR + wobble * amp
-        const x = cx + Math.cos(a) * rr
-        const y = cy + Math.sin(a) * rr
-        if (i === 0) ctx.moveTo(x, y)
-        else ctx.lineTo(x, y)
-      }
-      ctx.closePath()
-      ctx.strokeStyle = p.color
-      ctx.lineWidth = 1.5 * dpr
-      ctx.shadowBlur = 12 * dpr
-      ctx.shadowColor = p.color
-      ctx.stroke()
-      ctx.shadowBlur = 0
+        stateRef.current === 'listening' ? micLevel.current
+        : stateRef.current === 'speaking' ? speakingLevel.current
+        : 0
+      ampSmoothed += (live - ampSmoothed) * 0.12
 
-      // ---- orbiting particle system (clamped to pool + low-power scale) ----
-      const scale = lowPower ? 0.7 : 1
-      const count = Math.min(particles.length, Math.floor(p.particleCount * scale))
-      for (let i = 0; i < count; i++) {
-        const pt = particles[i]
-        pt.angle += pt.speed * p.particleSpeed * 0.01
-        const r = baseR + (pt.radius - 0.6) * R * 0.5 + Math.sin(t + pt.off) * R * 0.02
-        const x = cx + Math.cos(pt.angle) * r
-        const y = cy + Math.sin(pt.angle) * r
-        ctx.beginPath()
-        ctx.arc(x, y, pt.sz * dpr, 0, Math.PI * 2)
-        ctx.fillStyle = alpha(p.color, 0.4 + Math.sin(t * 2 + pt.off) * 0.3 + 0.3)
-        ctx.fill()
-      }
-
-      // ---- plasma core: 3 animated blobs composited via layered radial
-      // gradients on the DOM core element, cheaper than per-pixel canvas
-      // noise and lets the existing glass-highlight/scan-line stay layered
-      // on top untouched. Real audio amplitude pushes the blobs further
-      // apart ("bulging") while speaking/listening. ----
-      ampSmoothed += (live - ampSmoothed) * 0.15
-      ampTickCounter++
-      if (coreRef.current && ampTickCounter % 2 === 0) {
-        const spread = 1 + ampSmoothed * 0.6
-        const b1x = 50 + Math.cos(t * 0.6) * 24 * spread
-        const b1y = 50 + Math.sin(t * 0.6) * 24 * spread
-        const b2x = 50 + Math.cos(-t * 0.45 + 2.1) * 17 * spread
-        const b2y = 50 + Math.sin(-t * 0.45 + 2.1) * 17 * spread
-        const b3x = 50 + Math.cos(t * 0.8 + 4.2) * 13 * spread
-        const b3y = 50 + Math.sin(t * 0.8 + 4.2) * 13 * spread
-        coreRef.current.style.background = [
-          `radial-gradient(circle at ${b1x}% ${b1y}%, ${alpha(p.color, 0.9)} 0%, transparent 55%)`,
-          `radial-gradient(circle at ${b2x}% ${b2y}%, ${alpha(p.secondary, 0.55)} 0%, transparent 50%)`,
-          `radial-gradient(circle at ${b3x}% ${b3y}%, ${alpha(p.color, 0.6)} 0%, transparent 45%)`,
-          `radial-gradient(circle at 35% 30%, rgba(240,252,255,0.95) 0%, ${alpha(p.color, 0.85)} 28%, rgba(20,60,90,0.88) 68%, rgba(6,12,22,0.96) 100%)`,
-        ].join(',')
-        if (ampTickCounter % 6 === 0) setLiveAmp(ampSmoothed)
-      }
-
-      if (!reduce) t += 0.016 * (0.5 + p.ringSpeed)
       frame++
-      // On low-power devices, halve the RAF cadence with setTimeout(~25ms)
-      if (frameSkip && frame % 2 === 0) {
-        raf = window.setTimeout(() => requestAnimationFrame(draw), 25) as unknown as number
-      } else {
-        raf = requestAnimationFrame(draw)
+
+      // Precision core -- two concentric lens rings hold their geometry
+      // (a deliberately still frame of reference), a turbine iris spins
+      // and reacts per-blade to real amplitude, and the hot core disc
+      // flares with it. Sophistication comes from restraint and layering,
+      // not from adding more shapes.
+      if (irisGroupRef.current) {
+        irisGroupRef.current.style.transform = `rotate(${(t * 14) % 360}deg)`
       }
+      if (irisPathRef.current && frame % 2 === 0) {
+        irisPathRef.current.setAttribute('d', irisPath(50, 50, t, ampSmoothed))
+        irisPathRef.current.setAttribute('opacity', String(0.6 + ampSmoothed * 0.4))
+      }
+      if (lensOuterRef.current) {
+        lensOuterRef.current.setAttribute('opacity', String(0.5 + ampSmoothed * 0.3))
+      }
+      if (lensInnerRef.current) {
+        lensInnerRef.current.setAttribute('stroke-dashoffset', String((-t * 24) % 100))
+      }
+      if (coreDiscRef.current) {
+        const r = 46 + ampSmoothed * 2.2
+        coreDiscRef.current.setAttribute('r', String(r))
+      }
+
+      // A single thin ring whose radius/opacity breathes with real amplitude.
+      if (ringRef.current) {
+        const r = 46 + ampSmoothed * 4
+        ringRef.current.setAttribute('r', String(r))
+        ringRef.current.setAttribute('opacity', String(0.25 + ampSmoothed * 0.35))
+      }
+
+      // Two overlaid wave rings -- inner tight to the sphere, outer looser --
+      // both driven by the same real smoothed amplitude, so the whole orb
+      // feels like it's genuinely resonating rather than just orbited by chrome.
+      if (waveRef.current) {
+        waveRef.current.setAttribute('d', wavePath(50, 50, 41, t, ampSmoothed))
+        waveRef.current.setAttribute('opacity', String(0.35 + ampSmoothed * 0.45))
+      }
+      if (waveOuterRef.current) {
+        waveOuterRef.current.setAttribute('d', wavePath(50, 50, 47.5, -t * 0.8 + 3.1, ampSmoothed * 0.8))
+        waveOuterRef.current.setAttribute('opacity', String(0.18 + ampSmoothed * 0.3))
+      }
+
+      // Reactor collar -- a ring of energy spokes physically spinning around
+      // the core, each spoke's own length reacting to real amplitude
+      // (equalizer-style) on top of the whole ring's rotation/state speed.
+      if (collarRef.current) {
+        collarRef.current.style.transform = `rotate(${(t * (30 + p.ringSpeed * 40)) % 360}deg)`
+        collarRef.current.style.opacity = String(0.5 + ampSmoothed * 0.5)
+      }
+      if (collarPathRef.current && frame % 2 === 0) {
+        collarPathRef.current.setAttribute('d', collarPath(50, 50, t, ampSmoothed))
+      }
+
+      // Hot specular core -- a small bright point that flares with amplitude,
+      // selling "energy source" rather than just a soft gradient blob.
+      if (hotRef.current) {
+        const flare = 0.55 + ampSmoothed * 0.45
+        hotRef.current.style.opacity = String(flare)
+        hotRef.current.style.transform = `translate(-50%, -50%) scale(${0.85 + ampSmoothed * 0.35})`
+      }
+
+      if (!reduce) t += 0.012 * (0.4 + p.ringSpeed)
+      raf = requestAnimationFrame(draw)
     }
     draw()
 
     const onVis = () => {
-      if (document.hidden) {
-        cancelAnimationFrame(raf)
-        clearTimeout(raf)
-      } else {
-        raf = requestAnimationFrame(draw)
-      }
+      if (document.hidden) cancelAnimationFrame(raf)
+      else raf = requestAnimationFrame(draw)
     }
     document.addEventListener('visibilitychange', onVis)
-
     return () => {
       cancelAnimationFrame(raf)
-      clearTimeout(raf)
       document.removeEventListener('visibilitychange', onVis)
-      ro.disconnect()
     }
-    // micLevel is a stable ref; PARAMS read live via stateRef
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -403,223 +371,199 @@ export function NancyOrb({
   const hasQuickNav = !!quickNav && quickNav.length > 0
 
   return (
-    <div
-      className="relative flex items-center justify-center"
-      style={{ width: size, height: size, perspective: 1000 }}
-      role="img"
-      aria-label={`${name} assistant orb — ${STATE_LABEL[state]}`}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      {/* canvas: halo, waveform, particles, pulse waves */}
-      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
-
-      {/* ── tilted 3D orbit rings (Saturn-style), each carrying real orbiting
-          nodes riding the ring's own rotation -- no per-frame JS needed,
-          pure CSS transform animation ── */}
+    <div className="flex flex-col items-center gap-4">
       <div
-        className="absolute inset-0 animate-orbit-a"
-        style={{ transformStyle: 'preserve-3d' }}
-        aria-hidden
+        className="relative flex items-center justify-center"
+        style={{ width: size, height: size }}
+        role="img"
+        aria-label={`${name} — ${STATE_LABEL[state]}`}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
       >
+        {/* soft ambient shadow beneath the sphere -- brighter, reactor-grade glow */}
         <div
-          className="absolute inset-[2%] rounded-full"
-          style={{ border: `1px solid ${alpha(params.color, 0.45)}`, boxShadow: `0 0 14px ${alpha(params.color, 0.25)}` }}
-        >
-          <span
-            className="absolute left-1/2 top-0 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full"
-            style={{ background: params.color, boxShadow: `0 0 8px ${params.color}` }}
-          />
-        </div>
-      </div>
-      <div
-        className="absolute inset-0 animate-orbit-b"
-        style={{ transformStyle: 'preserve-3d' }}
-        aria-hidden
-      >
-        <div
-          className="absolute inset-[16%] rounded-full"
-          style={{ border: `1px dashed ${alpha(params.secondary, 0.4)}` }}
-        >
-          <span
-            className="absolute left-1/2 top-0 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
-            style={{ background: params.secondary, boxShadow: `0 0 6px ${params.secondary}` }}
-          />
-        </div>
-      </div>
-      <div
-        className={cn('absolute inset-0', state === 'thinking' ? 'animate-orbit-c-fast' : 'animate-orbit-c')}
-        style={{ transformStyle: 'preserve-3d' }}
-        aria-hidden
-      >
-        <div
-          className="absolute inset-[30%] rounded-full"
-          style={{ border: `1.5px solid ${alpha(params.color, 0.55)}` }}
-        >
-          <span
-            className="absolute left-1/2 top-0 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
-            style={{ background: params.color, boxShadow: `0 0 6px ${params.color}` }}
-          />
-          <span
-            className="absolute left-1/2 bottom-0 h-1 w-1 -translate-x-1/2 translate-y-1/2 rounded-full opacity-70"
-            style={{ background: params.secondary }}
-          />
-        </div>
-      </div>
-
-      {/* counter-rotating flat tick ring (kept flat -- reads as a HUD dial
-          rather than an orbit, deliberately different from the tilted rings) */}
-      <svg
-        viewBox="0 0 200 200"
-        className="absolute animate-hud-spin-rev"
-        style={{ width: '58%', height: '58%' }}
-      >
-        {Array.from({ length: 48 }).map((_, i) => {
-          const a = (i / 48) * Math.PI * 2
-          const x1 = 100 + Math.cos(a) * 96
-          const y1 = 100 + Math.sin(a) * 96
-          const x2 = 100 + Math.cos(a) * (i % 4 === 0 ? 84 : 90)
-          const y2 = 100 + Math.sin(a) * (i % 4 === 0 ? 84 : 90)
-          return (
-            <line
-              key={i}
-              x1={x1} y1={y1} x2={x2} y2={y2}
-              stroke={HUD}
-              strokeWidth={i % 4 === 0 ? 1.4 : 0.6}
-              opacity={i % 4 === 0 ? 0.8 : 0.3}
-            />
-          )
-        })}
-      </svg>
-
-      {/* ── live data readout, real amplitude, not decorative ── */}
-      <div
-        className="pointer-events-none absolute left-1/2 top-[6%] -translate-x-1/2 whitespace-nowrap font-mono text-[0.5rem] tracking-widest transition-opacity duration-300"
-        style={{ color: alpha(params.color, 0.85), opacity: state === 'listening' || state === 'speaking' ? 1 : 0.35 }}
-      >
-        AMP {(liveAmp * 100).toFixed(0).padStart(2, '0')}%
-      </div>
-
-      {/* ── glass core with iris ring — click opens the radial quick-nav ── */}
-      <button
-        type="button"
-        disabled={!hasQuickNav}
-        onClick={() => hasQuickNav && setMenuOpen((v) => !v)}
-        className={cn(
-          'relative flex items-center justify-center rounded-full transition-transform duration-300',
-          hasQuickNav && 'cursor-pointer',
-          hovered && hasQuickNav && 'scale-[1.03]',
-        )}
-        style={{ width: '42%', height: '42%' }}
-        title={hasQuickNav ? 'Open quick navigation' : undefined}
-      >
-        {/* iris outer ring */}
-        <div
-          className="absolute inset-0 rounded-full animate-hud-spin-rev"
-          style={{
-            border: `1px solid ${HUD_SOFT}`,
-            boxShadow: `inset 0 0 12px ${alpha(params.color, 0.4)}, 0 0 24px ${alpha(params.color, 0.35)}`,
-          }}
+          className="absolute rounded-full blur-3xl transition-colors duration-700"
+          style={{ width: '78%', height: '78%', background: alpha(params.color, 0.32) }}
+          aria-hidden
         />
-        {/* iris tick marks */}
-        <svg viewBox="0 0 100 100" className="absolute inset-1 animate-hud-spin" style={{ animationDuration: '22s' }}>
-          {Array.from({ length: 24 }).map((_, i) => {
-            const a = (i / 24) * Math.PI * 2
-            const x1 = 50 + Math.cos(a) * 47
-            const y1 = 50 + Math.sin(a) * 47
-            const x2 = 50 + Math.cos(a) * (i % 3 === 0 ? 42 : 45)
-            const y2 = 50 + Math.sin(a) * (i % 3 === 0 ? 42 : 45)
-            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={HUD} strokeWidth={i % 3 === 0 ? 1 : 0.4} opacity={0.7} />
-          })}
+
+        {/* wave rings + reactor collar + one thin state ring */}
+        <svg viewBox="0 0 100 100" className="absolute inset-0">
+          <g ref={collarRef} style={{ transformOrigin: '50px 50px' }}>
+            <path
+              ref={collarPathRef}
+              fill="none"
+              stroke={params.color}
+              strokeWidth="0.7"
+              strokeLinecap="round"
+              style={{ transition: 'stroke 0.6s ease' }}
+            />
+          </g>
+          <path
+            ref={waveOuterRef}
+            fill="none"
+            stroke={params.secondary}
+            strokeWidth="0.5"
+            style={{ transition: 'stroke 0.6s ease' }}
+          />
+          <path
+            ref={waveRef}
+            fill="none"
+            stroke={params.color}
+            strokeWidth="0.7"
+            style={{ transition: 'stroke 0.6s ease' }}
+          />
+          <circle
+            ref={ringRef}
+            cx="50"
+            cy="50"
+            r="46"
+            fill="none"
+            stroke={params.color}
+            strokeWidth="0.35"
+            strokeOpacity="0.5"
+            strokeDasharray={state === 'thinking' || state === 'executing' ? '3 5' : undefined}
+            className={cn(state !== 'idle' && 'animate-hud-spin-slow')}
+            style={{ transformOrigin: '50px 50px', transition: 'stroke 0.5s ease' }}
+          />
         </svg>
 
-        {/* core center disk */}
-        <div
-          ref={coreRef}
-          className="relative flex flex-col items-center justify-center rounded-full overflow-hidden"
+        {/* the sphere itself -- click opens quick-nav when provided */}
+        <button
+          type="button"
+          disabled={!hasQuickNav}
+          onClick={() => hasQuickNav && setMenuOpen((v) => !v)}
+          className={cn(
+            'relative flex items-center justify-center overflow-hidden rounded-full transition-transform duration-300',
+            hasQuickNav && 'cursor-pointer',
+            hovered && hasQuickNav && 'scale-[1.02]',
+          )}
           style={{
-            width: '72%',
-            height: '72%',
-            marginInline: 'auto',
-            boxShadow: `0 0 60px ${alpha(params.color, 0.7)}, inset 0 0 30px rgba(240,252,255,0.55), inset 0 -20px 30px ${alpha(params.color, 0.35)}`,
+            width: '58%',
+            height: '58%',
+            boxShadow: `0 20px 50px oklch(0 0 0 / 40%), inset 0 1px 0 oklch(1 0 0 / 10%), 0 0 40px ${alpha(params.color, 0.35)}`,
+            transition: 'box-shadow 0.6s ease',
           }}
+          title={hasQuickNav ? 'Open quick navigation' : undefined}
         >
-          {/* subtle glass highlight */}
+          {/* precision core -- the glow fills the whole sphere (no bare dark
+              gap), with two still lens rings and a turbine iris etched into
+              it as detail lines rather than floating around a small disc */}
+          <svg viewBox="0 0 100 100" className="absolute inset-0">
+            <defs>
+              <radialGradient id={`orb-core-${gradId}`} cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stopColor="oklch(0.98 0.02 90)" />
+                <stop offset="22%" stopColor={params.color} stopOpacity="1" />
+                <stop offset="60%" stopColor={params.color} stopOpacity="0.85" />
+                <stop offset="88%" stopColor={params.secondary} stopOpacity="0.55" />
+                <stop offset="100%" stopColor="oklch(0.1 0.006 75)" stopOpacity="0.9" />
+              </radialGradient>
+            </defs>
+
+            <circle ref={coreDiscRef} cx="50" cy="50" r="47" fill={`url(#orb-core-${gradId})`} />
+
+            <circle
+              ref={lensOuterRef}
+              cx="50" cy="50" r="19.5"
+              fill="none"
+              stroke="oklch(0.98 0.02 90 / 55%)"
+              strokeWidth="0.5"
+              style={{ transition: 'stroke 0.6s ease' }}
+            />
+            <circle
+              ref={lensInnerRef}
+              cx="50" cy="50" r="15"
+              fill="none"
+              stroke="oklch(0.1 0.01 75 / 45%)"
+              strokeWidth="0.5"
+              strokeDasharray="1.2 2.6"
+              style={{ transition: 'stroke 0.6s ease' }}
+            />
+
+            <g ref={irisGroupRef} style={{ transformOrigin: '50px 50px' }}>
+              <path
+                ref={irisPathRef}
+                fill="none"
+                stroke="oklch(0.99 0.01 90 / 80%)"
+                strokeWidth="1"
+                strokeLinecap="round"
+                style={{ transition: 'stroke 0.6s ease' }}
+              />
+            </g>
+          </svg>
+
+          {/* soft bloom over the core disc -- reads as genuine light spill,
+              not a separate decorative element */}
+          <div
+            ref={hotRef}
+            className="pointer-events-none absolute left-1/2 top-1/2 rounded-full"
+            style={{
+              width: '20%',
+              height: '20%',
+              background: `radial-gradient(circle, oklch(0.98 0.02 90 / 85%) 0%, ${alpha(params.color, 0.4)} 55%, transparent 78%)`,
+              filter: 'blur(3px)',
+              mixBlendMode: 'screen',
+              transition: 'background 0.6s ease',
+            }}
+          />
           <div
             className="pointer-events-none absolute inset-0 rounded-full"
-            style={{
-              background:
-                'radial-gradient(ellipse at 30% 20%, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0) 45%)',
-            }}
+            style={{ background: 'radial-gradient(ellipse at 32% 24%, oklch(1 0 0 / 10%) 0%, transparent 45%)' }}
           />
-          {/* scanning line across core */}
-          <div
-            className="pointer-events-none absolute inset-x-0 h-[2px]"
-            style={{
-              background: `linear-gradient(90deg, transparent, ${HUD}, transparent)`,
-              animation: 'orb-scan 3.2s ease-in-out infinite',
-              opacity: 0.7,
-            }}
-          />
-          <span
-            className="relative font-display text-[0.68rem] font-bold tracking-[0.28em] text-background/95"
-            style={{ textShadow: '0 1px 2px rgba(0,0,0,0.4)' }}
-          >
-            {name}
-          </span>
-          <span className="relative mt-0.5 text-[0.42rem] uppercase tracking-[0.35em] text-background/70">
-            {STATE_LABEL[state]}
-          </span>
-        </div>
-      </button>
+        </button>
 
-      {/* ── radial quick-nav — fans real nav items out around the orb ── */}
-      {hasQuickNav && (
+        {/* quick-nav ring */}
+        {hasQuickNav && (
+          <div
+            className={cn('pointer-events-none absolute inset-0 transition-opacity duration-300', menuOpen ? 'opacity-100' : 'opacity-0')}
+            aria-hidden={!menuOpen}
+          >
+            {quickNav!.map((item, i) => {
+              const n = quickNav!.length
+              const angle = (i / n) * Math.PI * 2 - Math.PI / 2
+              const radius = size * 0.44
+              const x = Math.cos(angle) * radius
+              const y = Math.sin(angle) * radius
+              const Icon = item.icon
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  title={item.label}
+                  onClick={() => { onQuickNav?.(item.key); setMenuOpen(false) }}
+                  className={cn(
+                    'absolute flex h-9 w-9 items-center justify-center rounded-full border transition-all duration-300',
+                    menuOpen ? 'pointer-events-auto scale-100' : 'scale-0',
+                    item.active
+                      ? 'border-primary bg-primary/20 text-primary'
+                      : 'border-border bg-card text-muted-foreground hover:border-primary/50 hover:text-foreground',
+                  )}
+                  style={{
+                    left: '50%',
+                    top: '50%',
+                    transform: menuOpen ? `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))` : 'translate(-50%, -50%)',
+                    transitionDelay: menuOpen ? `${i * 30}ms` : '0ms',
+                  }}
+                >
+                  <Icon className="h-4 w-4" />
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* caption below the sphere, not a glowing plate inside it */}
+      <div className="text-center">
+        <div className="font-display text-2xl text-foreground">{name}</div>
         <div
-          className={cn(
-            'pointer-events-none absolute inset-0 transition-opacity duration-300',
-            menuOpen ? 'opacity-100' : 'opacity-0',
-          )}
-          aria-hidden={!menuOpen}
+          key={state}
+          className="mt-0.5 animate-[hud-fade-in_0.4s_ease] text-[0.7rem] transition-colors duration-500"
+          style={{ color: state === 'idle' ? 'var(--muted-foreground)' : params.color }}
         >
-          {quickNav!.map((item, i) => {
-            const n = quickNav!.length
-            const angle = (i / n) * Math.PI * 2 - Math.PI / 2
-            const radius = size * 0.44
-            const x = Math.cos(angle) * radius
-            const y = Math.sin(angle) * radius
-            const Icon = item.icon
-            return (
-              <button
-                key={item.key}
-                type="button"
-                title={item.label}
-                onClick={() => {
-                  onQuickNav?.(item.key)
-                  setMenuOpen(false)
-                }}
-                className={cn(
-                  'absolute flex h-9 w-9 items-center justify-center rounded-full border backdrop-blur-sm transition-all duration-300',
-                  menuOpen ? 'pointer-events-auto scale-100' : 'scale-0',
-                  item.active
-                    ? 'border-primary bg-primary/25 text-primary shadow-[0_0_14px_var(--hud)]'
-                    : 'border-border/60 bg-background/70 text-muted-foreground hover:border-primary/60 hover:text-primary',
-                )}
-                style={{
-                  left: '50%',
-                  top: '50%',
-                  transform: menuOpen
-                    ? `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`
-                    : 'translate(-50%, -50%)',
-                  transitionDelay: menuOpen ? `${i * 35}ms` : '0ms',
-                }}
-              >
-                <Icon className="h-4 w-4" />
-              </button>
-            )
-          })}
+          {STATE_LABEL[state]}
         </div>
-      )}
+      </div>
     </div>
   )
 }

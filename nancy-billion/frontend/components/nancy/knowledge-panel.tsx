@@ -131,12 +131,12 @@ export function KnowledgePanel({
       {/* header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 p-3">
         <div className="flex items-center gap-2">
-          <Newspaper className="h-4 w-4 text-primary hud-glow" />
+          <Newspaper className="h-4 w-4 text-primary" />
           <div>
-            <h2 className="font-heading text-xs uppercase tracking-[0.22em] text-primary hud-glow">
+            <h2 className="font-heading text-xs tracking-[0.22em] text-primary">
               {activeLabel} {feed === 'videos' ? 'Briefings' : 'Intelligence'}
             </h2>
-            <p className="text-[0.5rem] uppercase tracking-[0.25em] text-muted-foreground">
+            <p className="text-[0.5rem] tracking-[0.25em] text-muted-foreground">
               {activeTopic ? `Topic — ${activeTopic}` : 'Trusted sources · live'}
             </p>
           </div>
@@ -147,7 +147,7 @@ export function KnowledgePanel({
             <button
               type="button"
               onClick={() => setFeed('articles')}
-              className={`flex items-center gap-1 px-2.5 py-1.5 text-[0.55rem] uppercase tracking-widest transition-colors ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 text-[0.55rem] transition-colors ${
                 feed === 'articles'
                   ? 'bg-primary/15 text-primary'
                   : 'bg-secondary/30 text-muted-foreground hover:text-foreground'
@@ -158,7 +158,7 @@ export function KnowledgePanel({
             <button
               type="button"
               onClick={() => setFeed('videos')}
-              className={`flex items-center gap-1 px-2.5 py-1.5 text-[0.55rem] uppercase tracking-widest transition-colors ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 text-[0.55rem] transition-colors ${
                 feed === 'videos'
                   ? 'bg-primary/15 text-primary'
                   : 'bg-secondary/30 text-muted-foreground hover:text-foreground'
@@ -173,7 +173,7 @@ export function KnowledgePanel({
             <button
               type="button"
               onClick={() => setViewMode('list')}
-              className={`flex items-center gap-1 px-2 py-1 text-[0.45rem] uppercase tracking-widest transition-colors ${
+              className={`flex items-center gap-1 px-2 py-1 text-[0.45rem] transition-colors ${
                 viewMode === 'list'
                   ? 'bg-primary/15 text-primary'
                   : 'bg-secondary/30 text-muted-foreground hover:text-foreground'
@@ -184,7 +184,7 @@ export function KnowledgePanel({
             <button
               type="button"
               onClick={() => setViewMode('galaxy')}
-              className={`flex items-center gap-1 px-2 py-1 text-[0.45rem] uppercase tracking-widest transition-colors ${
+              className={`flex items-center gap-1 px-2 py-1 text-[0.45rem] transition-colors ${
                 viewMode === 'galaxy'
                   ? 'bg-primary/15 text-primary'
                   : 'bg-secondary/30 text-muted-foreground hover:text-foreground'
@@ -195,7 +195,7 @@ export function KnowledgePanel({
             <button
               type="button"
               onClick={() => setViewMode('timeline')}
-              className={`flex items-center gap-1 px-2 py-1 text-[0.45rem] uppercase tracking-widest transition-colors ${
+              className={`flex items-center gap-1 px-2 py-1 text-[0.45rem] transition-colors ${
                 viewMode === 'timeline'
                   ? 'bg-primary/15 text-primary'
                   : 'bg-secondary/30 text-muted-foreground hover:text-foreground'
@@ -227,7 +227,7 @@ export function KnowledgePanel({
               setQuery('')
               setActiveTopic('')
             }}
-            className={`flex shrink-0 items-center gap-1.5 rounded border px-2.5 py-1.5 text-[0.55rem] uppercase tracking-widest transition-colors ${
+            className={`flex shrink-0 items-center gap-1.5 rounded border px-2.5 py-1.5 text-[0.55rem] transition-colors ${
               cat === key
                 ? 'border-primary bg-primary/15 text-primary'
                 : 'border-border bg-secondary/20 text-muted-foreground hover:border-primary/50 hover:text-foreground'
@@ -263,7 +263,7 @@ export function KnowledgePanel({
               setQuery('')
               setActiveTopic('')
             }}
-            className="rounded border border-border px-2 py-1 text-[0.5rem] uppercase tracking-widest text-muted-foreground hover:text-foreground"
+            className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground"
           >
             Top stories
           </button>
@@ -275,7 +275,7 @@ export function KnowledgePanel({
         {isLoading && (
           <div className="flex h-full flex-col items-center justify-center gap-2">
             <Loader2 className="h-7 w-7 animate-spin text-primary" />
-            <p className="font-heading text-[0.6rem] uppercase tracking-widest text-primary">
+            <p className="font-heading text-[0.6rem] text-primary">
               Aggregating reports...
             </p>
           </div>
@@ -320,7 +320,7 @@ export function KnowledgePanel({
                   </div>
                 )}
                 <div className="flex flex-1 flex-col gap-1 p-2.5">
-                  <div className="flex items-center justify-between text-[0.5rem] uppercase tracking-widest">
+                  <div className="flex items-center justify-between text-[0.5rem]">
                     <span className="text-primary">{it.source}</span>
                     <span className="text-muted-foreground">{timeAgo(it.published)}</span>
                   </div>

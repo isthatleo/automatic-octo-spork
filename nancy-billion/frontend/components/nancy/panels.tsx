@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useCallback, useMemo, useState } from 'react'
+import { useEffect, useCallback, useMemo, useRef, useState } from 'react'
 import { ArcReactor, HudPanel, RadialGauge, StatBar, AnimatedNumber } from './hud-bits'
 import { GlobeView } from './globe-view'
 import type { AgentInfo } from '@/lib/nancy/types'
@@ -192,10 +192,10 @@ export function OverviewPanel() {
             <ArcReactor size={200} />
             <div className="w-full space-y-3">
               <div className="text-center">
-                <div className="font-display text-3xl tracking-tight text-primary hud-glow">
+                <div className="font-display text-3xl tracking-tight text-primary">
                   <AnimatedNumber value={successPct} decimals={1} /> <span className="text-base text-muted-foreground">%</span>
                 </div>
-                <div className="text-[0.55rem] uppercase tracking-[0.28em] text-muted-foreground">
+                <div className="text-[0.55rem] text-muted-foreground">
                   Fleet Success Rate · {stats ? `${stats.total_tasks} tasks` : '…'}
                 </div>
               </div>
@@ -219,9 +219,9 @@ export function OverviewPanel() {
                 )}>
                   <s.icon className="h-4 w-4" />
                 </span>
-                <span className="text-[0.5rem] uppercase tracking-[0.22em] text-muted-foreground">{s.label}</span>
+                <span className="text-[0.5rem] text-muted-foreground">{s.label}</span>
               </div>
-              <div className="font-display text-2xl tracking-tight text-foreground hud-glow">
+              <div className="font-display text-2xl tracking-tight text-foreground">
                 <AnimatedNumber value={s.v} />
               </div>
             </div>
@@ -231,9 +231,9 @@ export function OverviewPanel() {
               <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/15 text-primary">
                 <Activity className="h-4 w-4" />
               </span>
-              <span className="text-[0.5rem] uppercase tracking-[0.22em] text-muted-foreground">Session</span>
+              <span className="text-[0.5rem] text-muted-foreground">Session</span>
             </div>
-            <div className="font-display text-xl tracking-tight text-foreground hud-glow">{uptime}</div>
+            <div className="font-display text-xl tracking-tight text-foreground">{uptime}</div>
           </div>
         </div>
 
@@ -242,7 +242,7 @@ export function OverviewPanel() {
             of the second row. */}
         <HudPanel title="System Telemetry · Live" right={<span className="text-primary text-[0.5rem]">Δ {tick}</span>} className="col-span-12 md:col-span-8">
           <SystemTelemetryChart history={telemetryHistory} height={208} />
-          <div className="mt-3 flex items-center gap-3 text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+          <div className="mt-3 flex items-center gap-3 text-[0.5rem] text-muted-foreground">
             <LegendDot color="var(--hud)" label="cpu" />
             <LegendDot color="var(--accent)" label="memory" />
             <LegendDot color="oklch(0.7 0.16 160)" label="uplink" />
@@ -254,11 +254,11 @@ export function OverviewPanel() {
         </HudPanel>
 
         <HudPanel
-          title="Operations Feed · Live"
-          right={<span className="text-accent text-[0.5rem] animate-hud-pulse">● LIVE</span>}
+          title="Activity"
+          right={<span className="text-primary text-xs">Live</span>}
           className="col-span-12"
         >
-          <CommsFeed />
+          <CommsFeed cpu={cpu} mem={mem} net={net} stats={stats} />
         </HudPanel>
       </div>
 
@@ -282,14 +282,14 @@ export function OverviewPanel() {
           </div>
           <div className="mt-3 grid grid-cols-3 gap-2 text-center">
             {[
-              { icon: Cpu, label: 'CORES', v: cores != null ? `${cores}` : '…' },
+              { icon: Cpu, label: 'Cores', v: cores != null ? `${cores}` : '…' },
               { icon: Database, label: 'MEM', v: `${mem.toFixed(0)}%` },
               { icon: Thermometer, label: 'TEMP', v: health.tempC != null ? `${health.tempC.toFixed(0)}°C` : 'N/A' },
             ].map(({ icon: Icon, label, v }) => (
               <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/60 bg-secondary/30 py-2">
                 <Icon className="h-4 w-4 text-primary" />
                 <span className="font-heading text-xs text-foreground">{v}</span>
-                <span className="text-[0.45rem] uppercase tracking-widest text-muted-foreground">{label}</span>
+                <span className="text-[0.45rem] text-muted-foreground">{label}</span>
               </div>
             ))}
           </div>
@@ -344,42 +344,56 @@ function SystemTelemetryChart({ history, height = 160 }: { history: Array<{ t: n
   )
 }
 
-/* ─── Live ops feed ─── */
-const FEED_TEMPLATES = [
-  ['SIGINT', 'Uplink stable · pkt loss 0.02%', 'ok'],
-  ['ORBIT',  'Sat KH-11 · frame lock acquired', 'ok'],
-  ['GRID',   'Neural mesh sync · 97.4%', 'ok'],
-  ['SEC',    'Zero intrusions · perimeter green', 'ok'],
-  ['AI',     'Model warm · 671B weights cached', 'ok'],
-  ['GEO',    'Aurora ping · Reykjavík', 'info'],
-  ['NET',    'Backbone latency 12ms', 'ok'],
-  ['OPS',    'Task queue drained · 0 pending', 'ok'],
-  ['ALERT',  'Anomalous packet · Kiev · resolved', 'warn'],
-  ['SAT',    'GOES-17 imagery refreshed', 'info'],
-] as const
-function CommsFeed() {
-  const [idx, setIdx] = useState(0)
+/* ─── Live ops feed -- real derived events, not scripted flavor text.
+   Appends a real line whenever the actual polled system/fleet values
+   change, instead of cycling through fabricated "SIGINT"/"orbital satellite"
+   copy that never corresponded to anything the backend does. ─── */
+function CommsFeed({
+  cpu, mem, net, stats,
+}: {
+  cpu: number
+  mem: number
+  net: number
+  stats: AgentListResponse['stats'] | null
+}) {
+  const [rows, setRows] = useState<{ id: number; tag: string; text: string; tone: 'ok' | 'warn'; at: number }[]>([])
+  const seq = useRef(0)
+  const prevTasks = useRef<number | null>(null)
+
   useEffect(() => {
-    const t = setInterval(() => setIdx((n) => (n + 1) % FEED_TEMPLATES.length), 1600)
-    return () => clearInterval(t)
-  }, [])
-  const rows = Array.from({ length: 6 }).map((_, i) => FEED_TEMPLATES[(idx + i) % FEED_TEMPLATES.length])
+    const id = seq.current++
+    setRows((r) => [
+      { id, tag: 'sys', text: `cpu ${cpu.toFixed(0)}% · mem ${mem.toFixed(0)}% · net ${net.toFixed(0)}%`, tone: 'ok' as const, at: Date.now() },
+      ...r,
+    ].slice(0, 6))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Math.round(cpu / 3), Math.round(mem / 3), Math.round(net / 5)])
+
+  useEffect(() => {
+    if (!stats) return
+    if (prevTasks.current !== null && stats.total_tasks === prevTasks.current) return
+    prevTasks.current = stats.total_tasks
+    const id = seq.current++
+    setRows((r) => [
+      { id, tag: 'fleet', text: `${stats.agents_online} agents online · ${stats.total_tasks} tasks · ${(stats.success_rate * 100).toFixed(0)}% success`, tone: stats.failed_tasks > 0 ? ('warn' as const) : ('ok' as const), at: Date.now() },
+      ...r,
+    ].slice(0, 6))
+  }, [stats])
+
   return (
-    <ul className="flex flex-col gap-1 font-mono text-[0.6rem]">
-      {rows.map(([tag, msg, level], i) => (
+    <ul className="flex flex-col gap-1 font-mono text-xs">
+      {rows.length === 0 && <li className="text-muted-foreground">Waiting for the first real reading…</li>}
+      {rows.map((row, i) => (
         <li
-          key={`${tag}-${idx}-${i}`}
+          key={row.id}
           className="flex items-center gap-3 border-b border-border/40 pb-1 last:border-none"
           style={{ opacity: 1 - i * 0.13 }}
         >
-          <span className="w-14 shrink-0 text-primary hud-glow">{tag}</span>
-          <span className="flex-1 truncate text-muted-foreground">{msg}</span>
-          <span className={cn(
-            'text-xs',
-            level === 'warn' ? 'text-accent' : level === 'info' ? 'text-primary/70' : 'text-primary',
-          )}>●</span>
-          <span className="w-16 shrink-0 text-right text-[0.5rem] text-muted-foreground">
-            {new Date(Date.now() - i * 3400).toLocaleTimeString('en-GB').slice(0, 8)}
+          <span className="w-12 shrink-0 text-muted-foreground">{row.tag}</span>
+          <span className="flex-1 truncate text-foreground">{row.text}</span>
+          <span className={cn('text-xs', row.tone === 'warn' ? 'text-destructive' : 'text-primary')}>●</span>
+          <span className="w-16 shrink-0 text-right text-xs text-muted-foreground">
+            {new Date(row.at).toLocaleTimeString('en-GB').slice(0, 8)}
           </span>
         </li>
       ))}
@@ -431,7 +445,7 @@ function AgentDomainChart({ agents }: { agents: AgentInfo[] }) {
             <li key={d.domain} className="flex items-center justify-between gap-2">
               <span className="flex items-center gap-1.5 min-w-0">
                 <span className="h-2 w-2 shrink-0 rounded-sm" style={{ background: color, boxShadow: `0 0 4px ${color}` }} />
-                <span className="truncate font-heading tracking-widest text-muted-foreground">{d.domain}</span>
+                <span className="truncate font-heading text-muted-foreground">{d.domain}</span>
               </span>
               <span className="shrink-0 text-foreground">{d.count}</span>
             </li>
@@ -542,14 +556,14 @@ export function CorePanel() {
           <ArcReactor size={240} />
           <div className="grid w-full grid-cols-2 gap-2">
             <div className="rounded border border-border/50 bg-secondary/20 p-2 text-center">
-              <div className="font-display text-xl text-primary hud-glow">{llm?.backends.length ?? '–'}</div>
-              <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">LLM Backends</div>
+              <div className="font-display text-xl text-primary">{llm?.backends.length ?? '–'}</div>
+              <div className="text-[0.5rem] text-muted-foreground">LLM Backends</div>
             </div>
             <div className="rounded border border-border/50 bg-secondary/20 p-2 text-center">
-              <div className="font-display text-xl text-accent hud-glow-amber">
+              <div className="font-display text-xl text-accent">
                 <AnimatedNumber value={stats?.agents_online ?? 0} />
               </div>
-              <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">Agents Online</div>
+              <div className="text-[0.5rem] text-muted-foreground">Agents Online</div>
             </div>
           </div>
         </div>
@@ -679,11 +693,11 @@ function AgentCard({ agent, onClick }: { agent: AgentInfo; onClick: () => void }
       )}
     >
       <div className="flex items-center justify-between gap-1">
-        <span className="flex items-center gap-1.5 font-heading text-[0.7rem] tracking-widest text-foreground">
+        <span className="flex items-center gap-1.5 font-heading text-[0.7rem] text-foreground">
           <Icon className="h-3.5 w-3.5 text-primary shrink-0" />
           <span className="truncate">{agent.name}</span>
         </span>
-        <span className={cn('shrink-0 text-[0.45rem] uppercase tracking-widest', STATUS_COLOR[agent.status] ?? 'text-muted-foreground')}>
+        <span className={cn('shrink-0 text-[0.45rem] ', STATUS_COLOR[agent.status] ?? 'text-muted-foreground')}>
           {agent.status}
         </span>
       </div>
@@ -691,12 +705,12 @@ function AgentCard({ agent, onClick }: { agent: AgentInfo; onClick: () => void }
       {(agent.mode && agent.mode !== 'production') || agent.hardware_connected === false ? (
         <div className="flex flex-wrap gap-1">
           {agent.mode && agent.mode !== 'production' && (
-            <span className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[0.4rem] uppercase tracking-widest text-accent">
+            <span className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[0.4rem] text-accent">
               {agent.mode.replace(/_/g, ' ')}
             </span>
           )}
           {agent.hardware_connected === false && (
-            <span className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[0.4rem] uppercase tracking-widest text-accent">
+            <span className="rounded border border-accent/40 bg-accent/10 px-1 py-px text-[0.4rem] text-accent">
               no hardware
             </span>
           )}
@@ -798,8 +812,8 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
               { label: 'Success', v: `${(data.stats.success_rate * 100).toFixed(0)}%`, tone: 'text-accent' },
             ].map(({ label, v, tone }) => (
               <div key={label} className="rounded border border-border/60 bg-secondary/20 py-2">
-                <div className={cn('font-display text-lg hud-glow', tone)}>{v}</div>
-                <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</div>
+                <div className={cn('font-display text-lg', tone)}>{v}</div>
+                <div className="text-[0.5rem] text-muted-foreground">{label}</div>
               </div>
             ))}
           </div>
@@ -934,8 +948,8 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
                   : 'border-border bg-secondary/20 hover:border-primary/60 hover:bg-secondary/40',
               )}>
               <Icon className={cn('h-6 w-6 transition-transform group-hover:scale-110',
-                launched === key ? 'text-primary hud-glow' : 'text-foreground')} />
-              <span className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</span>
+                launched === key ? 'text-primary' : 'text-foreground')} />
+              <span className="text-[0.5rem] text-muted-foreground">{label}</span>
             </button>
           ))}
         </div>
@@ -960,7 +974,7 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
               <Icon className="h-4 w-4 text-primary" />
               <div>
                 <div className="font-heading text-[0.75rem] text-foreground">{v}</div>
-                <div className="text-[0.45rem] uppercase tracking-widest text-muted-foreground">{label}</div>
+                <div className="text-[0.45rem] text-muted-foreground">{label}</div>
               </div>
             </div>
           ))}
@@ -992,14 +1006,14 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
       <HudPanel title="Fleet Snapshot" accent="violet" className="col-span-12 md:col-span-4">
         <div className="grid grid-cols-3 gap-2 text-center">
           {[
-            { icon: Bot, label: 'AGENTS', v: agentStats ? `${agentStats.agents_online}` : '…' },
-            { icon: Zap, label: 'TASKS', v: agentStats ? `${agentStats.total_tasks}` : '…' },
-            { icon: Activity, label: 'UPTIME', v: uptime },
+            { icon: Bot, label: 'Agents', v: agentStats ? `${agentStats.agents_online}` : '…' },
+            { icon: Zap, label: 'Tasks', v: agentStats ? `${agentStats.total_tasks}` : '…' },
+            { icon: Activity, label: 'Uptime', v: uptime },
           ].map(({ icon: Icon, label, v }) => (
             <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/50 bg-secondary/20 py-3">
               <Icon className="h-5 w-5 text-primary" />
               <span className="font-heading text-sm text-foreground">{v}</span>
-              <span className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</span>
+              <span className="text-[0.5rem] text-muted-foreground">{label}</span>
             </div>
           ))}
         </div>

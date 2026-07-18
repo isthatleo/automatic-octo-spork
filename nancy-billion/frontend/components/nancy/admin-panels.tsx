@@ -25,7 +25,7 @@ function EmptyNote({ children }: { children: React.ReactNode }) {
 function StatusPill({ ok, label }: { ok: boolean; label: string }) {
   return (
     <span className={cn(
-      'flex items-center gap-1 rounded-full border px-2 py-0.5 text-[0.5rem] uppercase tracking-widest',
+      'flex items-center gap-1 rounded-full border px-2 py-0.5 text-[0.5rem] ',
       ok ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/50 text-muted-foreground',
     )}>
       {ok ? <CheckCircle2 className="h-2.5 w-2.5" /> : <XCircle className="h-2.5 w-2.5" />}
@@ -44,12 +44,12 @@ export function SessionsPanel({ logs }: { logs: LogEntry[] }) {
       <HudPanel hero title="Current Session" className="col-span-12 lg:col-span-4">
         <div className="grid grid-cols-2 gap-2 text-center">
           <div className="rounded border border-border/50 bg-secondary/20 p-3">
-            <div className="font-display text-xl text-primary hud-glow">{userTurns}</div>
-            <div className="text-[0.45rem] uppercase tracking-widest text-muted-foreground">Your turns</div>
+            <div className="font-display text-xl text-primary">{userTurns}</div>
+            <div className="text-[0.45rem] text-muted-foreground">Your turns</div>
           </div>
           <div className="rounded border border-border/50 bg-secondary/20 p-3">
-            <div className="font-display text-xl text-accent hud-glow-amber">{nancyTurns}</div>
-            <div className="text-[0.45rem] uppercase tracking-widest text-muted-foreground">Nancy turns</div>
+            <div className="font-display text-xl text-accent">{nancyTurns}</div>
+            <div className="text-[0.45rem] text-muted-foreground">Nancy turns</div>
           </div>
         </div>
         <p className="mt-3 text-[0.55rem] text-muted-foreground">
@@ -63,7 +63,7 @@ export function SessionsPanel({ logs }: { logs: LogEntry[] }) {
           <div className="max-h-[420px] space-y-1.5 overflow-y-auto font-mono text-[0.6rem]">
             {logs.map((l) => (
               <div key={l.id} className="flex items-start gap-2 border-b border-border/20 py-1 last:border-none">
-                <span className={cn('w-14 shrink-0 uppercase tracking-widest', l.level === 'user' ? 'text-accent' : l.level === 'nancy' ? 'text-primary' : 'text-muted-foreground')}>
+                <span className={cn('w-14 shrink-0 ', l.level === 'user' ? 'text-accent' : l.level === 'nancy' ? 'text-primary' : 'text-muted-foreground')}>
                   {l.level}
                 </span>
                 <span className="flex-1 text-foreground">{l.text}</span>
@@ -129,8 +129,8 @@ export function InstancesPanel() {
         <div className="flex items-center gap-3">
           <Server className="h-8 w-8 text-primary" />
           <div>
-            <div className="font-display text-lg text-primary hud-glow">{loading ? '…' : llm ? '1 instance' : 'unreachable'}</div>
-            <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">Single local process — not a distributed gateway</div>
+            <div className="font-display text-lg text-primary">{loading ? '…' : llm ? '1 instance' : 'unreachable'}</div>
+            <div className="text-[0.5rem] text-muted-foreground">Single local process — not a distributed gateway</div>
           </div>
         </div>
         <div className="mt-3 flex items-center gap-2">
@@ -344,8 +344,8 @@ export function UsagePanel() {
           ].map(({ label, v, icon: Icon }) => (
             <div key={label} className="rounded border border-border/50 bg-secondary/20 p-3 text-center">
               <Icon className="mx-auto mb-1 h-4 w-4 text-primary" />
-              <div className="font-display text-lg text-primary hud-glow">{v}</div>
-              <div className="text-[0.45rem] uppercase tracking-widest text-muted-foreground">{label}</div>
+              <div className="font-display text-lg text-primary">{v}</div>
+              <div className="text-[0.45rem] text-muted-foreground">{label}</div>
             </div>
           ))}
         </div>
@@ -418,7 +418,7 @@ export function ProfilesPanel() {
             >
               <span className="flex items-center gap-2">
                 <User className="h-4 w-4 text-primary" />
-                <span className="font-heading text-xs uppercase tracking-widest text-foreground">{p}</span>
+                <span className="font-heading text-xs text-foreground">{p}</span>
               </span>
               {switching === p ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> : active === p && <CheckCircle2 className="h-3.5 w-3.5 text-primary" />}
             </button>
