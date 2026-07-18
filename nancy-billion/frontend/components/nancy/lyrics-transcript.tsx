@@ -45,6 +45,7 @@ export function LyricsTranscript({
   const [lines, setLines] = useState<Line[]>([])
   const [tick, setTick] = useState(0)
   const lastTextRef = useRef<string>('')
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const t = text.trim()
@@ -62,9 +63,18 @@ export function LyricsTranscript({
     }
     setLines((prev) => {
       const deactivated = prev.map((l) => ({ ...l, active: false }))
-      return [...deactivated, line].slice(-4)
+      return [...deactivated, line].slice(-3)
     })
   }, [text])
+
+  // Keep the active (newest) line pinned in view -- lyrics scroll up and
+  // out rather than growing the page and forcing a manual scroll to follow
+  // what's currently being said.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [lines, tick, wordIndex])
 
   useEffect(() => {
     if (speaking) return
@@ -94,7 +104,7 @@ export function LyricsTranscript({
   return (
     <div className="pointer-events-none flex w-full flex-col items-center gap-2.5 px-4 text-center">
       {lines.length === 0 && !interim ? (
-        <p className="font-heading text-[0.7rem] uppercase tracking-[0.35em] text-muted-foreground/70">
+        <p className="font-heading text-[0.7rem] tracking-[0.35em] text-muted-foreground/70">
           {placeholder}
         </p>
       ) : null}
@@ -115,52 +125,57 @@ export function LyricsTranscript({
         </div>
       )}
 
-      {lines.map((line, idx) => {
-        const isCurrent = line.active
-        let currentIdx: number
-        if (isCurrent && wordIndex !== undefined && wordIndex >= 0) {
-          currentIdx = Math.min(line.words.length - 1, wordIndex)
-        } else {
-          const elapsed = now - line.startedAt
-          const perWord = line.durationMs / Math.max(1, line.words.length)
-          currentIdx = Math.floor(elapsed / perWord)
-        }
-        const opacity = isCurrent
-          ? 1
-          : Math.max(0.15, 0.55 - (lines.length - 1 - idx) * 0.15)
-        return (
-          <p
-            key={line.id}
-            style={{ opacity }}
-            className={cn(
-              'text-balance leading-relaxed tracking-tight transition-all duration-500',
-              isCurrent
-                ? 'font-heading text-lg font-medium text-foreground/95 md:text-xl'
-                : 'font-sans text-[0.72rem] md:text-[0.78rem] text-muted-foreground/70',
-            )}
-          >
-            {line.words.map((w, i) => {
-              const active = isCurrent && i <= currentIdx
-              const isNow = isCurrent && i === currentIdx
-              return (
-                <span
-                  key={`${line.id}-${i}`}
-                  className={cn(
-                    'mx-[0.15em] inline-block transition-all duration-300',
-                    active ? 'text-primary' : 'opacity-45',
-                    isNow && 'text-primary drop-shadow-[0_0_10px_var(--hud)]',
-                  )}
-                >
-                  {w}
-                </span>
-              )
-            })}
-          </p>
-        )
-      })}
+      <div
+        ref={scrollRef}
+        className="flex max-h-[9.5rem] w-full flex-col items-center gap-2.5 overflow-y-hidden scroll-smooth"
+      >
+        {lines.map((line, idx) => {
+          const isCurrent = line.active
+          let currentIdx: number
+          if (isCurrent && wordIndex !== undefined && wordIndex >= 0) {
+            currentIdx = Math.min(line.words.length - 1, wordIndex)
+          } else {
+            const elapsed = now - line.startedAt
+            const perWord = line.durationMs / Math.max(1, line.words.length)
+            currentIdx = Math.floor(elapsed / perWord)
+          }
+          const opacity = isCurrent
+            ? 1
+            : Math.max(0.15, 0.55 - (lines.length - 1 - idx) * 0.15)
+          return (
+            <p
+              key={line.id}
+              style={{ opacity }}
+              className={cn(
+                'text-balance leading-relaxed tracking-tight transition-all duration-500 line-clamp-2 shrink-0',
+                isCurrent
+                  ? 'font-heading text-lg font-medium text-foreground/95 md:text-xl'
+                  : 'font-sans text-[0.72rem] md:text-[0.78rem] text-muted-foreground/70',
+              )}
+            >
+              {line.words.map((w, i) => {
+                const active = isCurrent && i <= currentIdx
+                const isNow = isCurrent && i === currentIdx
+                return (
+                  <span
+                    key={`${line.id}-${i}`}
+                    className={cn(
+                      'mx-[0.15em] inline-block transition-all duration-300',
+                      active ? 'text-primary' : 'opacity-45',
+                      isNow && 'text-primary drop-shadow-[0_0_10px_var(--hud)]',
+                    )}
+                  >
+                    {w}
+                  </span>
+                )
+              })}
+            </p>
+          )
+        })}
+      </div>
 
       {interim && (
-        <p className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 font-mono text-[0.6rem] uppercase tracking-[0.2em] text-accent/90">
+        <p className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 font-mono text-[0.6rem] tracking-[0.2em] text-accent/90">
           <span className="h-1.5 w-1.5 shrink-0 animate-hud-pulse rounded-full bg-accent" />
           {interim}
         </p>

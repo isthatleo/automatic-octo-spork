@@ -126,10 +126,10 @@ export function StoryDialog({
         <div className="flex items-center justify-between gap-2 border-b border-border/60 px-4 py-2.5">
           <div className="flex min-w-0 items-center gap-2">
             <span className="h-1.5 w-1.5 shrink-0 animate-hud-pulse rounded-full bg-primary" />
-            <span className="truncate font-heading text-[0.6rem] uppercase tracking-[0.25em] text-primary hud-glow">
+            <span className="truncate font-heading text-[0.6rem] tracking-[0.25em] text-primary">
               {source || 'Newsfeed'}
             </span>
-            <span className="shrink-0 text-[0.55rem] uppercase tracking-widest text-muted-foreground">
+            <span className="shrink-0 text-[0.55rem] text-muted-foreground">
               {timeAgo(item.published)}
             </span>
           </div>
@@ -159,7 +159,7 @@ export function StoryDialog({
               <button
                 type="button"
                 onClick={() => setSoundOn((s) => !s)}
-                className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 rounded-full border border-primary/50 bg-background/80 px-3 py-1.5 text-[0.55rem] uppercase tracking-widest text-primary backdrop-blur transition-colors hover:bg-primary/15"
+                className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 rounded-full border border-primary/50 bg-background/80 px-3 py-1.5 text-[0.55rem] text-primary backdrop-blur transition-colors hover:bg-primary/15"
               >
                 {soundOn ? (
                   <>
@@ -190,7 +190,7 @@ export function StoryDialog({
               {loading ? (
                 <Loader2 className="h-7 w-7 animate-spin text-primary" />
               ) : (
-                <span className="font-heading text-[0.6rem] uppercase tracking-[0.3em] text-muted-foreground">
+                <span className="font-heading text-[0.6rem] tracking-[0.3em] text-muted-foreground">
                   No imagery available
                 </span>
               )}
@@ -213,7 +213,7 @@ export function StoryDialog({
               href={link || item.link}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 rounded border border-primary/50 bg-primary/10 px-3 py-1.5 text-[0.55rem] uppercase tracking-widest text-primary transition-colors hover:bg-primary/20"
+              className="inline-flex items-center gap-1.5 rounded border border-primary/50 bg-primary/10 px-3 py-1.5 text-[0.55rem] text-primary transition-colors hover:bg-primary/20"
             >
               Open source <ExternalLink className="h-3 w-3" />
             </a>
@@ -221,7 +221,7 @@ export function StoryDialog({
               <button
                 type="button"
                 onClick={() => onReadout?.(`${item.title}. ${body}`)}
-                className="inline-flex items-center gap-1.5 rounded border border-border bg-secondary/30 px-3 py-1.5 text-[0.55rem] uppercase tracking-widest text-muted-foreground transition-colors hover:border-primary/60 hover:text-primary"
+                className="inline-flex items-center gap-1.5 rounded border border-border bg-secondary/30 px-3 py-1.5 text-[0.55rem] text-muted-foreground transition-colors hover:border-primary/60 hover:text-primary"
               >
                 <Volume2 className="h-3 w-3" /> Read again
               </button>

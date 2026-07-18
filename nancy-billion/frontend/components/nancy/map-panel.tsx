@@ -6,11 +6,6 @@ import { getSunInfo, formatLocalTime, isNightAt, type SunInfo } from '@/lib/nanc
 import type { Place } from '@/lib/nancy/types'
 import { CornerTicks } from './hud-bits'
 import { GlobeView } from './globe-view'
-import {
-  GlobalTrackStrip,
-  LeftTelemetryRail,
-  RightTelemetryRail,
-} from './telemetry-rail'
 import { Loader2, Crosshair, Sun, Moon, Globe2, History, Bug } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -276,16 +271,6 @@ export function MapPanel({
     <div className="hud-panel relative h-full min-h-[560px] overflow-hidden rounded-md">
       <CornerTicks />
 
-      {/* Global Track Sys strip */}
-      <div className="absolute left-0 right-0 top-0 z-[600]">
-        <GlobalTrackStrip />
-      </div>
-
-      {/* Left + right telemetry rails (JARVIS-style overlay) */}
-      <LeftTelemetryRail />
-      <RightTelemetryRail place={place} />
-
-
       {/* 3D globe (base layer) */}
       <GlobeView
         place={place}
@@ -320,7 +305,7 @@ export function MapPanel({
       {/* header (sits below the Global Track Sys strip) */}
       <div className="pointer-events-none absolute left-0 right-0 top-10 z-[500] flex items-start justify-center p-3">
         <div className="hud-panel rounded px-2 py-1 mx-auto">
-          <div className="flex items-center gap-1.5 font-heading text-[0.6rem] uppercase tracking-[0.22em] text-primary">
+          <div className="flex items-center gap-1.5 font-heading text-[0.6rem] tracking-[0.22em] text-primary">
             {showSatellite ? <Crosshair className="h-3 w-3" /> : <Globe2 className="h-3 w-3" />}
             {showSatellite ? (nightMode ? 'Surface Recon · Night' : 'Surface Recon · Day') : 'Orbital View'}
           </div>
@@ -332,7 +317,7 @@ export function MapPanel({
         <button
           type="button"
           onClick={() => setDebugOpen((v) => !v)}
-          className="hud-panel flex items-center gap-1.5 rounded px-2 py-1 text-[0.55rem] uppercase tracking-widest text-primary transition-colors hover:bg-primary/10"
+          className="hud-panel flex items-center gap-1.5 rounded px-2 py-1 text-[0.55rem] text-primary transition-colors hover:bg-primary/10"
           title="Toggle day/night debug"
         >
           <Bug className="h-3 w-3" />
@@ -341,7 +326,7 @@ export function MapPanel({
         {debugOpen && (
           <div className="hud-panel w-64 rounded p-2 text-[0.55rem]">
             <div className="mb-1 flex items-center justify-between">
-              <span className="font-heading uppercase tracking-widest text-primary">Basemap Mode</span>
+              <span className="font-heading text-primary">Basemap Mode</span>
               <span className="text-muted-foreground">
                 {modeOverride === 'auto' ? 'AUTO' : modeOverride.toUpperCase()}
               </span>
@@ -353,7 +338,7 @@ export function MapPanel({
                   type="button"
                   onClick={() => setModeOverride(m)}
                   className={cn(
-                    'rounded border px-1.5 py-1 text-[0.5rem] uppercase tracking-widest transition-colors',
+                    'rounded border px-1.5 py-1 text-[0.5rem] transition-colors',
                     modeOverride === m
                       ? 'border-primary bg-primary/20 text-primary'
                       : 'border-border/60 text-muted-foreground hover:border-primary/50',
@@ -364,7 +349,7 @@ export function MapPanel({
               ))}
             </div>
             <div className="mb-1 flex items-center justify-between">
-              <span className="font-heading uppercase tracking-widest text-primary">Night Threshold</span>
+              <span className="font-heading text-primary">Night Threshold</span>
               <span className="text-accent">{threshold > 0 ? '+' : ''}{threshold}°</span>
             </div>
             <input
@@ -381,11 +366,11 @@ export function MapPanel({
               <span>Sun Alt</span>
               <span className="text-right text-primary">{sun ? `${sun.altitude.toFixed(2)}°` : '—'}</span>
               <span>Phase</span>
-              <span className="text-right text-primary uppercase">{sun?.phase ?? '—'}</span>
+              <span className="text-right text-primary">{sun?.phase ?? '—'}</span>
               <span>Auto → Night</span>
               <span className="text-right text-accent">{autoNight ? 'YES' : 'NO'}</span>
               <span>Rendered</span>
-              <span className="text-right text-accent uppercase">{nightMode ? 'night' : 'day'}</span>
+              <span className="text-right text-accent">{nightMode ? 'night' : 'day'}</span>
             </div>
             <p className="mt-2 text-[0.5rem] leading-tight text-muted-foreground">
               Threshold sets solar altitude at which night tiles engage. −6° = civil twilight, 0° = horizon.
@@ -398,7 +383,7 @@ export function MapPanel({
       <div className="pointer-events-none absolute left-0 right-0 top-0 z-[499] hidden p-3">
 
         <div className="hud-panel rounded px-2 py-1">
-          <div className="flex items-center gap-1.5 font-heading text-[0.6rem] uppercase tracking-[0.22em] text-primary">
+          <div className="flex items-center gap-1.5 font-heading text-[0.6rem] tracking-[0.22em] text-primary">
             {showSatellite ? (
               <Crosshair className="h-3 w-3" />
             ) : (
@@ -410,7 +395,7 @@ export function MapPanel({
         {place && (
           <>
             <div className="hud-panel max-w-[60%] rounded px-2 py-1 text-right">
-              <div className="truncate font-heading text-xs text-primary hud-glow">
+              <div className="truncate font-heading text-xs text-primary">
                 {place.name}
               </div>
               <div className="truncate text-[0.55rem] text-muted-foreground">
@@ -484,7 +469,7 @@ export function MapPanel({
               <Moon className="h-4 w-4 text-primary" />
             )}
             <div className="text-[0.55rem] leading-tight">
-              <div className="font-heading uppercase tracking-widest text-foreground">
+              <div className="font-heading text-foreground">
                 {sun.phase}
               </div>
               <div className="text-muted-foreground">
@@ -493,10 +478,10 @@ export function MapPanel({
             </div>
           </div>
           <div className="hud-panel rounded px-2 py-1 text-right">
-            <div className="font-display text-sm text-accent hud-glow-amber">
+            <div className="font-display text-sm text-accent">
               {localTime}
             </div>
-            <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">
+            <div className="text-[0.5rem] text-muted-foreground">
               Local Solar Time
             </div>
           </div>
@@ -509,7 +494,7 @@ export function MapPanel({
           {loading ? (
             <>
               <Loader2 className="h-8 w-8 animate-spin text-primary" />
-              <p className="font-heading text-xs uppercase tracking-widest text-primary">
+              <p className="font-heading text-xs text-primary">
                 Acquiring orbital lock...
               </p>
             </>
@@ -529,7 +514,7 @@ export function MapPanel({
       {place && !loading && !showSatellite && descending && (
         <div className="pointer-events-none absolute inset-x-0 top-1/2 z-[450] flex -translate-y-1/2 justify-center">
           <div className="hud-panel rounded px-3 py-1.5">
-            <p className="font-heading text-[0.6rem] uppercase tracking-[0.25em] text-primary hud-glow">
+            <p className="font-heading text-[0.6rem] tracking-[0.25em] text-primary">
               Descending to surface...
             </p>
           </div>
@@ -540,7 +525,7 @@ export function MapPanel({
       {place && !loading && !showSatellite && !descending && (
         <div className="pointer-events-none absolute inset-x-0 bottom-16 z-[450] flex justify-center">
           <div className="hud-panel rounded px-3 py-1.5">
-            <p className="font-heading text-[0.55rem] uppercase tracking-[0.25em] text-primary/80">
+            <p className="font-heading text-[0.55rem] tracking-[0.25em] text-primary/80">
               Scroll to dive into {place.name}
             </p>
           </div>

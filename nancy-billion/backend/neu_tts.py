@@ -40,6 +40,12 @@ SYNTHETIC_REF_TEXT = "Hello, I'm Nancy, your personal assistant."
 
 NEUTTS_SAMPLE_RATE = 24_000
 _CACHE_MAX_ENTRIES = 200
+# Real neural synthesis on CPU-only hardware scales with text length and can
+# run well past a minute for a long greeting -- bound it and fall back to the
+# instant (if more metallic) SAPI voice rather than leaving the user waiting
+# on an open-ended generation, same tradeoff already made for the LLM chain
+# in llm.py's FallbackLLM.
+NEUTTS_TIMEOUT_S = float(os.getenv("NEUTTS_TIMEOUT_S", "8"))
 
 
 class NeuTTSBackend(TTSBackend):
@@ -157,7 +163,16 @@ class NeuTTSBackend(TTSBackend):
 
         loop = asyncio.get_event_loop()
         try:
-            wav_bytes = await loop.run_in_executor(None, self._synthesize_sync, text)
+            wav_bytes = await asyncio.wait_for(
+                loop.run_in_executor(None, self._synthesize_sync, text),
+                timeout=NEUTTS_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "NeuTTS synthesis exceeded %.0fs for %d chars, falling back to Pyttsx3",
+                NEUTTS_TIMEOUT_S, len(text),
+            )
+            return await self._fallback.synthesize(text)
         except Exception as e:
             logger.error("NeuTTS synthesis failed, falling back to Pyttsx3: %s", e)
             return await self._fallback.synthesize(text)

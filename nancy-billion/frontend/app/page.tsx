@@ -69,7 +69,6 @@ const NAV_GROUPS: { group: string; items: { key: PanelKey; label: string; icon: 
     { key: 'docs', label: 'Docs', icon: BookOpen },
   ] },
 ]
-const NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = NAV_GROUPS.flatMap((g) => g.items)
 // Orb quick-nav stays compact -- only the highest-traffic pages, not all 20.
 const ORB_QUICK_NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -132,10 +131,21 @@ export default function Page() {
         wordTimerRef.current = null
       }
       log('nancy', text)
-      setCurrentUtterance(text)
-      setSpeaking(true)
-      setWordIndex(-1)
       sfx.confirm()
+
+      // Deliberately NOT setting currentUtterance/speaking here: the lyrics
+      // transcript starts its own line timer the instant currentUtterance
+      // changes, driven by wall-clock time. If we set it before the audio
+      // actually exists, the transcript plays out and finishes while the
+      // real synthesis (which can take real, sometimes double-digit,
+      // seconds — see neu_tts.py) is still running, so Nancy's voice lands
+      // long after her words have already scrolled past. Both speech paths
+      // below defer this to the moment audio genuinely starts.
+      const beginUtterance = () => {
+        setCurrentUtterance(text)
+        setSpeaking(true)
+        setWordIndex(-1)
+      }
 
       // Compute word start-char offsets so boundary/timing → word index maps cleanly.
       const starts: number[] = []
@@ -146,11 +156,32 @@ export default function Page() {
         cursor += tok.length
       }
 
+      // Per-word timing weights for the estimated-pace fallback below: a real
+      // word's speaking time tracks its length (and a longer pause after
+      // punctuation), not a uniform per-word slice -- weighting by these
+      // keeps the estimate visibly closer to the real audio's cadence
+      // instead of drifting on longer sentences.
+      const wordWeights: number[] = starts.map((_, i) => {
+        const tok = words.filter((w) => w.trim())[i] ?? ''
+        const pause = /[.,!?;:]$/.test(tok) ? 3.5 : 0
+        return Math.max(2, tok.length) + pause
+      })
+      const totalWeight = wordWeights.reduce((a, b) => a + b, 0) || 1
+      const cumWeights: number[] = []
+      wordWeights.reduce((acc, w) => {
+        const next = acc + w
+        cumWeights.push(next)
+        return next
+      }, 0)
+
       // Fallback: browser Web Speech API (used if the backend's real neural
       // voice — neu_tts.py — is unreachable or synthesis fails).
       const speakLocally = () => {
         speak(text, {
-          onStart: () => setWordIndex(0),
+          onStart: () => {
+            beginUtterance()
+            setWordIndex(0)
+          },
           onBoundary: (charIndex) => {
             let idx = 0
             for (let i = 0; i < starts.length; i++) {
@@ -184,6 +215,7 @@ export default function Page() {
           }
 
           audio.addEventListener('play', () => {
+            beginUtterance()
             setSpeakingAudioEl(audio)
             setWordIndex(0)
             // NeuTTS doesn't emit per-word boundary events like the Web Speech
@@ -193,9 +225,14 @@ export default function Page() {
               const startedAt = Date.now()
               wordTimerRef.current = setInterval(() => {
                 const elapsed = Date.now() - startedAt
-                const idx = Math.min(starts.length - 1, Math.floor((elapsed / durationMs) * starts.length))
-                setWordIndex(idx)
-              }, 80)
+                const targetWeight = (elapsed / durationMs) * totalWeight
+                let idx = 0
+                for (let i = 0; i < cumWeights.length; i++) {
+                  if (cumWeights[i] <= targetWeight) idx = i
+                  else break
+                }
+                setWordIndex(Math.min(starts.length - 1, idx))
+              }, 60)
             }
           })
           audio.addEventListener('ended', cleanup)
@@ -342,7 +379,7 @@ export default function Page() {
     unlockSfx()
     sfx.boot()
     sfx.startHum()
-    const fallback = 'N-Å-N-C-Y online, Sir. Say Nancy, Billion, or Jarvis followed by a command.'
+    const fallback = 'Online, Sir. Say my name whenever you need me.'
     const t = setTimeout(() => {
       // Real personalized greeting (live forex rates, memory/projects, open
       // trades, pending self-improvement proposals -- see
@@ -424,54 +461,17 @@ export default function Page() {
 
   return (
     <main className="relative min-h-dvh overflow-hidden">
-      {/* Ambient atmospheric glow (grid removed) */}
-      <div className="pointer-events-none fixed inset-0 z-0 bg-[radial-gradient(ellipse_at_50%_-10%,rgba(56,211,235,0.10),transparent_55%),radial-gradient(ellipse_at_50%_110%,rgba(232,178,70,0.06),transparent_60%)]" />
-      <div className="pointer-events-none fixed inset-0 z-0 bg-[radial-gradient(ellipse_at_center,transparent_40%,rgba(0,0,0,0.75)_100%)]" />
+      {/* One quiet ambient wash instead of competing glow layers. */}
+      <div className="pointer-events-none fixed inset-0 z-0 bg-[radial-gradient(ellipse_at_50%_-10%,oklch(0.24_0.03_60_/_35%),transparent_60%)]" />
 
-      {/* Compact top bar — hidden when a workspace is fullscreen */}
+      {/* Minimal top bar — hidden when a workspace is fullscreen. No nav
+          row here: the orb's own click-to-open quick nav is the single way
+          to move around from voice-first mode, so this stays uncluttered. */}
       {!workspaceOpen && (
-      <header className="relative z-20 mx-auto flex max-w-[1680px] items-center justify-between gap-3 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div className="relative h-8 w-8">
-            <div className="absolute inset-0 animate-hud-spin rounded-full border border-primary/40" />
-            <div className="absolute inset-1.5 rounded-full bg-primary/80 shadow-[0_0_12px_var(--hud)]" />
-          </div>
-          <div>
-            <h1 className="font-display text-lg leading-none tracking-[0.32em] text-primary hud-glow">
-              NÅNCY
-            </h1>
-            <p className="text-[0.5rem] uppercase tracking-[0.28em] text-muted-foreground">
-              Stark-class · Voice Interface
-            </p>
-          </div>
-        </div>
-
-        <nav className="hidden flex-wrap items-center gap-1 md:flex">
-          {NAV.map(({ key, label, icon: Icon }) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => openPanel(key)}
-              className={cn(
-                'flex items-center gap-1.5 rounded border px-2.5 py-1.5 text-[0.58rem] uppercase tracking-widest transition-colors',
-                panel === key
-                  ? 'border-primary bg-primary/15 text-primary hud-glow'
-                  : 'border-border/60 bg-secondary/20 text-muted-foreground hover:border-primary/50 hover:text-foreground',
-              )}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              <span className="hidden lg:inline">{label}</span>
-            </button>
-          ))}
-        </nav>
-
-        <div className="text-right">
-          <div className="font-display text-sm text-accent hud-glow-amber">
-            {clock || '--:--:--'}
-          </div>
-          <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">
-            System Time
-          </div>
+      <header className="relative z-20 mx-auto flex max-w-[1680px] items-center justify-between gap-3 px-5 py-4">
+        <span className="font-display text-lg text-foreground">Nancy</span>
+        <div className="text-right font-mono text-xs text-muted-foreground">
+          {clock || '--:--:--'}
         </div>
       </header>
       )}
@@ -522,21 +522,16 @@ export default function Page() {
           aria-label="Return to voice mode"
           className="group fixed bottom-24 right-6 z-40 flex flex-col items-center gap-2 animate-orb-dock focus:outline-none"
         >
-          <div className="relative transition-transform duration-300 group-hover:scale-105 group-active:scale-95">
-            <NancyOrb state={orbState} size={200} audioElement={speakingAudioEl} />
-            <div className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-primary/50 shadow-[0_0_60px_var(--hud)] group-hover:ring-primary/90 group-hover:shadow-[0_0_80px_var(--hud)]" />
-            <div className="pointer-events-none absolute -inset-3 rounded-full border border-dashed border-primary/30 animate-hud-spin-slow" />
+          <div className="transition-transform duration-300 group-hover:scale-105 group-active:scale-95">
+            <NancyOrb state={orbState} size={120} audioElement={speakingAudioEl} />
           </div>
-          <span className="rounded border border-primary/30 bg-background/60 px-2 py-0.5 text-[0.5rem] uppercase tracking-[0.35em] text-primary/90 backdrop-blur-sm">
-            {speaking ? '● Speaking' : state.listening ? '● Listening' : 'Tap to return'}
-          </span>
         </button>
       )}
 
       {/* Bottom dock: voice-first by default (just a mic toggle + a summon
           affordance for the rare case you want to type). The full terminal
           only appears once you actually ask for it. */}
-      <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-[1680px] px-3 pb-3 md:px-4">
+      <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-[1680px] px-3 pb-4 md:px-4">
         {consoleOpen ? (
           <div className="flex flex-col items-center gap-1.5">
             <ConsoleBar
@@ -551,7 +546,7 @@ export default function Page() {
             <button
               type="button"
               onClick={() => setConsoleOpen(false)}
-              className="flex items-center gap-1 rounded border border-border/50 bg-background/50 px-2.5 py-1 text-[0.5rem] uppercase tracking-widest text-muted-foreground backdrop-blur-sm transition-colors hover:border-primary/50 hover:text-primary"
+              className="flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
             >
               <ChevronDown className="h-3 w-3" /> Hide console
             </button>
@@ -564,11 +559,11 @@ export default function Page() {
               disabled={!state.supported}
               title={state.supported ? 'Toggle microphone' : 'Speech recognition not supported in this browser'}
               className={cn(
-                'flex h-11 w-11 items-center justify-center rounded-full border backdrop-blur-sm transition-colors',
+                'flex h-12 w-12 items-center justify-center rounded-full border transition-colors',
                 !state.supported && 'cursor-not-allowed opacity-40',
                 state.listening
-                  ? 'border-primary bg-primary/20 text-primary shadow-[0_0_16px_var(--hud)]'
-                  : 'border-border bg-secondary/40 text-foreground hover:border-primary/60',
+                  ? 'border-primary bg-primary text-primary-foreground'
+                  : 'border-border bg-card text-foreground hover:border-primary/50',
               )}
             >
               {state.listening ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
@@ -577,7 +572,7 @@ export default function Page() {
               type="button"
               onClick={() => setConsoleOpen(true)}
               title="Type a command"
-              className="flex h-9 w-9 items-center justify-center rounded-full border border-border/50 bg-background/40 text-muted-foreground backdrop-blur-sm transition-colors hover:border-primary/50 hover:text-primary"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:text-foreground"
             >
               <Keyboard className="h-4 w-4" />
             </button>
@@ -609,15 +604,16 @@ function HeroVoice({
   quickNav?: { key: PanelKey; label: string; icon: typeof Brain }[]
   onQuickNav?: (k: PanelKey) => void
 }) {
-  const [orbSize, setOrbSize] = useState(420)
+  const [orbSize, setOrbSize] = useState(360)
   useEffect(() => {
     const compute = () => {
       const w = window.innerWidth
       const h = window.innerHeight
-      // Leave room for header (72), transcript (~140), console (~180) and hint (~40)
-      const vertical = Math.max(220, h - 72 - 140 - 180 - 40)
-      const horizontal = Math.min(w - 32, 520)
-      setOrbSize(Math.max(220, Math.min(vertical, horizontal, 460)))
+      // Leave room for header (72), the orb's own caption (~60), transcript
+      // (~140), console (~180) and hint (~40).
+      const vertical = Math.max(180, h - 72 - 60 - 140 - 180 - 40)
+      const horizontal = Math.min(w - 32, 440)
+      setOrbSize(Math.max(180, Math.min(vertical, horizontal, 380)))
     }
     compute()
     window.addEventListener('resize', compute)
@@ -625,16 +621,14 @@ function HeroVoice({
   }, [])
 
   return (
-    <div className="flex min-h-[calc(100dvh-260px)] flex-col items-center justify-center gap-6 py-6 sm:gap-8 sm:py-10">
-      <div className="relative">
-        <NancyOrb
-          state={orbState}
-          size={orbSize}
-          audioElement={audioElement}
-          quickNav={quickNav}
-          onQuickNav={onQuickNav ? (k) => onQuickNav(k as PanelKey) : undefined}
-        />
-      </div>
+    <div className="flex min-h-[calc(100dvh-260px)] flex-col items-center justify-center gap-8 py-6 sm:gap-10 sm:py-10">
+      <NancyOrb
+        state={orbState}
+        size={orbSize}
+        audioElement={audioElement}
+        quickNav={quickNav}
+        onQuickNav={onQuickNav ? (k) => onQuickNav(k as PanelKey) : undefined}
+      />
 
       <div className="w-full max-w-xl px-4">
         <LyricsTranscript
@@ -644,8 +638,6 @@ function HeroVoice({
           interim={interim}
         />
       </div>
-
-
     </div>
   )
 }
@@ -714,40 +706,28 @@ function WorkspaceLayout({
   }
   return (
     <div className="flex h-dvh w-full bg-transparent">
-      {/* ── Persistent grouped sidebar (OpenClaw/Hermes-style) ── */}
+      {/* ── Persistent grouped sidebar — plain hairline border, no glow,
+          sentence case throughout. Structurally still grouped like
+          OpenClaw/Hermes; visually its own quiet thing. ── */}
       <aside
         className={cn(
-          'relative z-30 flex shrink-0 flex-col border-r border-border/40 bg-background/70 backdrop-blur-md transition-[width] duration-200',
-          collapsed ? 'w-[60px]' : 'w-56',
+          'relative z-30 flex shrink-0 flex-col border-r border-border bg-card/60 transition-[width] duration-200',
+          collapsed ? 'w-[60px]' : 'w-60',
         )}
       >
-        <div
-          className="pointer-events-none absolute inset-y-0 right-0 w-px"
-          style={{ background: 'linear-gradient(180deg, transparent, var(--hud) 20%, var(--tertiary) 50%, var(--magenta) 80%, transparent)', opacity: 0.5 }}
-          aria-hidden
-        />
-
         {/* Brand */}
-        <div className="flex items-center gap-2 border-b border-border/40 px-3 py-4">
-          <div className="relative h-6 w-6 shrink-0">
-            <div className="absolute inset-0 animate-hud-spin rounded-full border border-primary/50" />
-            <div className="absolute inset-1 rounded-full bg-primary/80 shadow-[0_0_10px_var(--hud)]" />
-          </div>
-          {!collapsed && (
-            <div className="min-w-0">
-              <h1 className="font-display text-xs leading-none tracking-[0.24em] text-brand-gradient">NÅNCY</h1>
-              <p className="truncate text-[0.42rem] uppercase tracking-[0.24em] text-muted-foreground">Gateway Dashboard</p>
-            </div>
-          )}
+        <div className="flex items-center gap-2.5 border-b border-border px-4 py-4">
+          <div className="h-2 w-2 shrink-0 rounded-full bg-primary" />
+          {!collapsed && <h1 className="font-display text-base text-foreground">Nancy</h1>}
         </div>
 
         {/* Voice entry point -- always first, like OpenClaw's "Chat" */}
-        <div className="px-2 pt-3">
+        <div className="px-2.5 pt-3">
           <button
             type="button"
             onClick={onClose}
             title="Return to voice mode"
-            className="flex w-full items-center gap-2 rounded border border-primary/40 bg-primary/10 px-2.5 py-2 text-[0.6rem] uppercase tracking-widest text-primary transition-colors hover:bg-primary/20"
+            className="flex w-full items-center gap-2 rounded-lg bg-primary px-3 py-2 text-[0.75rem] font-medium text-primary-foreground transition-opacity hover:opacity-90"
           >
             <MessageSquare className="h-3.5 w-3.5 shrink-0" />
             {!collapsed && 'Voice'}
@@ -755,11 +735,11 @@ function WorkspaceLayout({
         </div>
 
         {/* Grouped nav */}
-        <nav className="flex-1 overflow-y-auto px-2 py-3">
+        <nav className="flex-1 overflow-y-auto px-2.5 py-4">
           {NAV_GROUPS.map((g) => (
-            <div key={g.group} className="mb-4">
+            <div key={g.group} className="mb-5">
               {!collapsed && (
-                <p className="mb-1.5 px-1 text-[0.45rem] uppercase tracking-[0.28em] text-muted-foreground/70">{g.group}</p>
+                <p className="mb-1.5 px-2 text-[0.65rem] font-medium text-muted-foreground">{g.group}</p>
               )}
               <div className="flex flex-col gap-0.5">
                 {g.items.map(({ key, label, icon: Icon }) => (
@@ -769,19 +749,12 @@ function WorkspaceLayout({
                     onClick={() => onNav(key)}
                     title={label}
                     className={cn(
-                      'relative flex items-center gap-2 rounded px-2.5 py-1.5 text-[0.6rem] uppercase tracking-widest transition-colors',
+                      'flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[0.75rem] transition-colors',
                       panel === key
-                        ? 'bg-primary/15 text-primary hud-glow'
-                        : 'text-muted-foreground hover:bg-secondary/40 hover:text-foreground',
+                        ? 'bg-secondary text-foreground'
+                        : 'text-muted-foreground hover:bg-secondary/50 hover:text-foreground',
                     )}
                   >
-                    {panel === key && (
-                      <span
-                        className="absolute inset-y-1 left-0 w-[2px] rounded-full"
-                        style={{ background: 'var(--hud)', boxShadow: '0 0 6px var(--hud)' }}
-                        aria-hidden
-                      />
-                    )}
                     <Icon className="h-3.5 w-3.5 shrink-0" />
                     {!collapsed && <span className="truncate">{label}</span>}
                   </button>
@@ -792,18 +765,15 @@ function WorkspaceLayout({
         </nav>
 
         {/* Footer: real clock + collapse toggle */}
-        <div className="border-t border-border/40 px-3 py-2.5">
+        <div className="border-t border-border px-3 py-2.5">
           {!collapsed && (
-            <div className="mb-2">
-              <div className="font-display text-xs text-accent hud-glow-amber">{clock || '--:--:--'}</div>
-              <div className="text-[0.4rem] uppercase tracking-widest text-muted-foreground">System Time</div>
-            </div>
+            <div className="mb-2 font-mono text-[0.7rem] text-muted-foreground">{clock || '--:--:--'}</div>
           )}
           <button
             type="button"
             onClick={() => setCollapsed((c) => !c)}
             title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            className="flex w-full items-center justify-center gap-1.5 rounded border border-border/50 py-1.5 text-muted-foreground transition-colors hover:border-primary/40 hover:text-primary"
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-border py-1.5 text-muted-foreground transition-colors hover:text-foreground"
           >
             {collapsed ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
           </button>
@@ -812,10 +782,9 @@ function WorkspaceLayout({
 
       {/* ── Main content ── */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        <div className="relative z-20 flex items-center gap-2 border-b border-border/30 bg-background/40 px-4 py-2.5 backdrop-blur-sm">
-          <span className="h-1.5 w-1.5 shrink-0 animate-hud-pulse rounded-full bg-primary" />
-          <span className="font-heading text-sm tracking-[0.24em] text-primary hud-glow">
-            {TITLE[panel] ?? String(panel).toUpperCase()}
+        <div className="relative z-20 flex items-center gap-2 border-b border-border bg-card/30 px-5 py-3">
+          <span className="font-heading text-sm text-foreground">
+            {TITLE[panel] ?? String(panel)}
           </span>
         </div>
 
