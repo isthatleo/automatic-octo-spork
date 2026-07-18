@@ -166,22 +166,32 @@ export function OverviewPanel() {
   const telemetryHistory = useMetricHistory({ cpu: health.cpu, mem: health.memory, net: health.networkPercent })
   const successPct = stats ? stats.success_rate * 100 : 100
 
+  const fleetOnlinePct = stats && stats.agents_online + stats.agents_offline > 0
+    ? (stats.agents_online / (stats.agents_online + stats.agents_offline)) * 100
+    : 0
+
+  const bigStats = [
+    { label: 'Tasks Run', v: stats?.total_tasks ?? 0, icon: Zap, tone: 'primary' as const },
+    { label: 'Agents',    v: stats?.agents_online ?? 0, icon: Radio, tone: 'accent' as const },
+    { label: 'Failures',  v: stats?.failed_tasks ?? 0, icon: Shield, tone: 'ok' as const },
+  ]
+
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
-      {/* ── HERO: Reactor + status stripe ── */}
+      {/* ── LEFT: bento mosaic — reactor is genuinely taller than its
+          neighbors (row-span-2 against a 2x2 stat mosaic of matching
+          height), not just another equal-height card in a row. ── */}
       <div className="col-span-12 grid grid-cols-12 gap-4 xl:col-span-8">
         <HudPanel
           hero
           title="Central Reactor · Nancy Core"
           right={<span className="text-primary animate-hud-breathe">ONLINE</span>}
-          className="col-span-12 md:col-span-7 xl:col-span-7"
+          className="col-span-12 row-span-2 md:col-span-7"
         >
-          <div className="flex items-center gap-4">
-            <div className="shrink-0">
-              <ArcReactor size={220} />
-            </div>
-            <div className="flex-1 min-w-0 space-y-3">
-              <div>
+          <div className="flex h-full flex-col items-center justify-center gap-4">
+            <ArcReactor size={200} />
+            <div className="w-full space-y-3">
+              <div className="text-center">
                 <div className="font-display text-3xl tracking-tight text-primary hud-glow">
                   <AnimatedNumber value={successPct} decimals={1} /> <span className="text-base text-muted-foreground">%</span>
                 </div>
@@ -191,20 +201,15 @@ export function OverviewPanel() {
               </div>
               <StatBar label="Neural CPU" value={cpu.toFixed(0)} unit="%" pct={cpu} />
               <StatBar label="Memory" value={mem.toFixed(0)} unit="%" pct={mem} amber />
-              <StatBar label="GPU Cortex" value="N/A" unit="" pct={0} />
               <StatBar label="Uplink" value={net.toFixed(0)} unit="%" pct={net} />
             </div>
           </div>
         </HudPanel>
 
-        {/* Big number cards */}
-        <div className="col-span-12 md:col-span-5 xl:col-span-5 grid grid-cols-2 gap-3">
-          {[
-            { label: 'Tasks Run',  v: stats?.total_tasks ?? 0, delta: stats ? `${stats.agents_online} online` : '…', icon: Zap, tone: 'primary' as const },
-            { label: 'Agents',     v: stats?.agents_online ?? 0, delta: stats ? `${stats.agents_offline} offline` : '…', icon: Radio, tone: 'accent' as const },
-            { label: 'Failures',   v: stats?.failed_tasks ?? 0, delta: stats ? `${(stats.success_rate * 100).toFixed(0)}% success` : '…', icon: Shield, tone: 'ok' as const },
-          ].map((s) => (
-            <div key={s.label} className="hud-panel flex flex-col justify-between rounded-md p-3 transition-transform hover:-translate-y-0.5">
+        {/* 2x2 stat mosaic — stretches to match the reactor's row-span-2 height */}
+        <div className="col-span-12 row-span-2 grid grid-cols-2 grid-rows-2 gap-3 md:col-span-5">
+          {bigStats.map((s) => (
+            <div key={s.label} className="hud-panel flex h-full flex-col justify-between rounded-md p-3 transition-transform hover:-translate-y-0.5">
               <div className="flex items-center gap-2">
                 <span className={cn(
                   'flex h-8 w-8 items-center justify-center rounded-md',
@@ -216,40 +221,27 @@ export function OverviewPanel() {
                 </span>
                 <span className="text-[0.5rem] uppercase tracking-[0.22em] text-muted-foreground">{s.label}</span>
               </div>
-              <div>
-                <div className="font-display text-2xl tracking-tight text-foreground hud-glow">
-                  <AnimatedNumber value={s.v} />
-                </div>
-                <div className="text-[0.55rem] text-primary/80">{s.delta}</div>
+              <div className="font-display text-2xl tracking-tight text-foreground hud-glow">
+                <AnimatedNumber value={s.v} />
               </div>
             </div>
           ))}
-          <div className="hud-panel flex flex-col justify-between rounded-md p-3 transition-transform hover:-translate-y-0.5">
+          <div className="hud-panel flex h-full flex-col justify-between rounded-md p-3 transition-transform hover:-translate-y-0.5">
             <div className="flex items-center gap-2">
               <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/15 text-primary">
                 <Activity className="h-4 w-4" />
               </span>
               <span className="text-[0.5rem] uppercase tracking-[0.22em] text-muted-foreground">Session</span>
             </div>
-            <div>
-              <div className="font-display text-2xl tracking-tight text-foreground hud-glow">{uptime}</div>
-              <div className="text-[0.55rem] text-primary/80">this tab</div>
-            </div>
+            <div className="font-display text-xl tracking-tight text-foreground hud-glow">{uptime}</div>
           </div>
         </div>
 
-        {/* Ops timeline */}
-        <HudPanel
-          title="Operations Feed · Live"
-          right={<span className="text-accent text-[0.5rem] animate-hud-pulse">● LIVE</span>}
-          className="col-span-12"
-        >
-          <CommsFeed />
-        </HudPanel>
-
-        {/* System telemetry + agent domains */}
-        <HudPanel title="System Telemetry · Live" right={<span className="text-primary text-[0.5rem]">Δ {tick}</span>} className="col-span-12 md:col-span-7">
-          <SystemTelemetryChart history={telemetryHistory} />
+        {/* Telemetry gets more room + more height than before — the actual
+            live chart, not a stat card, deserves to be the visual anchor
+            of the second row. */}
+        <HudPanel title="System Telemetry · Live" right={<span className="text-primary text-[0.5rem]">Δ {tick}</span>} className="col-span-12 md:col-span-8">
+          <SystemTelemetryChart history={telemetryHistory} height={208} />
           <div className="mt-3 flex items-center gap-3 text-[0.5rem] uppercase tracking-widest text-muted-foreground">
             <LegendDot color="var(--hud)" label="cpu" />
             <LegendDot color="var(--accent)" label="memory" />
@@ -257,41 +249,41 @@ export function OverviewPanel() {
           </div>
         </HudPanel>
 
-        <HudPanel title="Agent Domains" accent="violet" className="col-span-12 md:col-span-5">
+        <HudPanel title="Agent Domains" accent="violet" className="col-span-12 md:col-span-4">
           <AgentDomainChart agents={agents} />
+        </HudPanel>
+
+        <HudPanel
+          title="Operations Feed · Live"
+          right={<span className="text-accent text-[0.5rem] animate-hud-pulse">● LIVE</span>}
+          className="col-span-12"
+        >
+          <CommsFeed />
         </HudPanel>
       </div>
 
-      {/* ── RIGHT COLUMN: Global recon ── */}
-      <div className="col-span-12 xl:col-span-4 grid grid-cols-1 gap-4">
-        <HudPanel title="Deep Space Uplink" right={<span className="text-primary">ACTIVE</span>}>
-          <div className="flex flex-wrap items-center justify-around gap-2 py-1">
-            <RadialGauge value={cpu} label="Cognition" color="var(--hud)" size={92} />
-            <RadialGauge value={0} sub="N/A" label="Inference" color="var(--accent)" size={92} />
-            <RadialGauge
-              value={stats && stats.agents_online + stats.agents_offline > 0
-                ? (stats.agents_online / (stats.agents_online + stats.agents_offline)) * 100
-                : 0}
-              label="Fleet Online"
-              color="var(--hud)"
-              size={92}
-            />
-          </div>
-        </HudPanel>
-
-        <HudPanel title="Global Track Sys">
-          <WorldTracker />
+      {/* ── RIGHT: recon rail — the globe leads (strongest real asset),
+          uplink + quick stats merged into one composed panel instead of
+          two near-identical stacked cards. ── */}
+      <div className="col-span-12 grid grid-cols-1 gap-4 xl:col-span-4">
+        <HudPanel title="Global Track Sys" right={<span className="text-primary">ACTIVE</span>}>
+          <WorldTracker tall />
         </HudPanel>
 
         <HudPanel title="Trading P/L · Recent" accent="amber">
           <TradePLChart />
         </HudPanel>
 
-        <HudPanel title="Quick Stats">
-          <div className="grid grid-cols-3 gap-2 text-center">
+        <HudPanel title="Fleet & System Vitals">
+          <div className="flex flex-wrap items-center justify-around gap-2 py-1">
+            <RadialGauge value={cpu} label="CPU" color="var(--hud)" size={80} />
+            <RadialGauge value={fleetOnlinePct} label="Fleet" color="var(--accent)" size={80} />
+            <RadialGauge value={health.disk ?? 0} label="Disk" color="var(--tertiary)" size={80} />
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
             {[
               { icon: Cpu, label: 'CORES', v: cores != null ? `${cores}` : '…' },
-              { icon: Database, label: 'DISK', v: health.disk != null ? `${health.disk.toFixed(0)}%` : 'N/A' },
+              { icon: Database, label: 'MEM', v: `${mem.toFixed(0)}%` },
               { icon: Thermometer, label: 'TEMP', v: health.tempC != null ? `${health.tempC.toFixed(0)}°C` : 'N/A' },
             ].map(({ icon: Icon, label, v }) => (
               <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/60 bg-secondary/30 py-2">
@@ -318,16 +310,16 @@ function LegendDot({ color, label }: { color: string; label: string }) {
 
 /* ─── Real CPU/memory/uplink history (client-side rolling buffer of
    actual psutil-backed samples — see useMetricHistory) ─── */
-function SystemTelemetryChart({ history }: { history: Array<{ t: number } & Record<string, number>> }) {
+function SystemTelemetryChart({ history, height = 160 }: { history: Array<{ t: number } & Record<string, number>>; height?: number }) {
   if (history.length < 2) {
     return (
-      <div className="flex h-40 items-center justify-center text-[0.6rem] text-muted-foreground">
+      <div className="flex items-center justify-center text-[0.6rem] text-muted-foreground" style={{ height }}>
         Gathering telemetry…
       </div>
     )
   }
   return (
-    <div className="h-40 w-full">
+    <div className="w-full" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={history} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
           <defs>
@@ -455,9 +447,12 @@ function AgentDomainChart({ agents }: { agents: AgentInfo[] }) {
    map uses, just ambient-rotating with no active target). Only mounts
    while the Overview tab is actually visible, since OverviewPanel itself
    is conditionally rendered by page.tsx. ─── */
-function WorldTracker() {
+function WorldTracker({ tall = false }: { tall?: boolean }) {
   return (
-    <div className="relative aspect-[3/2] w-full overflow-hidden rounded border border-border/50 bg-background/40">
+    <div className={cn(
+      'relative w-full overflow-hidden rounded border border-border/50 bg-background/40',
+      tall ? 'aspect-[5/4]' : 'aspect-[3/2]',
+    )}>
       <GlobeView place={null} active={false} />
     </div>
   )
@@ -540,10 +535,11 @@ export function CorePanel() {
 
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
-      {/* Big reactor / neural sphere */}
+      {/* ── Hero row: reactor and vitals sit as a matched pair, not a lone
+          reactor beside a stacked column of unrelated cards. ── */}
       <HudPanel hero title="Neural Substrate" right={<span className="text-primary">STABLE</span>} className="col-span-12 lg:col-span-5">
         <div className="flex flex-col items-center gap-4 py-2">
-          <ArcReactor size={280} />
+          <ArcReactor size={240} />
           <div className="grid w-full grid-cols-2 gap-2">
             <div className="rounded border border-border/50 bg-secondary/20 p-2 text-center">
               <div className="font-display text-xl text-primary hud-glow">{llm?.backends.length ?? '–'}</div>
@@ -559,56 +555,55 @@ export function CorePanel() {
         </div>
       </HudPanel>
 
-      {/* Gauges & modules */}
-      <div className="col-span-12 grid grid-cols-1 gap-4 lg:col-span-7">
-        <HudPanel title="System Vitals">
-          <div className="flex flex-wrap items-center justify-around gap-3 py-2">
-            <RadialGauge value={health.cpu ?? 0} label="CPU Load" color="var(--hud)" size={110} />
-            <RadialGauge value={health.memory ?? 0} label="Memory" color="var(--accent)" size={110} />
-            <RadialGauge value={fleetOnlinePct} label="Fleet Online" color="var(--hud)" size={110} />
-            <RadialGauge value={(stats?.success_rate ?? 0) * 100} label="Success Rate" color="var(--tertiary)" size={110} />
+      <HudPanel title="System Vitals" className="col-span-12 lg:col-span-7">
+        <div className="grid h-full grid-cols-2 place-items-center gap-3 py-2 sm:grid-cols-4">
+          <RadialGauge value={health.cpu ?? 0} label="CPU Load" color="var(--hud)" size={110} />
+          <RadialGauge value={health.memory ?? 0} label="Memory" color="var(--accent)" size={110} />
+          <RadialGauge value={fleetOnlinePct} label="Fleet Online" color="var(--hud)" size={110} />
+          <RadialGauge value={(stats?.success_rate ?? 0) * 100} label="Success Rate" color="var(--tertiary)" size={110} />
+        </div>
+      </HudPanel>
+
+      {/* ── Second row: model stack and reasoning pipeline sit side by
+          side instead of stacked in a single narrow column. ── */}
+      <HudPanel title="Model Stack" accent="amber" className="col-span-12 lg:col-span-7">
+        {llmLoading && !llm ? (
+          <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
+            <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> Reading live backend chain…
           </div>
-        </HudPanel>
+        ) : (
+          <ul className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
+            {(llm?.backends ?? []).map((b, i) => (
+              <li key={`${b.name}-${i}`} className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
+                <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                  <Zap className="h-3 w-3 text-primary" /> {b.name}
+                </span>
+                <span className="truncate text-[0.6rem] text-primary">{b.model ?? (i === 0 ? 'primary' : 'fallback')}</span>
+              </li>
+            ))}
+            {llm?.stt && (
+              <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
+                <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                  <Waves className="h-3 w-3 text-primary" /> Speech-to-text
+                </span>
+                <span className="truncate text-[0.6rem] text-primary">{llm.stt.backend}{llm.stt.model ? ` · ${llm.stt.model}` : ''}</span>
+              </li>
+            )}
+            {llm?.tts && (
+              <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
+                <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                  <Eye className="h-3 w-3 text-primary" /> Voice synthesis
+                </span>
+                <span className="truncate text-[0.6rem] text-primary">{llm.tts.backend}</span>
+              </li>
+            )}
+          </ul>
+        )}
+      </HudPanel>
 
-        <HudPanel title="Model Stack" accent="amber">
-          {llmLoading && !llm ? (
-            <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
-              <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> Reading live backend chain…
-            </div>
-          ) : (
-            <ul className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
-              {(llm?.backends ?? []).map((b, i) => (
-                <li key={`${b.name}-${i}`} className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
-                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
-                    <Zap className="h-3 w-3 text-primary" /> {b.name}
-                  </span>
-                  <span className="truncate text-[0.6rem] text-primary">{b.model ?? (i === 0 ? 'primary' : 'fallback')}</span>
-                </li>
-              ))}
-              {llm?.stt && (
-                <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
-                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
-                    <Waves className="h-3 w-3 text-primary" /> Speech-to-text
-                  </span>
-                  <span className="truncate text-[0.6rem] text-primary">{llm.stt.backend}{llm.stt.model ? ` · ${llm.stt.model}` : ''}</span>
-                </li>
-              )}
-              {llm?.tts && (
-                <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
-                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
-                    <Eye className="h-3 w-3 text-primary" /> Voice synthesis
-                  </span>
-                  <span className="truncate text-[0.6rem] text-primary">{llm.tts.backend}</span>
-                </li>
-              )}
-            </ul>
-          )}
-        </HudPanel>
-
-        <HudPanel title="Reasoning Pipeline" accent="violet">
-          <ThoughtTrace />
-        </HudPanel>
-      </div>
+      <HudPanel title="Reasoning Pipeline" accent="violet" className="col-span-12 lg:col-span-5">
+        <ThoughtTrace />
+      </HudPanel>
     </div>
   )
 }
@@ -779,33 +774,45 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
 
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
-      {/* Left: hero stats + auto-router */}
-      <div className="col-span-12 grid grid-cols-1 gap-4 lg:col-span-4">
-        <HudPanel hero title="Agent Fleet · Overview" right={
+      {/* ── Hero band: fleet stats + activity chart lead full-width,
+          instead of being buried in a narrow left column. ── */}
+      <HudPanel
+        hero
+        title="Agent Fleet · Overview"
+        className="col-span-12 lg:col-span-7"
+        right={
           <button type="button" onClick={fetchAgents} disabled={loading} className="text-muted-foreground hover:text-primary">
             <RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} />
           </button>
-        }>
-          <div className="mb-3 flex items-center gap-1.5 text-[0.55rem]">
-            {error ? (<><WifiOff className="h-3 w-3 text-destructive" /><span className="text-destructive">Backend offline</span></>)
-              : (<><Wifi className="h-3 w-3 text-primary animate-hud-breathe" /><span className="text-muted-foreground">Connected · {data?.total ?? '?'} · {lastRefresh.toLocaleTimeString('en-GB')}</span></>)}
+        }
+      >
+        <div className="mb-3 flex items-center gap-1.5 text-[0.55rem]">
+          {error ? (<><WifiOff className="h-3 w-3 text-destructive" /><span className="text-destructive">Backend offline</span></>)
+            : (<><Wifi className="h-3 w-3 text-primary animate-hud-breathe" /><span className="text-muted-foreground">Connected · {data?.total ?? '?'} · {lastRefresh.toLocaleTimeString('en-GB')}</span></>)}
+        </div>
+        {data && (
+          <div className="grid grid-cols-3 gap-2 text-center">
+            {[
+              { label: 'Online',  v: data.stats.agents_online, tone: 'text-primary' },
+              { label: 'Tasks',   v: data.stats.total_tasks, tone: 'text-foreground' },
+              { label: 'Success', v: `${(data.stats.success_rate * 100).toFixed(0)}%`, tone: 'text-accent' },
+            ].map(({ label, v, tone }) => (
+              <div key={label} className="rounded border border-border/60 bg-secondary/20 py-2">
+                <div className={cn('font-display text-lg hud-glow', tone)}>{v}</div>
+                <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</div>
+              </div>
+            ))}
           </div>
-          {data && (
-            <div className="grid grid-cols-3 gap-2 text-center">
-              {[
-                { label: 'Online',  v: data.stats.agents_online, tone: 'text-primary' },
-                { label: 'Tasks',   v: data.stats.total_tasks, tone: 'text-foreground' },
-                { label: 'Success', v: `${(data.stats.success_rate * 100).toFixed(0)}%`, tone: 'text-accent' },
-              ].map(({ label, v, tone }) => (
-                <div key={label} className="rounded border border-border/60 bg-secondary/20 py-2">
-                  <div className={cn('font-display text-lg hud-glow', tone)}>{v}</div>
-                  <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </HudPanel>
+        )}
+      </HudPanel>
 
+      <HudPanel title="Fleet Activity" accent="amber" className="col-span-12 lg:col-span-5">
+        <AgentLoadChart agents={data?.agents ?? []} />
+      </HudPanel>
+
+      {/* ── Second row: auto-router (narrow, action-first) beside the
+          browsable grid (wide) ── */}
+      <div className="col-span-12 grid grid-cols-1 gap-4 lg:col-span-4">
         <HudPanel title="Auto-Route Query" accent="violet" right={<Sparkles className="h-3 w-3 text-tertiary" />}>
           <p className="mb-2 text-[0.55rem] text-muted-foreground">
             Ask anything — Nancy picks the right specialist agent.
@@ -829,13 +836,8 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
             </p>
           )}
         </HudPanel>
-
-        <HudPanel title="Fleet Activity" accent="amber">
-          <AgentLoadChart agents={data?.agents ?? []} />
-        </HudPanel>
       </div>
 
-      {/* Right: agent grid */}
       <div className="col-span-12 lg:col-span-8">
         <HudPanel title="Autonomous Agents · Fleet"
           right={data && <span className="text-primary text-[0.55rem]">{data.stats.agents_online} ONLINE</span>}>
@@ -915,118 +917,104 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
 
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
-      {/* Diagnostics column */}
-      <div className="col-span-12 grid grid-cols-1 gap-4 xl:col-span-4">
-        <HudPanel title="System Diagnostics">
-          <div className="grid grid-cols-2 gap-2">
-            {[
-              { icon: Cpu, label: 'CPU', v: `${cpu.toFixed(0)}%` },
-              { icon: Database, label: 'MEM', v: `${mem.toFixed(0)}%` },
-              { icon: Folder, label: 'DISK', v: `${disk.toFixed(0)}%` },
-              { icon: Signal, label: 'NET', v: `${net.toFixed(0)}%` },
-              { icon: Thermometer, label: 'TEMP', v: health.tempC != null ? `${health.tempC.toFixed(0)}° C` : 'N/A' },
-            ].map(({ icon: Icon, label, v }) => (
-              <div key={label} className="flex items-center gap-2 rounded border border-border/50 bg-secondary/20 p-2">
-                <Icon className="h-4 w-4 text-primary" />
-                <div>
-                  <div className="font-heading text-[0.75rem] text-foreground">{v}</div>
-                  <div className="text-[0.45rem] uppercase tracking-widest text-muted-foreground">{label}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </HudPanel>
-
-        <HudPanel title="Backend Health" accent="amber">
-          <ul className="space-y-1.5 text-[0.6rem]">
-            {[
-              ['Agent Service', agentStats ? `${agentStats.agents_online} online` : 'initialising', ShieldCheck, agentStats ? 'ok' : 'warn'],
-              ['LLM Chain', llm ? `${llm.backends.length} backend${llm.backends.length !== 1 ? 's' : ''}` : '…', Zap, llm ? 'ok' : 'warn'],
-              ['Speech-to-Text', llm?.stt.backend ?? '…', Waves, llm ? 'ok' : 'warn'],
-              ['Voice Synthesis', llm?.tts.backend ?? '…', Eye, llm ? 'ok' : 'warn'],
-            ].map(([k, v, Icon, tone]) => {
-              const IconComp = Icon as React.ElementType
-              return (
-                <li key={k as string} className="flex items-center justify-between rounded border border-border/40 bg-secondary/10 px-2 py-1.5">
-                  <span className="flex items-center gap-2 text-muted-foreground">
-                    <IconComp className={cn('h-3.5 w-3.5', tone === 'warn' ? 'text-accent' : 'text-primary')} />
-                    {k as string}
-                  </span>
-                  <span className={cn(tone === 'warn' ? 'text-accent' : 'text-primary')}>{v as string}</span>
-                </li>
-              )
-            })}
-          </ul>
-        </HudPanel>
-
-        <HudPanel title="Reactor Load">
-          <div className="flex items-center justify-around">
-            <RadialGauge value={cpu} label="Core A" color="var(--hud)" size={92} />
-            <RadialGauge value={mem} label="Core B" color="var(--accent)" size={92} />
-          </div>
-        </HudPanel>
-      </div>
-
-      {/* Terminal + apps */}
-      <div className="col-span-12 grid grid-cols-1 gap-4 xl:col-span-8">
-        <HudPanel title="Command Layer · Apps">
-          <p className="mb-3 text-[0.6rem] leading-relaxed text-muted-foreground">
-            Simulated OS bridge. Say <span className="text-primary">&ldquo;Nancy, open terminal&rdquo;</span> or tap an app.
-          </p>
-          <div className="grid grid-cols-4 gap-2 md:grid-cols-8">
-            {APPS.map(({ icon: Icon, label, key }) => (
-              <button key={key} type="button" onClick={() => onLaunch(key)}
-                className={cn(
-                  'group flex flex-col items-center gap-1.5 rounded border p-3 transition-all',
-                  launched === key
-                    ? 'border-primary bg-primary/15 shadow-[0_0_16px_var(--hud)]'
-                    : 'border-border bg-secondary/20 hover:border-primary/60 hover:bg-secondary/40',
-                )}>
-                <Icon className={cn('h-6 w-6 transition-transform group-hover:scale-110',
-                  launched === key ? 'text-primary hud-glow' : 'text-foreground')} />
-                <span className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</span>
-              </button>
-            ))}
-          </div>
-          {launched && (
-            <div className="mt-3 rounded border border-primary/40 bg-background/60 p-2 font-mono text-[0.6rem] text-primary">
-              {'>'} launching <span className="uppercase">{launched}</span>… process spawned [pid {Math.floor(1000 + Math.random() * 8000)}]
-            </div>
-          )}
-        </HudPanel>
-
-        <HudPanel title="Live Kernel Log" right={<span className="text-primary text-[0.5rem]">tick {tick}</span>}>
-          <div className="max-h-64 overflow-y-auto rounded border border-border/40 bg-background/50 p-2 font-mono text-[0.6rem] leading-relaxed">
-            {logs.map((l, i) => (
-              <div key={i} className={cn(
-                'flex items-start gap-2 border-b border-border/20 py-0.5 last:border-none',
-                l.includes('[sec]') && 'text-primary',
-                l.includes('[ai]') && 'text-accent',
-                !l.includes('[sec]') && !l.includes('[ai]') && 'text-muted-foreground',
+      {/* ── Hero: the app launcher leads (it's the one thing on this page
+          you actually click), full-width, instead of being squeezed
+          beside a column of gauges. ── */}
+      <HudPanel hero title="Command Layer · Apps" className="col-span-12">
+        <p className="mb-3 text-[0.6rem] leading-relaxed text-muted-foreground">
+          Simulated OS bridge. Say <span className="text-primary">&ldquo;Nancy, open terminal&rdquo;</span> or tap an app.
+        </p>
+        <div className="grid grid-cols-4 gap-2 md:grid-cols-8">
+          {APPS.map(({ icon: Icon, label, key }) => (
+            <button key={key} type="button" onClick={() => onLaunch(key)}
+              className={cn(
+                'group flex flex-col items-center gap-1.5 rounded border p-3 transition-all',
+                launched === key
+                  ? 'border-primary bg-primary/15 shadow-[0_0_16px_var(--hud)]'
+                  : 'border-border bg-secondary/20 hover:border-primary/60 hover:bg-secondary/40',
               )}>
-                <span className="text-primary/60">›</span>
-                <span className="flex-1">{l}</span>
-              </div>
-            ))}
+              <Icon className={cn('h-6 w-6 transition-transform group-hover:scale-110',
+                launched === key ? 'text-primary hud-glow' : 'text-foreground')} />
+              <span className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</span>
+            </button>
+          ))}
+        </div>
+        {launched && (
+          <div className="mt-3 rounded border border-primary/40 bg-background/60 p-2 font-mono text-[0.6rem] text-primary">
+            {'>'} launching <span className="uppercase">{launched}</span>… process spawned [pid {Math.floor(1000 + Math.random() * 8000)}]
           </div>
-        </HudPanel>
+        )}
+      </HudPanel>
 
-        <HudPanel title="Fleet Snapshot" accent="violet">
-          <div className="grid grid-cols-3 gap-2 text-center">
-            {[
-              { icon: Bot, label: 'AGENTS', v: agentStats ? `${agentStats.agents_online}` : '…' },
-              { icon: Zap, label: 'TASKS', v: agentStats ? `${agentStats.total_tasks}` : '…' },
-              { icon: Activity, label: 'UPTIME', v: uptime },
-            ].map(({ icon: Icon, label, v }) => (
-              <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/50 bg-secondary/20 py-3">
-                <Icon className="h-5 w-5 text-primary" />
-                <span className="font-heading text-sm text-foreground">{v}</span>
-                <span className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</span>
+      {/* ── Three-up status row ── */}
+      <HudPanel title="System Diagnostics" className="col-span-12 md:col-span-4">
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            { icon: Cpu, label: 'CPU', v: `${cpu.toFixed(0)}%` },
+            { icon: Database, label: 'MEM', v: `${mem.toFixed(0)}%` },
+            { icon: Folder, label: 'DISK', v: `${disk.toFixed(0)}%` },
+            { icon: Signal, label: 'NET', v: `${net.toFixed(0)}%` },
+            { icon: Thermometer, label: 'TEMP', v: health.tempC != null ? `${health.tempC.toFixed(0)}° C` : 'N/A' },
+          ].map(({ icon: Icon, label, v }) => (
+            <div key={label} className="flex items-center gap-2 rounded border border-border/50 bg-secondary/20 p-2">
+              <Icon className="h-4 w-4 text-primary" />
+              <div>
+                <div className="font-heading text-[0.75rem] text-foreground">{v}</div>
+                <div className="text-[0.45rem] uppercase tracking-widest text-muted-foreground">{label}</div>
               </div>
-            ))}
-          </div>
-        </HudPanel>
-      </div>
+            </div>
+          ))}
+        </div>
+      </HudPanel>
+
+      <HudPanel title="Backend Health" accent="amber" className="col-span-12 md:col-span-4">
+        <ul className="space-y-1.5 text-[0.6rem]">
+          {[
+            ['Agent Service', agentStats ? `${agentStats.agents_online} online` : 'initialising', ShieldCheck, agentStats ? 'ok' : 'warn'],
+            ['LLM Chain', llm ? `${llm.backends.length} backend${llm.backends.length !== 1 ? 's' : ''}` : '…', Zap, llm ? 'ok' : 'warn'],
+            ['Speech-to-Text', llm?.stt.backend ?? '…', Waves, llm ? 'ok' : 'warn'],
+            ['Voice Synthesis', llm?.tts.backend ?? '…', Eye, llm ? 'ok' : 'warn'],
+          ].map(([k, v, Icon, tone]) => {
+            const IconComp = Icon as React.ElementType
+            return (
+              <li key={k as string} className="flex items-center justify-between rounded border border-border/40 bg-secondary/10 px-2 py-1.5">
+                <span className="flex items-center gap-2 text-muted-foreground">
+                  <IconComp className={cn('h-3.5 w-3.5', tone === 'warn' ? 'text-accent' : 'text-primary')} />
+                  {k as string}
+                </span>
+                <span className={cn(tone === 'warn' ? 'text-accent' : 'text-primary')}>{v as string}</span>
+              </li>
+            )
+          })}
+        </ul>
+      </HudPanel>
+
+      <HudPanel title="Fleet Snapshot" accent="violet" className="col-span-12 md:col-span-4">
+        <div className="grid grid-cols-3 gap-2 text-center">
+          {[
+            { icon: Bot, label: 'AGENTS', v: agentStats ? `${agentStats.agents_online}` : '…' },
+            { icon: Zap, label: 'TASKS', v: agentStats ? `${agentStats.total_tasks}` : '…' },
+            { icon: Activity, label: 'UPTIME', v: uptime },
+          ].map(({ icon: Icon, label, v }) => (
+            <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/50 bg-secondary/20 py-3">
+              <Icon className="h-5 w-5 text-primary" />
+              <span className="font-heading text-sm text-foreground">{v}</span>
+              <span className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</span>
+            </div>
+          ))}
+        </div>
+      </HudPanel>
+
+      <HudPanel title="Live Kernel Log" className="col-span-12" right={<span className="text-primary text-[0.5rem]">tick {tick}</span>}>
+        <div className="max-h-64 overflow-y-auto rounded border border-border/40 bg-background/50 p-2 font-mono text-[0.6rem] leading-relaxed">
+          {logs.map((l, i) => (
+            <div key={i} className="flex items-start gap-2 border-b border-border/20 py-0.5 text-muted-foreground last:border-none">
+              <span className="text-primary/60">›</span>
+              <span className="flex-1">{l}</span>
+            </div>
+          ))}
+        </div>
+      </HudPanel>
     </div>
   )
 }

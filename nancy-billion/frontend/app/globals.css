@@ -433,6 +433,28 @@
   animation: hud-breathe 4.5s ease-in-out infinite;
 }
 
+/* Tilted 3D "Saturn-ring" orbits for the orb -- each keyframe bakes in a
+   fixed tilt (rotateX/rotateY) and only animates rotateZ, so the ring reads
+   as a real elliptical orbit in perspective rather than a flat spinning
+   circle. Child "node" dots ride along automatically since they're
+   positioned on the ring's own (rotating) box, no per-frame JS needed. */
+@keyframes orbit-a {
+  from { transform: rotateX(72deg) rotateZ(0deg); }
+  to   { transform: rotateX(72deg) rotateZ(360deg); }
+}
+@keyframes orbit-b {
+  from { transform: rotateX(-64deg) rotateY(20deg) rotateZ(0deg); }
+  to   { transform: rotateX(-64deg) rotateY(20deg) rotateZ(-360deg); }
+}
+@keyframes orbit-c {
+  from { transform: rotateX(80deg) rotateY(-15deg) rotateZ(0deg); }
+  to   { transform: rotateX(80deg) rotateY(-15deg) rotateZ(360deg); }
+}
+.animate-orbit-a { animation: orbit-a 14s linear infinite; }
+.animate-orbit-b { animation: orbit-b 20s linear infinite; }
+.animate-orbit-c { animation: orbit-c 9s linear infinite; }
+.animate-orbit-c-fast { animation: orbit-c 3.2s linear infinite; }
+
 /* Panel / orb transitions */
 @keyframes panel-enter {
   0% { opacity: 0; transform: translateY(12px) scale(0.985); filter: blur(6px); }
