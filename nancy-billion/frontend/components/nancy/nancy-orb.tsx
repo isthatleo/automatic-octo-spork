@@ -11,15 +11,25 @@ export type OrbState =
   | 'executing'
   | 'alert'
 
-const HUD = 'rgba(56, 211, 235, 1)'
-const HUD_SOFT = 'rgba(56, 211, 235, 0.55)'
-const AMBER = 'rgba(232, 178, 70, 1)'
+// "Aurora Circuit" palette -- matches globals.css's design tokens
+// (--hud/--tertiary/--magenta/--gold), precisely converted from their
+// oklch() values to sRGB (via the standard OKLab conversion matrices) for
+// use as canvas fillStyle/strokeStyle strings. rgba() rather than oklch()
+// deliberately: Canvas 2D's color parser has historically lagged CSS's, and
+// a parse failure here would silently break the entire orb, so this trades
+// a few points of gamut for guaranteed support.
+const HUD = 'rgba(0, 228, 231, 1)'
+const HUD_SOFT = 'rgba(0, 228, 231, 0.55)'
+const GOLD = 'rgba(249, 163, 0, 1)'
 // Matches the design system's --tertiary token -- gives "thinking" its own
 // identity instead of looking identical to idle/listening (both cyan).
-const VIOLET = 'rgba(196, 130, 235, 1)'
+const VIOLET = 'rgba(188, 99, 255, 1)'
+// New: hot magenta, matches --magenta -- a bolder, more distinct secondary
+// than the old muted amber, used where the orb needs real "hot" energy.
+const MAGENTA = 'rgba(255, 37, 181, 1)'
 // A real degraded-mode signal (e.g. speech recognition unsupported in this
 // browser) gets its own honest color instead of pretending everything's fine.
-const ALERT = 'rgba(235, 90, 90, 1)'
+const ALERT = 'rgba(255, 45, 70, 1)'
 
 // Per-state animation parameters driving the canvas + plasma core.
 const PARAMS: Record<
@@ -36,10 +46,10 @@ const PARAMS: Record<
 > = {
   idle:      { ringSpeed: 0.15, particleSpeed: 0.2, particleCount: 48, waveAmp: 0.05, waveSpeed: 1.2, color: HUD, secondary: VIOLET },
   listening: { ringSpeed: 0.35, particleSpeed: 0.5, particleCount: 64, waveAmp: 0.35, waveSpeed: 3,   color: HUD, secondary: HUD_SOFT },
-  thinking:  { ringSpeed: 1.1,  particleSpeed: 1.4, particleCount: 90, waveAmp: 0.18, waveSpeed: 4.5, color: VIOLET, secondary: HUD },
-  speaking:  { ringSpeed: 0.5,  particleSpeed: 0.7, particleCount: 72, waveAmp: 0.45, waveSpeed: 6,   color: HUD, secondary: AMBER },
-  executing: { ringSpeed: 0.9,  particleSpeed: 1.8, particleCount: 110, waveAmp: 0.3, waveSpeed: 5,   color: AMBER, secondary: HUD },
-  alert:     { ringSpeed: 0.6,  particleSpeed: 0.4, particleCount: 40, waveAmp: 0.22, waveSpeed: 2.5, color: ALERT, secondary: AMBER },
+  thinking:  { ringSpeed: 1.1,  particleSpeed: 1.4, particleCount: 90, waveAmp: 0.18, waveSpeed: 4.5, color: VIOLET, secondary: MAGENTA },
+  speaking:  { ringSpeed: 0.5,  particleSpeed: 0.7, particleCount: 72, waveAmp: 0.45, waveSpeed: 6,   color: HUD, secondary: MAGENTA },
+  executing: { ringSpeed: 0.9,  particleSpeed: 1.8, particleCount: 110, waveAmp: 0.3, waveSpeed: 5,   color: GOLD, secondary: HUD },
+  alert:     { ringSpeed: 0.6,  particleSpeed: 0.4, particleCount: 40, waveAmp: 0.22, waveSpeed: 2.5, color: ALERT, secondary: GOLD },
 }
 
 const STATE_LABEL: Record<OrbState, string> = {
@@ -283,7 +293,7 @@ export function NancyOrb({
         const pr = R * pulse
         ctx.beginPath()
         ctx.arc(cx, cy, pr, 0, Math.PI * 2)
-        ctx.strokeStyle = alpha(AMBER, Math.max(0, 0.6 - pulse * 0.6))
+        ctx.strokeStyle = alpha(GOLD, Math.max(0, 0.6 - pulse * 0.6))
         ctx.lineWidth = 2 * dpr
         ctx.stroke()
         if (pulse >= 1) pulse = stateRef.current === 'executing' ? 0.001 : 0

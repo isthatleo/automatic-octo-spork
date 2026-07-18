@@ -32,6 +32,8 @@
   --color-hud: var(--hud);
   --color-hud-dim: var(--hud-dim);
   --color-tertiary: var(--tertiary);
+  --color-magenta: var(--magenta);
+  --color-gold: var(--gold);
 
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
@@ -41,38 +43,51 @@
 
 :root {
   color-scheme: dark;
-  /* Stark-class HUD palette: deep navy-black, cyan glow, amber accent, a
-     violet tertiary reserved for rare "special" moments (self-improvement,
-     the galaxy view) so the app isn't purely a two-tone cyan/amber wash. */
-  --background: oklch(0.16 0.03 240);
-  --foreground: oklch(0.92 0.04 210);
-  --card: oklch(0.21 0.04 235 / 65%);
-  --card-foreground: oklch(0.92 0.04 210);
-  --popover: oklch(0.18 0.035 238);
-  --popover-foreground: oklch(0.92 0.04 210);
-  --primary: oklch(0.82 0.16 210);
-  --primary-foreground: oklch(0.16 0.03 240);
-  --secondary: oklch(0.28 0.05 235);
-  --secondary-foreground: oklch(0.92 0.04 210);
-  --muted: oklch(0.26 0.04 235);
-  --muted-foreground: oklch(0.68 0.06 215);
-  --accent: oklch(0.8 0.15 75);
-  --accent-foreground: oklch(0.16 0.03 240);
-  --destructive: oklch(0.62 0.22 25);
-  --border: oklch(0.78 0.14 210 / 22%);
-  --input: oklch(0.78 0.14 210 / 18%);
-  --ring: oklch(0.82 0.16 210);
+  /* "Aurora Circuit" palette -- near-black indigo void, pushed far more
+     saturated/contrasty than the old navy-cyan wash: electric teal-cyan,
+     hot magenta, vivid violet and gold all at real intensity, tied together
+     by --brand-gradient (used for the agent-card rotating ring, hero
+     headings, and active-state accents) so the app reads as one deliberate
+     high-contrast system instead of a single muted duotone. */
+  --background: oklch(0.1 0.028 278);
+  --foreground: oklch(0.95 0.03 210);
+  --card: oklch(0.16 0.045 270 / 65%);
+  --card-foreground: oklch(0.95 0.03 210);
+  --popover: oklch(0.13 0.04 272);
+  --popover-foreground: oklch(0.95 0.03 210);
+  --primary: oklch(0.8 0.21 195);
+  --primary-foreground: oklch(0.1 0.028 278);
+  --secondary: oklch(0.24 0.06 265);
+  --secondary-foreground: oklch(0.95 0.03 210);
+  --muted: oklch(0.21 0.05 268);
+  --muted-foreground: oklch(0.72 0.07 240);
+  --accent: oklch(0.78 0.18 75);
+  --accent-foreground: oklch(0.1 0.028 278);
+  --destructive: oklch(0.65 0.24 22);
+  --border: oklch(0.75 0.2 250 / 22%);
+  --input: oklch(0.75 0.2 250 / 18%);
+  --ring: oklch(0.8 0.21 195);
   --radius: 0.5rem;
 
-  --hud: oklch(0.82 0.16 210);
-  --hud-dim: oklch(0.55 0.1 220);
-  --tertiary: oklch(0.72 0.19 305);
+  --hud: oklch(0.8 0.21 195);
+  --hud-dim: oklch(0.55 0.12 210);
+  --tertiary: oklch(0.7 0.27 300);
+  /* New: hot magenta -- the fourth signature hue, anchors --brand-gradient
+     and the rotating agent-card ring; used sparingly elsewhere so it stays
+     a genuine "hot" accent rather than diluting into background noise. */
+  --magenta: oklch(0.68 0.27 348);
+  /* Renamed concept, same slot "amber" filled before -- warm gold, kept for
+     every existing amber/financial semantic (StatBar's `amber` prop,
+     Trading P/L, etc.) but pushed more saturated to match the rest. */
+  --gold: oklch(0.78 0.18 75);
+
+  --brand-gradient: linear-gradient(135deg, var(--hud) 0%, var(--tertiary) 55%, var(--magenta) 100%);
 
   /* Elevation layers -- increasingly bright/blurred surfaces so panels can
      read as sitting at different depths instead of one flat repeated card. */
-  --surface-1: oklch(0.19 0.04 235 / 55%);
-  --surface-2: oklch(0.23 0.045 235 / 70%);
-  --surface-3: oklch(0.27 0.05 232 / 80%);
+  --surface-1: oklch(0.14 0.045 270 / 55%);
+  --surface-2: oklch(0.18 0.05 268 / 72%);
+  --surface-3: oklch(0.23 0.055 265 / 82%);
 }
 
 @layer base {
@@ -88,12 +103,12 @@
   body {
     @apply bg-background text-foreground;
     background:
-      radial-gradient(ellipse 80% 60% at 50% 0%, oklch(0.24 0.09 220 / 55%), transparent 70%),
-      radial-gradient(ellipse 60% 50% at 50% 110%, oklch(0.28 0.11 215 / 45%), transparent 70%),
-      radial-gradient(circle at 15% 30%, oklch(0.22 0.08 250 / 35%), transparent 55%),
-      radial-gradient(circle at 85% 70%, oklch(0.22 0.09 190 / 35%), transparent 55%),
-      radial-gradient(circle at 50% 45%, oklch(0.3 0.13 300 / 6%), transparent 60%),
-      linear-gradient(180deg, oklch(0.14 0.03 240) 0%, oklch(0.12 0.03 245) 100%);
+      radial-gradient(ellipse 80% 60% at 50% 0%, oklch(0.28 0.13 195 / 40%), transparent 70%),
+      radial-gradient(ellipse 60% 50% at 50% 110%, oklch(0.26 0.15 348 / 22%), transparent 70%),
+      radial-gradient(circle at 12% 25%, oklch(0.24 0.14 300 / 32%), transparent 55%),
+      radial-gradient(circle at 88% 75%, oklch(0.24 0.13 195 / 30%), transparent 55%),
+      radial-gradient(circle at 50% 45%, oklch(0.3 0.16 348 / 8%), transparent 60%),
+      linear-gradient(180deg, oklch(0.09 0.026 278) 0%, oklch(0.075 0.024 280) 100%);
     background-attachment: fixed;
     overflow-x: hidden;
     font-feature-settings: 'ss01', 'cv11', 'liga';
@@ -128,19 +143,15 @@
 @layer components {
   .hud-panel {
     position: relative;
-    background:
-      linear-gradient(
-        180deg,
-        oklch(0.22 0.045 235 / 70%),
-        oklch(0.17 0.035 240 / 70%)
-      );
-    border: 1px solid oklch(0.78 0.14 210 / 25%);
-    backdrop-filter: blur(8px);
+    background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
+    border: 1px solid color-mix(in oklch, var(--hud) 32%, transparent);
+    backdrop-filter: blur(10px);
     box-shadow:
-      inset 0 0 24px oklch(0.78 0.14 210 / 8%),
-      inset 0 1px 0 oklch(1 0 0 / 6%),
-      0 8px 28px oklch(0.05 0.02 240 / 35%),
-      0 0 22px oklch(0.5 0.1 215 / 18%);
+      inset 0 0 26px color-mix(in oklch, var(--hud) 10%, transparent),
+      inset 0 1px 0 oklch(1 0 0 / 7%),
+      0 10px 32px oklch(0.03 0.02 280 / 45%),
+      0 0 26px color-mix(in oklch, var(--hud) 22%, transparent);
+    transition: border-color 0.25s ease, box-shadow 0.25s ease;
   }
 
   .hud-panel::before,
@@ -167,28 +178,40 @@
      one reading as the same cyan-bordered box. Use sparingly (one or two
      panels per screen) so the accent still reads as meaningful. */
   .hud-panel--amber {
-    border-color: oklch(0.8 0.15 75 / 28%);
+    border-color: color-mix(in oklch, var(--gold) 34%, transparent);
     box-shadow:
-      inset 0 0 24px oklch(0.8 0.15 75 / 8%),
-      inset 0 1px 0 oklch(1 0 0 / 6%),
-      0 8px 28px oklch(0.05 0.02 240 / 35%),
-      0 0 22px oklch(0.6 0.13 75 / 16%);
+      inset 0 0 26px color-mix(in oklch, var(--gold) 10%, transparent),
+      inset 0 1px 0 oklch(1 0 0 / 7%),
+      0 10px 32px oklch(0.03 0.02 280 / 45%),
+      0 0 26px color-mix(in oklch, var(--gold) 20%, transparent);
   }
   .hud-panel--amber::before,
   .hud-panel--amber::after {
     border-color: var(--accent);
   }
   .hud-panel--violet {
-    border-color: oklch(0.72 0.19 305 / 28%);
+    border-color: color-mix(in oklch, var(--tertiary) 34%, transparent);
     box-shadow:
-      inset 0 0 24px oklch(0.72 0.19 305 / 8%),
-      inset 0 1px 0 oklch(1 0 0 / 6%),
-      0 8px 28px oklch(0.05 0.02 240 / 35%),
-      0 0 22px oklch(0.6 0.16 305 / 16%);
+      inset 0 0 26px color-mix(in oklch, var(--tertiary) 10%, transparent),
+      inset 0 1px 0 oklch(1 0 0 / 7%),
+      0 10px 32px oklch(0.03 0.02 280 / 45%),
+      0 0 26px color-mix(in oklch, var(--tertiary) 20%, transparent);
   }
   .hud-panel--violet::before,
   .hud-panel--violet::after {
     border-color: var(--tertiary);
+  }
+  .hud-panel--magenta {
+    border-color: color-mix(in oklch, var(--magenta) 36%, transparent);
+    box-shadow:
+      inset 0 0 26px color-mix(in oklch, var(--magenta) 12%, transparent),
+      inset 0 1px 0 oklch(1 0 0 / 7%),
+      0 10px 32px oklch(0.03 0.02 280 / 45%),
+      0 0 28px color-mix(in oklch, var(--magenta) 24%, transparent);
+  }
+  .hud-panel--magenta::before,
+  .hud-panel--magenta::after {
+    border-color: var(--magenta);
   }
 
   /* Elevated variant for hero/lead sections -- brighter surface, heavier
@@ -196,17 +219,29 @@
      most important one. */
   .hud-panel--hero {
     background: linear-gradient(180deg, var(--surface-3), var(--surface-2));
-    backdrop-filter: blur(14px);
+    backdrop-filter: blur(16px);
   }
 
   .hud-glow {
-    text-shadow: 0 0 8px oklch(0.82 0.16 210 / 70%);
+    text-shadow: 0 0 10px color-mix(in oklch, var(--hud) 75%, transparent);
   }
   .hud-glow-amber {
-    text-shadow: 0 0 8px oklch(0.8 0.15 75 / 70%);
+    text-shadow: 0 0 10px color-mix(in oklch, var(--gold) 75%, transparent);
   }
   .hud-glow-violet {
-    text-shadow: 0 0 8px oklch(0.72 0.19 305 / 70%);
+    text-shadow: 0 0 10px color-mix(in oklch, var(--tertiary) 75%, transparent);
+  }
+  .hud-glow-magenta {
+    text-shadow: 0 0 10px color-mix(in oklch, var(--magenta) 80%, transparent);
+  }
+
+  /* Signature multi-hue gradient text -- reserved for real hero moments
+     (page wordmark, section leads), not sprinkled everywhere. */
+  .text-brand-gradient {
+    background: var(--brand-gradient);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
   }
 
   /* Decorative section divider -- a center accent breaks the visual
@@ -223,7 +258,34 @@
     content: '';
     flex: 1;
     height: 1px;
-    background: linear-gradient(90deg, transparent, oklch(0.78 0.14 210 / 35%), transparent);
+    background: linear-gradient(90deg, transparent, color-mix(in oklch, var(--hud) 40%, transparent), transparent);
+  }
+
+  /* Rotating gradient ring -- wrap any card in <div class="glow-ring"> to
+     get an animated conic-gradient border built from --brand-gradient's
+     three hues, spinning continuously. Cross-browser: rotates a larger
+     conic-gradient layer behind the card and masks it down to a ring via
+     padding-box/border-box exclusion, no @property/Houdini dependency. */
+  .glow-ring {
+    position: relative;
+    isolation: isolate;
+  }
+  .glow-ring::before {
+    content: '';
+    position: absolute;
+    inset: -2px;
+    border-radius: inherit;
+    z-index: -1;
+    padding: 2px;
+    background: conic-gradient(from 0deg, var(--hud), var(--tertiary), var(--magenta), var(--hud));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: glow-ring-spin 3.5s linear infinite;
+    filter: drop-shadow(0 0 6px color-mix(in oklch, var(--magenta) 55%, transparent));
+  }
+  @keyframes glow-ring-spin {
+    to { transform: rotate(360deg); }
   }
 }
 

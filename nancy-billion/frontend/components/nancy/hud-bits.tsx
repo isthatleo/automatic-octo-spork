@@ -4,15 +4,17 @@ import { cn } from '@/lib/utils'
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 
-const ACCENT_TEXT: Record<'cyan' | 'amber' | 'violet', string> = {
+const ACCENT_TEXT: Record<'cyan' | 'amber' | 'violet' | 'magenta', string> = {
   cyan: 'text-primary hud-glow',
   amber: 'text-accent hud-glow-amber',
   violet: 'text-tertiary hud-glow-violet',
+  magenta: 'text-magenta hud-glow-magenta',
 }
-const ACCENT_PANEL: Record<'cyan' | 'amber' | 'violet', string> = {
+const ACCENT_PANEL: Record<'cyan' | 'amber' | 'violet' | 'magenta', string> = {
   cyan: '',
   amber: 'hud-panel--amber',
   violet: 'hud-panel--violet',
+  magenta: 'hud-panel--magenta',
 }
 
 export function HudPanel({
@@ -28,8 +30,8 @@ export function HudPanel({
   className?: string
   right?: ReactNode
   /** Gives a panel a distinct identity instead of every panel on screen
-   * reading as the same cyan-bordered box -- use amber/violet sparingly. */
-  accent?: 'cyan' | 'amber' | 'violet'
+   * reading as the same cyan-bordered box -- use amber/violet/magenta sparingly. */
+  accent?: 'cyan' | 'amber' | 'violet' | 'magenta'
   /** Brighter, more heavily blurred surface for the lead panel on a screen. */
   hero?: boolean
 }) {
