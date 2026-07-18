@@ -284,6 +284,10 @@
   0% { opacity: 0; transform: translateY(3px); }
   100% { opacity: 1; transform: translateY(0); }
 }
+@keyframes hud-ripple {
+  0% { width: 4px; height: 4px; opacity: 0.6; }
+  100% { width: 220px; height: 220px; opacity: 0; }
+}
 .animate-hud-spin { animation: hud-spin 20s linear infinite; }
 .animate-hud-spin-slow { animation: hud-spin 46s linear infinite; }
 .animate-hud-spin-rev { animation: hud-spin-rev 30s linear infinite; }

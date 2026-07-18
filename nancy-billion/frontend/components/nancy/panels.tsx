@@ -716,56 +716,86 @@ const DOMAIN_ICON: Record<string, React.ElementType> = {
   'crypto-trading': BarChart3,
   'creative-design': Palette,
 }
-interface AgentCategory { label: string; icon: React.ElementType; domains: string[] }
+interface AgentCategory { label: string; icon: React.ElementType; domains: string[]; color: string }
 const AGENT_CATEGORIES: AgentCategory[] = [
-  { label: 'Cognition & Reasoning', icon: Brain, domains: ['artificial-consciousness', 'quantum-reasoning', 'quantum-computing', 'embodied-cognition', 'neural-interface', 'self-improvement', 'temporal-prediction'] },
-  { label: 'Data & Research', icon: FlaskConical, domains: ['data-science', 'research', 'market-research', 'business-intelligence', 'bioinformatics', 'astrophysics', 'healthcare-analytics', 'operations-research'] },
-  { label: 'Security & Governance', icon: Scale, domains: ['security', 'ethics', 'legal-compliance', 'qa-testing'] },
-  { label: 'Infrastructure & Ops', icon: Server, domains: ['devops', 'system-monitoring', 'file-management', 'swarm-coordinator', 'communication'] },
-  { label: 'Physical & Interface', icon: Cpu, domains: ['environmental-control', 'holographic-display', 'nanotechnology'] },
-  { label: 'Business & Creative', icon: Palette, domains: ['crypto-trading', 'creative-design'] },
+  { label: 'Cognition & Reasoning', icon: Brain, color: 'oklch(0.72 0.15 42)', domains: ['artificial-consciousness', 'quantum-reasoning', 'quantum-computing', 'embodied-cognition', 'neural-interface', 'self-improvement', 'temporal-prediction'] },
+  { label: 'Data & Research', icon: FlaskConical, color: 'oklch(0.68 0.13 290)', domains: ['data-science', 'research', 'market-research', 'business-intelligence', 'bioinformatics', 'astrophysics', 'healthcare-analytics', 'operations-research'] },
+  { label: 'Security & Governance', icon: Scale, color: 'oklch(0.78 0.13 88)', domains: ['security', 'ethics', 'legal-compliance', 'qa-testing'] },
+  { label: 'Infrastructure & Ops', icon: Server, color: 'oklch(0.72 0.14 200)', domains: ['devops', 'system-monitoring', 'file-management', 'swarm-coordinator', 'communication'] },
+  { label: 'Physical & Interface', icon: Cpu, color: 'oklch(0.7 0.14 150)', domains: ['environmental-control', 'holographic-display', 'nanotechnology'] },
+  { label: 'Business & Creative', icon: Palette, color: 'oklch(0.68 0.15 20)', domains: ['crypto-trading', 'creative-design'] },
 ]
 function categoryFor(domain: string): string {
   return AGENT_CATEGORIES.find((c) => c.domains.includes(domain))?.label ?? 'Other'
 }
+function colorFor(domain: string): string {
+  return AGENT_CATEGORIES.find((c) => c.domains.includes(domain))?.color ?? 'var(--hud)'
+}
 
-function AgentRow({ agent, selected, onClick }: { agent: AgentInfo; selected: boolean; onClick: () => void }) {
+function AgentCard({ agent, selected, onClick }: { agent: AgentInfo; selected: boolean; onClick: () => void }) {
   const Icon = DOMAIN_ICON[agent.domain] ?? Bot
   const isOnline = agent.status === 'online'
   const loadPct = Math.min(100, agent.load)
+  const color = colorFor(agent.domain)
   return (
     <li
       onClick={agent.status !== 'offline' ? onClick : undefined}
       className={cn(
-        'flex items-center gap-3 rounded-lg border p-2 transition-all duration-200',
+        'group relative flex flex-col gap-2.5 overflow-hidden rounded-xl border p-3 transition-all duration-200',
         agent.status === 'offline'
           ? 'cursor-default border-border/20 bg-background/10 opacity-45'
-          : 'cursor-pointer',
-        selected
-          ? 'border-primary/70 bg-primary/10'
-          : isOnline
-          ? 'glow-ring border-transparent bg-secondary/40 hover:bg-secondary/60'
-          : agent.status !== 'offline'
-          ? 'border-border bg-secondary/20 hover:border-primary/40'
-          : '',
+          : 'cursor-pointer hover:-translate-y-0.5',
+        selected ? 'border-primary bg-primary/10' : 'border-border/60 bg-secondary/30 hover:bg-secondary/50',
       )}
+      style={selected ? undefined : { borderTopColor: isOnline ? color : undefined, borderTopWidth: isOnline ? 2 : undefined }}
     >
-      <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-background/70">
-        <Icon className="h-4 w-4 text-primary" />
-        <span className={cn('absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full border border-background', STATUS_DOT[agent.status] ?? 'bg-muted-foreground')} />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center justify-between gap-2">
-          <span className="truncate font-heading text-[0.72rem] text-foreground">{agent.name}</span>
-          <span className={cn('shrink-0 text-[0.5rem]', STATUS_COLOR[agent.status] ?? 'text-muted-foreground')}>{agent.status}</span>
+      {/* live agents get a slow-breathing colour wash anchored top-left,
+          not a spinning border -- reads as "active", not as decoration */}
+      {isOnline && (
+        <div
+          className="pointer-events-none absolute -left-8 -top-8 h-28 w-28 rounded-full opacity-25 blur-2xl animate-hud-breathe"
+          style={{ background: color }}
+          aria-hidden
+        />
+      )}
+
+      <div className="relative flex items-center gap-2.5">
+        <span
+          className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
+          style={{ background: `color-mix(in oklch, ${color} 18%, var(--background))`, boxShadow: isOnline ? `0 0 0 1px color-mix(in oklch, ${color} 40%, transparent)` : undefined }}
+        >
+          <Icon className="h-5 w-5" style={{ color }} />
+          <span
+            className={cn('absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-card', isOnline && 'animate-hud-pulse', STATUS_DOT[agent.status] ?? 'bg-muted-foreground')}
+          />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-heading text-[0.78rem] text-foreground">{agent.name}</div>
+          <div className="truncate text-[0.55rem] text-muted-foreground">{agent.domain}</div>
         </div>
-        <div className="mt-1 h-1 overflow-hidden rounded-full bg-background/60">
+        <span className={cn('shrink-0 text-[0.5rem]', STATUS_COLOR[agent.status] ?? 'text-muted-foreground')}>{agent.status}</span>
+      </div>
+
+      <div className="relative flex items-center gap-2">
+        <div className="h-1 flex-1 overflow-hidden rounded-full bg-background/60">
           <div
             className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${loadPct}%`, background: isOnline ? 'var(--hud)' : '#555' }}
+            style={{ width: `${loadPct}%`, background: isOnline ? color : '#555' }}
           />
         </div>
+        <span className="shrink-0 text-[0.5rem] text-muted-foreground">{loadPct}%</span>
       </div>
+
+      {agent.specializations.length > 0 && (
+        <div className="relative flex flex-wrap gap-1">
+          {agent.specializations.slice(0, 3).map((s) => (
+            <span key={s} className="rounded-full bg-secondary/50 px-1.5 py-0.5 text-[0.45rem] text-muted-foreground">{s}</span>
+          ))}
+          {agent.specializations.length > 3 && (
+            <span className="self-center text-[0.45rem] text-muted-foreground">+{agent.specializations.length - 3}</span>
+          )}
+        </div>
+      )}
     </li>
   )
 }
@@ -996,16 +1026,16 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
                     className="flex w-full items-center justify-between gap-2 px-3 py-2.5 hover:bg-secondary/20"
                   >
                     <span className="flex items-center gap-2 text-xs font-medium text-foreground">
-                      <cat.icon className="h-3.5 w-3.5 text-primary" />
+                      <cat.icon className="h-3.5 w-3.5" style={{ color: cat.color }} />
                       {cat.label}
                       <span className="text-muted-foreground">({onlineCount}/{items.length} online)</span>
                     </span>
                     {isCollapsed ? <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
                   </button>
                   {!isCollapsed && (
-                    <ul className="grid grid-cols-1 gap-1.5 border-t border-border/60 p-2 md:grid-cols-2">
+                    <ul className="grid grid-cols-1 gap-2 border-t border-border/60 p-2 sm:grid-cols-2 xl:grid-cols-3">
                       {items.map((agent) => (
-                        <AgentRow key={agent.key} agent={agent} selected={selectedAgent?.key === agent.key} onClick={() => selectAgent(agent)} />
+                        <AgentCard key={agent.key} agent={agent} selected={selectedAgent?.key === agent.key} onClick={() => selectAgent(agent)} />
                       ))}
                     </ul>
                   )}

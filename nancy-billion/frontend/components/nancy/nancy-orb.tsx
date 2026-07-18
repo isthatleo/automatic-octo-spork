@@ -271,6 +271,34 @@ export function NancyOrb({
   const [menuOpen, setMenuOpen] = useState(false)
   const [hovered, setHovered] = useState(false)
   const gradId = useId().replace(/:/g, '')
+  const sphereRef = useRef<HTMLButtonElement>(null)
+  const outerRef = useRef<HTMLDivElement>(null)
+  const [ripples, setRipples] = useState<{ id: number; x: number; y: number }[]>([])
+  const rippleSeq = useRef(0)
+
+  // Tilt-toward-cursor -- direct DOM writes (no state) so it stays smooth
+  // at 60fps without fighting the rAF loop's own style writes.
+  const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = outerRef.current
+    const sphere = sphereRef.current
+    if (!el || !sphere) return
+    const rect = el.getBoundingClientRect()
+    const px = (e.clientX - rect.left) / rect.width - 0.5
+    const py = (e.clientY - rect.top) / rect.height - 0.5
+    sphere.style.transform = `perspective(600px) rotateX(${(-py * 14).toFixed(2)}deg) rotateY(${(px * 14).toFixed(2)}deg) scale(${hovered ? 1.03 : 1})`
+  }
+  const onMouseLeave = () => {
+    setHovered(false)
+    const sphere = sphereRef.current
+    if (sphere) sphere.style.transform = 'perspective(600px) rotateX(0deg) rotateY(0deg) scale(1)'
+  }
+  const onSphereClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const id = rippleSeq.current++
+    setRipples((r) => [...r, { id, x: e.clientX - rect.left, y: e.clientY - rect.top }])
+    setTimeout(() => setRipples((r) => r.filter((rp) => rp.id !== id)), 650)
+    if (quickNav && quickNav.length > 0) setMenuOpen((v) => !v)
+  }
 
   useEffect(() => {
     const reduce = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -373,12 +401,14 @@ export function NancyOrb({
   return (
     <div className="flex flex-col items-center gap-4">
       <div
+        ref={outerRef}
         className="relative flex items-center justify-center"
         style={{ width: size, height: size }}
         role="img"
         aria-label={`${name} — ${STATE_LABEL[state]}`}
         onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
+        onMouseMove={onMouseMove}
+        onMouseLeave={onMouseLeave}
       >
         {/* soft ambient shadow beneath the sphere -- blur scales with the
             orb's own size instead of a fixed 64px, which at small sizes
@@ -431,16 +461,14 @@ export function NancyOrb({
           />
         </svg>
 
-        {/* the sphere itself -- click opens quick-nav when provided */}
+        {/* the sphere itself -- click opens quick-nav when provided, tilts
+            toward the cursor on hover, and ripples on every click for real
+            tactile feedback instead of a static prop. */}
         <button
+          ref={sphereRef}
           type="button"
-          disabled={!hasQuickNav}
-          onClick={() => hasQuickNav && setMenuOpen((v) => !v)}
-          className={cn(
-            'relative flex items-center justify-center overflow-hidden rounded-full transition-transform duration-300',
-            hasQuickNav && 'cursor-pointer',
-            hovered && hasQuickNav && 'scale-[1.02]',
-          )}
+          onClick={onSphereClick}
+          className="relative flex cursor-pointer items-center justify-center overflow-hidden rounded-full transition-transform duration-300 ease-out"
           style={{
             width: '58%',
             height: '58%',
@@ -448,10 +476,22 @@ export function NancyOrb({
             // ambient shadow above -- fixed pixel values overwhelmed small
             // renders like the 120px floating dock orb.
             boxShadow: `0 ${size * 0.055}px ${size * 0.14}px oklch(0 0 0 / 40%), inset 0 1px 0 oklch(1 0 0 / 10%), 0 0 ${size * 0.11}px ${alpha(params.color, 0.35)}`,
-            transition: 'box-shadow 0.6s ease',
+            transition: 'box-shadow 0.6s ease, transform 0.15s ease-out',
           }}
-          title={hasQuickNav ? 'Open quick navigation' : undefined}
+          title={hasQuickNav ? 'Open quick navigation' : 'Nancy'}
         >
+          {ripples.map((r) => (
+            <span
+              key={r.id}
+              className="pointer-events-none absolute rounded-full"
+              style={{
+                left: r.x, top: r.y, width: 4, height: 4,
+                background: 'oklch(0.98 0.02 90 / 60%)',
+                transform: 'translate(-50%, -50%)',
+                animation: 'hud-ripple 0.65s ease-out forwards',
+              }}
+            />
+          ))}
           {/* precision core -- the glow fills the whole sphere (no bare dark
               gap), with two still lens rings and a turbine iris etched into
               it as detail lines rather than floating around a small disc */}

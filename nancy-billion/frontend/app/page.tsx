@@ -441,6 +441,57 @@ export default function Page() {
   }, [panel])
 
 
+  // Floating dock orb is draggable anywhere on screen (not just a fixed
+  // corner) -- position persists across reloads via localStorage, clamped
+  // to the viewport so it can't be dragged out of reach.
+  const [orbPos, setOrbPos] = useState<{ x: number; y: number } | null>(null)
+  const orbBtnRef = useRef<HTMLButtonElement>(null)
+  const orbDragRef = useRef({ startX: 0, startY: 0, origX: 0, origY: 0, dragging: false, moved: false })
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('nancy.dockOrbPos')
+      if (saved) setOrbPos(JSON.parse(saved))
+    } catch { /* ignore corrupt/unavailable storage */ }
+  }, [])
+
+  const onOrbPointerDown = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    const btn = orbBtnRef.current
+    if (!btn) return
+    const rect = btn.getBoundingClientRect()
+    orbDragRef.current = { startX: e.clientX, startY: e.clientY, origX: rect.left, origY: rect.top, dragging: true, moved: false }
+    btn.setPointerCapture(e.pointerId)
+  }, [])
+
+  const onOrbPointerMove = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    const d = orbDragRef.current
+    if (!d.dragging) return
+    const dx = e.clientX - d.startX
+    const dy = e.clientY - d.startY
+    if (!d.moved && Math.hypot(dx, dy) > 5) d.moved = true
+    if (!d.moved) return
+    const btn = orbBtnRef.current
+    const w = btn?.offsetWidth ?? 120
+    const h = btn?.offsetHeight ?? 150
+    const nx = Math.max(8, Math.min(window.innerWidth - w - 8, d.origX + dx))
+    const ny = Math.max(8, Math.min(window.innerHeight - h - 8, d.origY + dy))
+    setOrbPos({ x: nx, y: ny })
+  }, [])
+
+  const onOrbPointerUp = useCallback(() => {
+    const d = orbDragRef.current
+    d.dragging = false
+    if (d.moved) {
+      setOrbPos((p) => {
+        if (p) { try { localStorage.setItem('nancy.dockOrbPos', JSON.stringify(p)) } catch { /* ignore */ } }
+        return p
+      })
+      d.moved = false
+      return
+    }
+    closeWorkspace()
+  }, [closeWorkspace])
+
   const workspaceOpen = panel !== null
   const orbState: OrbState =
     mapLoading || launched
@@ -516,11 +567,18 @@ export default function Page() {
           Click to return to voice-first mode. */}
       {workspaceOpen && (
         <button
+          ref={orbBtnRef}
           type="button"
-          onClick={closeWorkspace}
-          title="Return to voice mode"
-          aria-label="Return to voice mode"
-          className="group fixed bottom-24 right-6 z-40 flex flex-col items-center gap-2 animate-orb-dock focus:outline-none"
+          onPointerDown={onOrbPointerDown}
+          onPointerMove={onOrbPointerMove}
+          onPointerUp={onOrbPointerUp}
+          title="Drag to move · click to return to voice mode"
+          aria-label="Nancy orb — drag to move, click to return to voice mode"
+          className={cn(
+            'group fixed z-40 flex touch-none cursor-grab flex-col items-center gap-2 focus:outline-none active:cursor-grabbing',
+            !orbPos && 'bottom-24 right-6 animate-orb-dock',
+          )}
+          style={orbPos ? { left: orbPos.x, top: orbPos.y } : undefined}
         >
           <div className="transition-transform duration-300 group-hover:scale-105 group-active:scale-95">
             <NancyOrb state={orbState} size={120} audioElement={speakingAudioEl} />

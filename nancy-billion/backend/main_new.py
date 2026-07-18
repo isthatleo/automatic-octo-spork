@@ -26,7 +26,9 @@ import base64
 import json
 import re
 import threading
+from dataclasses import asdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -60,9 +62,12 @@ from wake_word import get_wake_word_detector
 from audio_decode import decode_webm_opus_b64_to_pcm, pcm_int16_to_float32
 from clap_detection import clap_detector
 from telegram_bot import telegram_notifier
+import telegram_pairing
 from agents.agent_service import agent_service
 from context_manager import NancyContextualBrain, IntentType
 from memory import MemoryManager, MemoryType
+from cron_store import cron_store
+from skills_store import skills_store
 from startup import StartupCoordinator, NancyGreeting
 from intelligent_greeting import IntelligentStartupCoordinator, PersonalContext
 from trading import (
@@ -91,7 +96,10 @@ app = FastAPI(title="Nancy/Billion Backend", version="2.0.0")
 # non-default deployments (e.g. LAN access) instead of adding "*" back.
 _allowed_origins = [
     o.strip() for o in os.getenv(
-        "NANCY_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+        "NANCY_ALLOWED_ORIGINS",
+        # 3005 is the actual `next dev -p 3005` port this project runs on;
+        # 3000 kept for anyone running the frontend on Next's own default.
+        "http://localhost:3005,http://127.0.0.1:3005,http://localhost:3000,http://127.0.0.1:3000",
     ).split(",") if o.strip()
 ]
 app.add_middleware(
@@ -658,6 +666,30 @@ class ChatRequest(BaseModel):
 
 class SynthesizeRequest(BaseModel):
     text: str
+
+class CronJobCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    hour: int
+    minute: int
+    action_type: str  # "telegram_message" | "agent_task"
+    action_payload: Dict[str, Any] = {}
+
+class SkillCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    category: str = "general"
+    agent_keys: list[str] = []
+
+class SkillUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    category: str | None = None
+    agent_keys: list[str] | None = None
+
+class KeyUpsertRequest(BaseModel):
+    name: str
+    value: str
 
 
 # ---------------------------------------------------------------------------
@@ -1240,10 +1272,11 @@ async def llm_status():
 
 @app.get("/cron/status")
 async def cron_status():
-    """Real info about Nancy's one actual scheduled job -- the daily
-    Telegram briefing (see _daily_briefing_loop below). Not a general-purpose
-    cron system; honestly reflects that there's exactly one real job rather
-    than a fabricated job list."""
+    """Info about the one built-in scheduled job -- the daily Telegram
+    briefing (see _daily_briefing_loop below). User-created jobs live in
+    the separate /cron/jobs CRUD below (cron_store.py), fired by
+    _cron_execution_loop -- kept as a distinct endpoint so nothing that
+    already reads this shape breaks."""
     now = datetime.now()
     target = now.replace(hour=DAILY_BRIEFING_HOUR, minute=DAILY_BRIEFING_MINUTE, second=0, microsecond=0)
     if target <= now:
@@ -1260,6 +1293,75 @@ async def cron_status():
             }
         ],
     }
+
+
+@app.get("/cron/jobs")
+async def list_cron_jobs():
+    """User-created scheduled jobs -- real, persisted (data/cron_jobs.json),
+    and actually executed every minute by _cron_execution_loop, not just
+    stored for display."""
+    return {"success": True, "jobs": [j.to_public_dict() for j in cron_store.list()]}
+
+
+@app.post("/cron/jobs")
+async def create_cron_job(req: CronJobCreateRequest):
+    if not (0 <= req.hour <= 23 and 0 <= req.minute <= 59):
+        raise HTTPException(status_code=400, detail="hour must be 0-23 and minute 0-59")
+    if req.action_type not in ("telegram_message", "agent_task"):
+        raise HTTPException(status_code=400, detail="action_type must be telegram_message or agent_task")
+    if req.action_type == "telegram_message" and not req.action_payload.get("text"):
+        raise HTTPException(status_code=400, detail="telegram_message jobs need action_payload.text")
+    if req.action_type == "agent_task" and not req.action_payload.get("agent_key"):
+        raise HTTPException(status_code=400, detail="agent_task jobs need action_payload.agent_key")
+    job = cron_store.create(req.name, req.description, req.hour, req.minute, req.action_type, req.action_payload)
+    return {"success": True, "job": job.to_public_dict()}
+
+
+@app.patch("/cron/jobs/{job_id}")
+async def toggle_cron_job(job_id: str, enabled: bool):
+    job = cron_store.set_enabled(job_id, enabled)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"success": True, "job": job.to_public_dict()}
+
+
+@app.delete("/cron/jobs/{job_id}")
+async def delete_cron_job(job_id: str):
+    if not cron_store.delete(job_id):
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"success": True}
+
+
+@app.get("/skills/custom")
+async def list_custom_skills():
+    """User-created skill records -- real, persisted (data/skills.json).
+    Separate from /agents/list's specializations, which are read-only
+    (compiled into each agent's Python class); these are assignable tags
+    a user actually creates and attaches to real agents."""
+    return {"success": True, "skills": [asdict(s) for s in skills_store.list()]}
+
+
+@app.post("/skills/custom")
+async def create_custom_skill(req: SkillCreateRequest):
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    skill = skills_store.create(req.name.strip(), req.description, req.category, req.agent_keys)
+    return {"success": True, "skill": asdict(skill)}
+
+
+@app.patch("/skills/custom/{skill_id}")
+async def update_custom_skill(skill_id: str, req: SkillUpdateRequest):
+    skill = skills_store.update(skill_id, **req.model_dump(exclude_unset=True))
+    if not skill:
+        raise HTTPException(status_code=404, detail="skill not found")
+    return {"success": True, "skill": asdict(skill)}
+
+
+@app.delete("/skills/custom/{skill_id}")
+async def delete_custom_skill(skill_id: str):
+    if not skills_store.delete(skill_id):
+        raise HTTPException(status_code=404, detail="skill not found")
+    return {"success": True}
 
 
 @app.get("/config/public")
@@ -1281,6 +1383,47 @@ async def config_public():
             "auth_required": bool(_BACKEND_AUTH_TOKEN),
             "log_level": os.getenv("LOG_LEVEL", "INFO"),
         },
+    }
+
+
+# Only these names can be written via /config/keys -- an explicit allowlist
+# so this endpoint can never be used to overwrite arbitrary env vars (HOST,
+# PORT, auth tokens, etc.) through the Keys page.
+_WRITABLE_KEY_NAMES = {
+    "ANTHROPIC_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY", "OPENCODE_API_KEY",
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+}
+
+
+@app.post("/config/keys")
+async def upsert_key(req: KeyUpsertRequest):
+    """Writes a real provider key to backend/.env on disk via dotenv's
+    set_key (create-or-update, preserves every other line in the file).
+    Never echoes the value back or logs it. Honest about the one real
+    limitation: the LLM/Telegram backend chain reads these at process
+    startup (see load_dotenv() at the top of this file), so a written key
+    takes effect on the next backend restart, not immediately -- this is
+    a real constraint of the current architecture, not something to hide
+    behind a fake "applied" response."""
+    from dotenv import set_key
+
+    name = req.name.strip().upper()
+    if name not in _WRITABLE_KEY_NAMES:
+        raise HTTPException(status_code=400, detail=f"'{name}' is not a writable key. Allowed: {sorted(_WRITABLE_KEY_NAMES)}")
+    if not req.value.strip():
+        raise HTTPException(status_code=400, detail="value cannot be empty")
+
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        env_path.touch()
+    set_key(str(env_path), name, req.value.strip())
+    os.environ[name] = req.value.strip()
+
+    return {
+        "success": True,
+        "name": name,
+        "message": "Saved to .env. Restart the backend for the new key to take effect in the live LLM/Telegram chain.",
     }
 
 
@@ -1306,6 +1449,20 @@ async def telegram_status():
     see telegram_bot.py. TelegramNotifier's status is a plain attribute (not
     a property doing I/O), so no executor offload is needed here."""
     return {"success": True, **telegram_notifier.status}
+
+
+@app.post("/telegram/pair/start")
+async def telegram_pair_start():
+    """Real pairing flow (see telegram_pairing.py) -- generates a one-time
+    code; message it to the bot and /telegram/pair/status will pick up the
+    resulting chat_id and write it to .env for real."""
+    return telegram_pairing.start_pairing()
+
+
+@app.get("/telegram/pair/status")
+async def telegram_pair_status():
+    result = await telegram_pairing.check_pairing()
+    return result
 
 
 @app.post("/tts/synthesize")
@@ -1650,6 +1807,7 @@ async def startup_event():
     telegram_notifier.set_chat_handler(_telegram_chat_handler)
     telegram_notifier.start_polling()
     asyncio.create_task(_daily_briefing_loop())
+    asyncio.create_task(_cron_execution_loop())
 
 
 # Local time, 24h format -- override in .env if 07:30 isn't the right moment.
@@ -1685,6 +1843,42 @@ async def _daily_briefing_loop() -> None:
         except Exception as e:
             logger.exception("Daily briefing failed: %s", e)
         # Loop back around -- next iteration recomputes tomorrow's target.
+
+
+async def _cron_execution_loop() -> None:
+    """Checks user-created cron_store jobs every 30s and actually fires
+    whichever are due -- this is what makes the Cron Jobs page's "create
+    job" button real instead of a form that writes to a list nothing ever
+    reads. Two real action types: push a Telegram message, or run a real
+    agent task (optionally pushing its result to Telegram too, same as
+    _run_long_agent_task's "notify when done" pattern)."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            now = datetime.now()
+            for job in cron_store.due_jobs(now):
+                try:
+                    if job.action_type == "telegram_message":
+                        text = job.action_payload.get("text", "")
+                        await telegram_notifier.send(text)
+                        cron_store.mark_run(job.id, "sent telegram message")
+                    elif job.action_type == "agent_task":
+                        agent_key = job.action_payload.get("agent_key")
+                        task_type = job.action_payload.get("task_type", "query")
+                        payload = job.action_payload.get("payload", {})
+                        if agent_service.is_ready() and agent_key:
+                            result = await agent_service.run(agent_key, {"type": task_type, **payload}, timeout=60.0)
+                            summary = json.dumps(result)[:300]
+                            cron_store.mark_run(job.id, summary)
+                            if telegram_notifier.status["available"]:
+                                await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
+                        else:
+                            cron_store.mark_run(job.id, "skipped: agent service not ready")
+                except Exception as e:
+                    logger.exception("Cron job %s failed: %s", job.name, e)
+                    cron_store.mark_run(job.id, f"error: {e}")
+        except Exception:
+            logger.exception("Cron execution loop tick failed")
 
 
 async def _init_agents():
