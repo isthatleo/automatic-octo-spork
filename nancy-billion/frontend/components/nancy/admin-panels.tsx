@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { HudPanel } from './hud-bits'
 import { listAgents } from '@/lib/nancy/agent-client'
 import { useCronStatus, useConfigPublic, useTelegramStatus, useLlmStatus } from '@/hooks/useSystemData'
@@ -10,9 +10,29 @@ import {
   Send, MessagesSquare, Hash, Phone, Globe2, CheckCircle2, XCircle,
   Clock, Wrench, Sparkles, Cpu, Waves, Eye, Key, User, Server,
   BookOpen, BarChart3, PlugZap, Webhook, Link2, Loader2,
+  Plus, Trash2, Save, Bot, ToggleLeft, ToggleRight,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
+
+/* Small shared primitives for the CRUD panels below */
+function PrimaryButton({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      {...props}
+      className={cn(
+        'flex items-center justify-center gap-1.5 rounded-lg border border-primary bg-primary/15 px-3 py-1.5 text-[0.6rem] text-primary transition-colors hover:bg-primary/25 disabled:cursor-not-allowed disabled:opacity-40',
+        props.className,
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return <label className="mb-1 block text-[0.55rem] text-muted-foreground">{children}</label>
+}
+const inputCls = 'w-full rounded border border-border bg-background/60 px-2 py-1.5 text-[0.6rem] text-foreground outline-none focus:border-primary/60'
 
 function EmptyNote({ children }: { children: React.ReactNode }) {
   return (
@@ -145,12 +165,159 @@ export function InstancesPanel() {
   )
 }
 
-/* ═══════════════════ CRON JOBS — real scheduled briefing ═══════════════ */
+/* ═══════════════════ CRON JOBS — built-in briefing + real, creatable
+   custom jobs (data/cron_jobs.json on the backend, actually executed
+   every 30s by _cron_execution_loop — see cron_store.py) ═══════════════ */
+interface CustomCronJob {
+  id: string
+  name: string
+  description: string
+  hour: number
+  minute: number
+  action_type: 'telegram_message' | 'agent_task'
+  action_payload: Record<string, unknown>
+  enabled: boolean
+  next_run: string
+  last_run: string | null
+  last_result: string | null
+}
+
+function NewCronJobForm({ agents, onCreated }: { agents: AgentInfo[]; onCreated: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [hour, setHour] = useState('9')
+  const [minute, setMinute] = useState('0')
+  const [actionType, setActionType] = useState<'telegram_message' | 'agent_task'>('telegram_message')
+  const [text, setText] = useState('')
+  const [agentKey, setAgentKey] = useState('')
+  const [taskType, setTaskType] = useState('query')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async () => {
+    setSaving(true); setError(null)
+    try {
+      const action_payload = actionType === 'telegram_message'
+        ? { text }
+        : { agent_key: agentKey, task_type: taskType, payload: {} }
+      const res = await fetch('/api/cron/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description, hour: Number(hour), minute: Number(minute), action_type: actionType, action_payload }),
+      })
+      const json = await res.json()
+      if (!json.success) { setError(json.detail || 'Failed to create job'); return }
+      setName(''); setDescription(''); setText(''); setOpen(false)
+      onCreated()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!open) {
+    return (
+      <PrimaryButton onClick={() => setOpen(true)}><Plus className="h-3.5 w-3.5" /> New job</PrimaryButton>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-secondary/20 p-3">
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <div>
+          <FieldLabel>Name</FieldLabel>
+          <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="Evening portfolio check" />
+        </div>
+        <div>
+          <FieldLabel>Description</FieldLabel>
+          <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="optional" />
+        </div>
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <FieldLabel>Hour (0-23)</FieldLabel>
+            <input className={inputCls} type="number" min={0} max={23} value={hour} onChange={(e) => setHour(e.target.value)} />
+          </div>
+          <div className="flex-1">
+            <FieldLabel>Minute (0-59)</FieldLabel>
+            <input className={inputCls} type="number" min={0} max={59} value={minute} onChange={(e) => setMinute(e.target.value)} />
+          </div>
+        </div>
+        <div>
+          <FieldLabel>Action</FieldLabel>
+          <select className={inputCls} value={actionType} onChange={(e) => setActionType(e.target.value as 'telegram_message' | 'agent_task')}>
+            <option value="telegram_message">Send Telegram message</option>
+            <option value="agent_task">Run an agent task</option>
+          </select>
+        </div>
+        {actionType === 'telegram_message' ? (
+          <div className="sm:col-span-2">
+            <FieldLabel>Message text</FieldLabel>
+            <input className={inputCls} value={text} onChange={(e) => setText(e.target.value)} placeholder="What should Nancy send?" />
+          </div>
+        ) : (
+          <>
+            <div>
+              <FieldLabel>Agent</FieldLabel>
+              <select className={inputCls} value={agentKey} onChange={(e) => setAgentKey(e.target.value)}>
+                <option value="">Select an agent…</option>
+                {agents.map((a) => <option key={a.key} value={a.key}>{a.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <FieldLabel>Task type</FieldLabel>
+              <input className={inputCls} value={taskType} onChange={(e) => setTaskType(e.target.value)} placeholder="query" />
+            </div>
+          </>
+        )}
+      </div>
+      {error && <p className="text-[0.55rem] text-destructive">{error}</p>}
+      <div className="flex gap-2">
+        <PrimaryButton
+          onClick={submit}
+          disabled={saving || !name.trim() || (actionType === 'telegram_message' ? !text.trim() : !agentKey)}
+        >
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Create job
+        </PrimaryButton>
+        <button type="button" onClick={() => setOpen(false)} className="rounded-lg border border-border px-3 py-1.5 text-[0.6rem] text-muted-foreground hover:text-foreground">
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function CronPanel() {
   const { data, loading } = useCronStatus()
+  const [jobs, setJobs] = useState<CustomCronJob[]>([])
+  const [agents, setAgents] = useState<AgentInfo[]>([])
+
+  const fetchJobs = useCallback(async () => {
+    const res = await fetch('/api/cron/jobs')
+    const json = await res.json()
+    if (json.success) setJobs(json.jobs)
+  }, [])
+
+  useEffect(() => {
+    fetchJobs()
+    listAgents().then((r) => r.success && setAgents(r.agents))
+    const t = setInterval(fetchJobs, 30_000)
+    return () => clearInterval(t)
+  }, [fetchJobs])
+
+  const toggleJob = async (job: CustomCronJob) => {
+    await fetch(`/api/cron/jobs/${job.id}?enabled=${!job.enabled}`, { method: 'PATCH' })
+    fetchJobs()
+  }
+  const deleteJob = async (job: CustomCronJob) => {
+    await fetch(`/api/cron/jobs/${job.id}`, { method: 'DELETE' })
+    fetchJobs()
+  }
+
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
-      <HudPanel hero title="Scheduled Jobs" accent="amber" className="col-span-12">
+      <HudPanel hero title="Daily Briefing (built-in)" accent="amber" className="col-span-12">
         {loading && !data ? (
           <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
             <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…
@@ -176,15 +343,169 @@ export function CronPanel() {
           </div>
         )}
       </HudPanel>
+
+      <HudPanel
+        title="Custom Jobs"
+        className="col-span-12"
+        right={<NewCronJobForm agents={agents} onCreated={fetchJobs} />}
+      >
+        {jobs.length === 0 ? (
+          <EmptyNote>No custom jobs yet — create one above. Real jobs, checked and fired every 30s by the backend.</EmptyNote>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {jobs.map((job) => (
+              <div key={job.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 p-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <Clock className="h-3.5 w-3.5 text-primary" />
+                    <span className="font-heading text-xs text-foreground">{job.name}</span>
+                    <StatusPill ok={job.enabled} label={job.enabled ? 'enabled' : 'disabled'} />
+                    <span className="text-[0.5rem] text-muted-foreground">{job.action_type === 'telegram_message' ? 'Telegram' : `Agent: ${job.action_payload.agent_key}`}</span>
+                  </div>
+                  {job.description && <p className="mt-1 text-[0.55rem] text-muted-foreground">{job.description}</p>}
+                  {job.last_run && <p className="mt-1 text-[0.5rem] text-muted-foreground">last ran {new Date(job.last_run).toLocaleString('en-GB')} — {job.last_result}</p>}
+                </div>
+                <div className="flex items-center gap-2 text-right text-[0.55rem]">
+                  <div>
+                    <div className="text-primary">{String(job.hour).padStart(2, '0')}:{String(job.minute).padStart(2, '0')} daily</div>
+                    <div className="text-muted-foreground">next: {new Date(job.next_run).toLocaleString('en-GB')}</div>
+                  </div>
+                  <button type="button" onClick={() => toggleJob(job)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Toggle enabled">
+                    {job.enabled ? <ToggleRight className="h-4 w-4 text-primary" /> : <ToggleLeft className="h-4 w-4" />}
+                  </button>
+                  <button type="button" onClick={() => deleteJob(job)} className="rounded p-1.5 text-muted-foreground hover:text-destructive" title="Delete">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </HudPanel>
     </div>
   )
 }
 
-/* ═══════════════════ SKILLS — real specializations across the fleet ════ */
+/* ═══════════════════ SKILLS — real specializations across the fleet, plus
+   real, creatable custom skill records (data/skills.json on the backend —
+   see skills_store.py) assignable to real agents ═══════════════════════ */
+interface CustomSkill {
+  id: string
+  name: string
+  description: string
+  category: string
+  agent_keys: string[]
+}
+
+function NewSkillForm({ agents, onCreated }: { agents: AgentInfo[]; onCreated: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [category, setCategory] = useState('general')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const toggleAgent = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }
+
+  const submit = async () => {
+    setSaving(true); setError(null)
+    try {
+      const res = await fetch('/api/skills/custom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description, category, agent_keys: Array.from(selected) }),
+      })
+      const json = await res.json()
+      if (!json.success) { setError(json.detail || 'Failed to create skill'); return }
+      setName(''); setDescription(''); setSelected(new Set()); setOpen(false)
+      onCreated()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!open) {
+    return <PrimaryButton onClick={() => setOpen(true)}><Plus className="h-3.5 w-3.5" /> New skill</PrimaryButton>
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-secondary/20 p-3">
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <div>
+          <FieldLabel>Name</FieldLabel>
+          <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Portfolio rebalancing" />
+        </div>
+        <div>
+          <FieldLabel>Category</FieldLabel>
+          <input className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)} placeholder="general" />
+        </div>
+        <div className="sm:col-span-2">
+          <FieldLabel>Description</FieldLabel>
+          <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this skill covers" />
+        </div>
+        <div className="sm:col-span-2">
+          <FieldLabel>Assign to agents</FieldLabel>
+          <div className="flex max-h-32 flex-wrap gap-1 overflow-y-auto rounded border border-border/50 bg-background/40 p-2">
+            {agents.map((a) => (
+              <button
+                key={a.key}
+                type="button"
+                onClick={() => toggleAgent(a.key)}
+                className={cn(
+                  'rounded-full border px-2 py-0.5 text-[0.5rem] transition-colors',
+                  selected.has(a.key) ? 'border-primary bg-primary/15 text-primary' : 'border-border/50 text-muted-foreground hover:border-primary/40',
+                )}
+              >
+                {a.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      {error && <p className="text-[0.55rem] text-destructive">{error}</p>}
+      <div className="flex gap-2">
+        <PrimaryButton onClick={submit} disabled={saving || !name.trim()}>
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Create skill
+        </PrimaryButton>
+        <button type="button" onClick={() => setOpen(false)} className="rounded-lg border border-border px-3 py-1.5 text-[0.6rem] text-muted-foreground hover:text-foreground">
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function SkillsPanel() {
   const [agents, setAgents] = useState<AgentInfo[]>([])
   const [loading, setLoading] = useState(true)
-  useEffect(() => { listAgents().then((r) => { if (r.success) setAgents(r.agents); setLoading(false) }) }, [])
+  const [customSkills, setCustomSkills] = useState<CustomSkill[]>([])
+
+  const fetchCustom = useCallback(async () => {
+    const res = await fetch('/api/skills/custom')
+    const json = await res.json()
+    if (json.success) setCustomSkills(json.skills)
+  }, [])
+
+  useEffect(() => {
+    listAgents().then((r) => { if (r.success) setAgents(r.agents); setLoading(false) })
+    fetchCustom()
+  }, [fetchCustom])
+
+  const deleteSkill = async (id: string) => {
+    await fetch(`/api/skills/custom/${id}`, { method: 'DELETE' })
+    fetchCustom()
+  }
+
+  const agentName = (key: string) => agents.find((a) => a.key === key)?.name ?? key
 
   const skillMap = new Map<string, string[]>()
   for (const a of agents) {
@@ -197,7 +518,41 @@ export function SkillsPanel() {
 
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
-      <HudPanel hero title={`Skills · ${skills.length} unique`} accent="violet" className="col-span-12">
+      <HudPanel
+        hero
+        title="Custom Skills"
+        accent="violet"
+        className="col-span-12"
+        right={<NewSkillForm agents={agents} onCreated={fetchCustom} />}
+      >
+        {customSkills.length === 0 ? (
+          <EmptyNote>No custom skills yet — create one above and assign it to real agents. Persisted server-side.</EmptyNote>
+        ) : (
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {customSkills.map((s) => (
+              <div key={s.id} className="rounded border border-primary/30 bg-secondary/20 p-2.5">
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="flex items-center gap-1.5 text-[0.6rem] text-foreground">
+                    <Sparkles className="h-3 w-3 text-tertiary" /> {s.name}
+                  </span>
+                  <button type="button" onClick={() => deleteSkill(s.id)} className="text-muted-foreground hover:text-destructive">
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+                <p className="mt-1 text-[0.5rem] text-muted-foreground">{s.category}{s.description ? ` · ${s.description}` : ''}</p>
+                {s.agent_keys.length > 0 && (
+                  <p className="mt-1 truncate text-[0.5rem] text-primary">{s.agent_keys.map(agentName).join(', ')}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </HudPanel>
+
+      <HudPanel title={`Built-in Specializations · ${skills.length} unique`} className="col-span-12">
+        <p className="mb-2 text-[0.55rem] text-muted-foreground">
+          Read-only — compiled into each agent&apos;s real Python class, not editable from here.
+        </p>
         {loading ? (
           <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
             <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Reading fleet specializations…
@@ -263,6 +618,71 @@ export function ModelsPanel() {
 }
 
 /* ═══════════════════ KEYS — real per-provider configured state ═════════ */
+const WRITABLE_KEYS = [
+  { name: 'ANTHROPIC_API_KEY', label: 'Anthropic (Claude)' },
+  { name: 'GROQ_API_KEY', label: 'Groq' },
+  { name: 'GEMINI_API_KEY', label: 'Gemini' },
+  { name: 'OPENROUTER_API_KEY', label: 'OpenRouter' },
+  { name: 'OPENCODE_API_KEY', label: 'OpenCode Zen' },
+  { name: 'TELEGRAM_BOT_TOKEN', label: 'Telegram bot token' },
+  { name: 'TELEGRAM_CHAT_ID', label: 'Telegram chat ID' },
+]
+
+function AddKeyForm() {
+  const [name, setName] = useState(WRITABLE_KEYS[0].name)
+  const [value, setValue] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const submit = async () => {
+    if (!value.trim()) return
+    setSaving(true); setMessage(null)
+    try {
+      const res = await fetch('/api/config/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, value }),
+      })
+      const json = await res.json()
+      setMessage({ ok: !!json.success, text: json.message || json.detail || (json.success ? 'Saved.' : 'Failed to save.') })
+      if (json.success) setValue('')
+    } catch (e) {
+      setMessage({ ok: false, text: String(e) })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-secondary/20 p-3">
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-[1fr_1fr_auto]">
+        <div>
+          <FieldLabel>Key</FieldLabel>
+          <select className={inputCls} value={name} onChange={(e) => setName(e.target.value)}>
+            {WRITABLE_KEYS.map((k) => <option key={k.name} value={k.name}>{k.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <FieldLabel>Value</FieldLabel>
+          <input className={inputCls} type="password" value={value} onChange={(e) => setValue(e.target.value)} placeholder="pasted once, never shown again" autoComplete="off" />
+        </div>
+        <div className="flex items-end">
+          <PrimaryButton onClick={submit} disabled={saving || !value.trim()} className="w-full sm:w-auto">
+            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save
+          </PrimaryButton>
+        </div>
+      </div>
+      {message && (
+        <p className={cn('text-[0.55rem]', message.ok ? 'text-primary' : 'text-destructive')}>{message.text}</p>
+      )}
+      <p className="text-[0.5rem] text-muted-foreground">
+        Writes directly to backend/.env on disk (allowlisted names only). The running backend reads env vars at
+        startup, so a saved key takes effect on the next backend restart, not immediately.
+      </p>
+    </div>
+  )
+}
+
 export function KeysPanel() {
   const { data: llm, loading } = useLlmStatus()
   const configuredNames = new Set((llm?.backends ?? []).map((b) => b.name))
@@ -298,6 +718,10 @@ export function KeysPanel() {
             })}
           </div>
         )}
+      </HudPanel>
+
+      <HudPanel title="Add / Update a Key" className="col-span-12">
+        <AddKeyForm />
       </HudPanel>
     </div>
   )
@@ -358,6 +782,68 @@ export function UsagePanel() {
 }
 
 /* ═══════════════════ PAIRING — real Telegram chat_id pairing ═══════════ */
+function PairingFlow() {
+  const [code, setCode] = useState<string | null>(null)
+  const [status, setStatus] = useState<'idle' | 'starting' | 'waiting' | 'paired' | 'expired' | 'error'>('idle')
+  const [chatId, setChatId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const start = async () => {
+    setStatus('starting'); setError(null)
+    try {
+      const res = await fetch('/api/telegram/pair/start', { method: 'POST' })
+      const json = await res.json()
+      if (!json.success) { setError(json.error || 'Could not start pairing'); setStatus('error'); return }
+      setCode(json.code)
+      setStatus('waiting')
+    } catch (e) {
+      setError(String(e)); setStatus('error')
+    }
+  }
+
+  useEffect(() => {
+    if (status !== 'waiting') return
+    const t = setInterval(async () => {
+      const res = await fetch('/api/telegram/pair/status')
+      const json = await res.json()
+      if (json.paired) {
+        setChatId(json.chat_id); setStatus('paired'); clearInterval(t)
+      } else if (json.expired) {
+        setStatus('expired'); clearInterval(t)
+      }
+    }, 3000)
+    return () => clearInterval(t)
+  }, [status])
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-[0.55rem] text-muted-foreground">
+        Real pairing flow — no manual .env editing. Start it, message the code to your bot from any Telegram
+        account, and the backend captures that chat_id and saves it to .env.
+      </p>
+      {status === 'idle' && <PrimaryButton onClick={start}><Link2 className="h-3.5 w-3.5" /> Start pairing</PrimaryButton>}
+      {status === 'starting' && <div className="flex items-center gap-2 text-[0.6rem] text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Starting…</div>}
+      {status === 'waiting' && code && (
+        <div className="rounded-lg border border-tertiary/40 bg-tertiary/10 p-3">
+          <p className="text-[0.55rem] text-muted-foreground">Message this code to your bot on Telegram:</p>
+          <p className="mt-1 font-display text-2xl tracking-widest text-tertiary">{code}</p>
+          <p className="mt-2 flex items-center gap-1.5 text-[0.55rem] text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Waiting for your message…</p>
+        </div>
+      )}
+      {status === 'paired' && (
+        <p className="flex items-center gap-1.5 text-[0.6rem] text-primary"><CheckCircle2 className="h-3.5 w-3.5" /> Paired! chat_id {chatId} saved to .env — restart the backend to activate it.</p>
+      )}
+      {status === 'expired' && (
+        <div className="flex items-center gap-2">
+          <p className="text-[0.6rem] text-destructive">Code expired without a match.</p>
+          <PrimaryButton onClick={start}>Try again</PrimaryButton>
+        </div>
+      )}
+      {status === 'error' && <p className="text-[0.6rem] text-destructive">{error}</p>}
+    </div>
+  )
+}
+
 export function PairingPanel() {
   const { data: tg, loading } = useTelegramStatus()
   return (
@@ -367,7 +853,7 @@ export function PairingPanel() {
           <Link2 className="h-6 w-6 text-tertiary" />
           <div>
             <div className="text-[0.65rem] text-foreground">Telegram bot ↔ chat_id</div>
-            <p className="text-[0.5rem] text-muted-foreground">The only real pairing mechanism in this build — a fixed bot token paired to one Telegram chat_id in .env.</p>
+            <p className="text-[0.5rem] text-muted-foreground">The only real pairing mechanism in this build.</p>
           </div>
         </div>
         <div className="mt-3">
@@ -375,7 +861,9 @@ export function PairingPanel() {
         </div>
       </HudPanel>
       <div className="col-span-12 lg:col-span-6">
-        <EmptyNote>No QR/device pairing flow exists for the web or voice interface — this browser session doesn&apos;t need one.</EmptyNote>
+        <HudPanel title="Pair a Chat" accent="violet">
+          <PairingFlow />
+        </HudPanel>
       </div>
     </div>
   )
