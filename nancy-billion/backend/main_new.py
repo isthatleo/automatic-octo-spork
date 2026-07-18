@@ -1238,6 +1238,52 @@ async def llm_status():
     }
 
 
+@app.get("/cron/status")
+async def cron_status():
+    """Real info about Nancy's one actual scheduled job -- the daily
+    Telegram briefing (see _daily_briefing_loop below). Not a general-purpose
+    cron system; honestly reflects that there's exactly one real job rather
+    than a fabricated job list."""
+    now = datetime.now()
+    target = now.replace(hour=DAILY_BRIEFING_HOUR, minute=DAILY_BRIEFING_MINUTE, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return {
+        "success": True,
+        "jobs": [
+            {
+                "name": "Daily briefing",
+                "schedule": f"{DAILY_BRIEFING_HOUR:02d}:{DAILY_BRIEFING_MINUTE:02d} daily",
+                "next_run": target.isoformat(),
+                "enabled": telegram_notifier.status["available"],
+                "description": "Pushes a real-data personalized briefing to Telegram every morning.",
+            }
+        ],
+    }
+
+
+@app.get("/config/public")
+async def config_public():
+    """Non-secret backend configuration -- real values, never API keys or tokens."""
+    return {
+        "success": True,
+        "config": {
+            "host": os.getenv("HOST", "0.0.0.0"),
+            "port": int(os.getenv("PORT", 8000)),
+            "ws_path": os.getenv("WS_PATH", "/ws"),
+            "stt_backend": os.getenv("STT_BACKEND", "faster_whisper"),
+            "whisper_model": os.getenv("WHISPER_MODEL", "tiny.en"),
+            "anthropic_model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            "groq_model": os.getenv("GROQ_MODEL", ""),
+            "gemini_model": os.getenv("GEMINI_MODEL", ""),
+            "opencode_model": os.getenv("OPENCODE_MODEL", ""),
+            "daily_briefing": f"{DAILY_BRIEFING_HOUR:02d}:{DAILY_BRIEFING_MINUTE:02d}",
+            "auth_required": bool(_BACKEND_AUTH_TOKEN),
+            "log_level": os.getenv("LOG_LEVEL", "INFO"),
+        },
+    }
+
+
 @app.get("/tts/status")
 async def tts_status():
     """Whether TTS is using the real neural voice (NeuTTS-nano) and which

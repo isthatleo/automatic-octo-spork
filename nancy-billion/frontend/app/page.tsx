@@ -13,6 +13,12 @@ import {
 import { ConsoleBar } from '@/components/nancy/console-bar'
 import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
 import { LyricsTranscript } from '@/components/nancy/lyrics-transcript'
+import { KanbanPanel } from '@/components/nancy/kanban-panel'
+import {
+  SessionsPanel, ChannelsPanel, InstancesPanel, CronPanel, SkillsPanel, ModelsPanel,
+  KeysPanel, ConfigPanel, UsagePanel, PairingPanel, ProfilesPanel, PluginsPanel,
+  McpPanel, WebhooksPanel, DocsPanel,
+} from '@/components/nancy/admin-panels'
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
 import { askNancy } from '@/lib/nancy/ws-client'
@@ -22,13 +28,54 @@ import type { KnowledgeCategory, LogEntry, PanelKey, Place } from '@/lib/nancy/t
 import { cn } from '@/lib/utils'
 import { sfx, unlockSfx, duckSfx } from '@/lib/nancy/sfx'
 
-import { Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, Newspaper, X, Mic, MicOff, Keyboard, ChevronDown } from 'lucide-react'
+import {
+  Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, Newspaper, Kanban, X, Mic, MicOff,
+  Keyboard, ChevronDown, MessageSquare, PanelLeftClose, PanelLeftOpen, Send, Server, Clock3,
+  FileClock, Sparkles, Cpu, Key, Settings2, BarChart3, Link2, User, PlugZap, Wrench, Webhook, BookOpen,
+} from 'lucide-react'
 
-const NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
+/** Grouped exactly like OpenClaw/Hermes's sidebar (Control/Agent/Settings/
+ * Resources), mapped onto Nancy's real pages -- a top-level "Voice" entry
+ * stands in for their "Chat" group. */
+const NAV_GROUPS: { group: string; items: { key: PanelKey; label: string; icon: typeof Brain }[] }[] = [
+  { group: 'Control', items: [
+    { key: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { key: 'map', label: 'Recon', icon: Globe2 },
+    { key: 'news', label: 'Newsfeed', icon: Newspaper },
+    { key: 'channels', label: 'Channels', icon: Send },
+    { key: 'instances', label: 'Instances', icon: Server },
+    { key: 'sessions', label: 'Sessions', icon: Clock3 },
+    { key: 'cron', label: 'Cron Jobs', icon: FileClock },
+  ] },
+  { group: 'Agent', items: [
+    { key: 'core', label: 'AI Core', icon: Brain },
+    { key: 'agents', label: 'Agents', icon: Bot },
+    { key: 'kanban', label: 'Kanban', icon: Kanban },
+    { key: 'skills', label: 'Skills', icon: Sparkles },
+    { key: 'models', label: 'Models', icon: Cpu },
+  ] },
+  { group: 'Settings', items: [
+    { key: 'system', label: 'Command Layer', icon: TerminalSquare },
+    { key: 'config', label: 'Config', icon: Settings2 },
+    { key: 'keys', label: 'Keys', icon: Key },
+    { key: 'usage', label: 'Usage', icon: BarChart3 },
+    { key: 'profiles', label: 'Profiles', icon: User },
+    { key: 'pairing', label: 'Pairing', icon: Link2 },
+    { key: 'plugins', label: 'Plugins', icon: PlugZap },
+    { key: 'mcp', label: 'MCP', icon: Wrench },
+    { key: 'webhooks', label: 'Webhooks', icon: Webhook },
+  ] },
+  { group: 'Resources', items: [
+    { key: 'docs', label: 'Docs', icon: BookOpen },
+  ] },
+]
+const NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = NAV_GROUPS.flatMap((g) => g.items)
+// Orb quick-nav stays compact -- only the highest-traffic pages, not all 20.
+const ORB_QUICK_NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
   { key: 'core', label: 'AI Core', icon: Brain },
   { key: 'agents', label: 'Agents', icon: Bot },
-  { key: 'system', label: 'System', icon: TerminalSquare },
+  { key: 'kanban', label: 'Kanban', icon: Kanban },
   { key: 'map', label: 'Recon', icon: Globe2 },
   { key: 'news', label: 'Newsfeed', icon: Newspaper },
 ]
@@ -440,7 +487,7 @@ export default function Page() {
             onLaunch={doLaunch}
             onClose={closeWorkspace}
             clock={clock}
-            navItems={NAV}
+            logs={logs}
             onNav={openPanel}
             newsCategory={newsCategory}
             newsTopic={newsTopic}
@@ -459,7 +506,7 @@ export default function Page() {
             wordIndex={wordIndex}
             interim={state.interim}
             audioElement={speakingAudioEl}
-            quickNav={NAV}
+            quickNav={ORB_QUICK_NAV}
             onQuickNav={openPanel}
           />
         </section>
@@ -613,7 +660,7 @@ function WorkspaceLayout({
   onLaunch,
   onClose,
   clock,
-  navItems,
+  logs,
   onNav,
   newsCategory,
   newsTopic,
@@ -629,7 +676,7 @@ function WorkspaceLayout({
   onLaunch: (t: string) => void
   onClose: () => void
   clock: string
-  navItems: { key: PanelKey; label: string; icon: typeof Brain }[]
+  logs: LogEntry[]
   onNav: (k: PanelKey) => void
   newsCategory: KnowledgeCategory | null
   newsTopic: string | null
@@ -640,95 +687,180 @@ function WorkspaceLayout({
 }) {
   const isMap = panel === 'map'
   const isNews = panel === 'news'
+  const [collapsed, setCollapsed] = useState(false)
   const TITLE: Partial<Record<PanelKey, string>> = {
     overview: 'Command Overview',
     core: 'Neural Core',
     agents: 'Autonomous Agents',
     system: 'Command Layer',
+    kanban: 'Task Board',
     map: place ? `Recon · ${place.name}` : 'Global Recon',
     news: newsTopic ? `Newsfeed · ${newsTopic}` : 'Newsfeed',
+    channels: 'Channels',
+    instances: 'Instances',
+    sessions: 'Sessions',
+    cron: 'Cron Jobs',
+    skills: 'Skills',
+    models: 'Models',
+    config: 'Config',
+    keys: 'Keys',
+    usage: 'Usage',
+    profiles: 'Profiles',
+    pairing: 'Pairing',
+    plugins: 'Plugins',
+    mcp: 'MCP Servers',
+    webhooks: 'Webhooks',
+    docs: 'Docs',
   }
   return (
-    <div className="flex h-dvh w-full flex-col bg-transparent">
-      {/* Slim workspace header */}
-      <div className="relative z-30 flex items-center justify-between gap-3 border-b border-primary/20 bg-background/60 px-4 py-2 backdrop-blur-md">
+    <div className="flex h-dvh w-full bg-transparent">
+      {/* ── Persistent grouped sidebar (OpenClaw/Hermes-style) ── */}
+      <aside
+        className={cn(
+          'relative z-30 flex shrink-0 flex-col border-r border-border/40 bg-background/70 backdrop-blur-md transition-[width] duration-200',
+          collapsed ? 'w-[60px]' : 'w-56',
+        )}
+      >
         <div
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-px"
-          style={{ background: 'linear-gradient(90deg, transparent, var(--hud) 20%, var(--tertiary) 50%, var(--hud) 80%, transparent)', opacity: 0.5 }}
+          className="pointer-events-none absolute inset-y-0 right-0 w-px"
+          style={{ background: 'linear-gradient(180deg, transparent, var(--hud) 20%, var(--tertiary) 50%, var(--magenta) 80%, transparent)', opacity: 0.5 }}
           aria-hidden
         />
-        <div className="flex items-center gap-3">
+
+        {/* Brand */}
+        <div className="flex items-center gap-2 border-b border-border/40 px-3 py-4">
+          <div className="relative h-6 w-6 shrink-0">
+            <div className="absolute inset-0 animate-hud-spin rounded-full border border-primary/50" />
+            <div className="absolute inset-1 rounded-full bg-primary/80 shadow-[0_0_10px_var(--hud)]" />
+          </div>
+          {!collapsed && (
+            <div className="min-w-0">
+              <h1 className="font-display text-xs leading-none tracking-[0.24em] text-brand-gradient">NÅNCY</h1>
+              <p className="truncate text-[0.42rem] uppercase tracking-[0.24em] text-muted-foreground">Gateway Dashboard</p>
+            </div>
+          )}
+        </div>
+
+        {/* Voice entry point -- always first, like OpenClaw's "Chat" */}
+        <div className="px-2 pt-3">
           <button
             type="button"
             onClick={onClose}
-            className="flex items-center gap-1.5 rounded border border-primary/40 bg-primary/10 px-2 py-1 text-[0.55rem] uppercase tracking-widest text-primary transition-colors hover:bg-primary/25"
             title="Return to voice mode"
+            className="flex w-full items-center gap-2 rounded border border-primary/40 bg-primary/10 px-2.5 py-2 text-[0.6rem] uppercase tracking-widest text-primary transition-colors hover:bg-primary/20"
           >
-            <X className="h-3 w-3" /> Voice
+            <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+            {!collapsed && 'Voice'}
           </button>
-          <div className="h-4 w-px bg-primary/25" />
-          <span className="flex items-center gap-2 font-heading text-sm tracking-[0.28em] text-primary hud-glow">
-            <span className="h-1.5 w-1.5 shrink-0 animate-hud-pulse rounded-full bg-primary" />
+        </div>
+
+        {/* Grouped nav */}
+        <nav className="flex-1 overflow-y-auto px-2 py-3">
+          {NAV_GROUPS.map((g) => (
+            <div key={g.group} className="mb-4">
+              {!collapsed && (
+                <p className="mb-1.5 px-1 text-[0.45rem] uppercase tracking-[0.28em] text-muted-foreground/70">{g.group}</p>
+              )}
+              <div className="flex flex-col gap-0.5">
+                {g.items.map(({ key, label, icon: Icon }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => onNav(key)}
+                    title={label}
+                    className={cn(
+                      'relative flex items-center gap-2 rounded px-2.5 py-1.5 text-[0.6rem] uppercase tracking-widest transition-colors',
+                      panel === key
+                        ? 'bg-primary/15 text-primary hud-glow'
+                        : 'text-muted-foreground hover:bg-secondary/40 hover:text-foreground',
+                    )}
+                  >
+                    {panel === key && (
+                      <span
+                        className="absolute inset-y-1 left-0 w-[2px] rounded-full"
+                        style={{ background: 'var(--hud)', boxShadow: '0 0 6px var(--hud)' }}
+                        aria-hidden
+                      />
+                    )}
+                    <Icon className="h-3.5 w-3.5 shrink-0" />
+                    {!collapsed && <span className="truncate">{label}</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </nav>
+
+        {/* Footer: real clock + collapse toggle */}
+        <div className="border-t border-border/40 px-3 py-2.5">
+          {!collapsed && (
+            <div className="mb-2">
+              <div className="font-display text-xs text-accent hud-glow-amber">{clock || '--:--:--'}</div>
+              <div className="text-[0.4rem] uppercase tracking-widest text-muted-foreground">System Time</div>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setCollapsed((c) => !c)}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            className="flex w-full items-center justify-center gap-1.5 rounded border border-border/50 py-1.5 text-muted-foreground transition-colors hover:border-primary/40 hover:text-primary"
+          >
+            {collapsed ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+      </aside>
+
+      {/* ── Main content ── */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="relative z-20 flex items-center gap-2 border-b border-border/30 bg-background/40 px-4 py-2.5 backdrop-blur-sm">
+          <span className="h-1.5 w-1.5 shrink-0 animate-hud-pulse rounded-full bg-primary" />
+          <span className="font-heading text-sm tracking-[0.24em] text-primary hud-glow">
             {TITLE[panel] ?? String(panel).toUpperCase()}
           </span>
         </div>
-        <nav className="hidden items-center gap-1 md:flex">
-          {navItems.map(({ key, label, icon: Icon }) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onNav(key)}
-              className={cn(
-                'relative flex items-center gap-1.5 rounded border px-2 py-1 text-[0.55rem] uppercase tracking-widest transition-colors',
-                panel === key
-                  ? 'border-primary bg-primary/20 text-primary hud-glow'
-                  : 'border-border/50 bg-secondary/10 text-muted-foreground hover:border-primary/40 hover:text-foreground',
-              )}
-            >
-              <Icon className="h-3 w-3" />
-              <span className="hidden lg:inline">{label}</span>
-              {panel === key && (
-                <span
-                  className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full"
-                  style={{ background: 'var(--hud)', boxShadow: '0 0 6px var(--hud)' }}
-                  aria-hidden
-                />
-              )}
-            </button>
-          ))}
-        </nav>
-        <div className="text-right">
-          <div className="font-display text-xs text-accent hud-glow-amber">{clock || '--:--:--'}</div>
-          <div className="text-[0.45rem] uppercase tracking-widest text-muted-foreground">System Time</div>
-        </div>
-      </div>
 
-      {/* Fullscreen content */}
-      <div className="relative flex-1 overflow-hidden">
-        {isMap ? (
-          <div className="absolute inset-0">
-            <MapPanel place={place} loading={mapLoading} />
-          </div>
-        ) : isNews ? (
-          <div className="absolute inset-0 p-3 md:p-4">
-            <KnowledgePanel
-              category={newsCategory ?? 'general'}
-              topic={newsTopic}
-              media={newsMedia}
-              autoOpenTop={newsAutoOpenTop}
-              requestId={newsRequestId}
-              onReadout={onNewsReadout}
-              onClose={onClose}
-            />
-          </div>
-        ) : (
-          <div className="absolute inset-0 overflow-y-auto px-4 py-4 pb-32 md:px-8 md:py-6">
-            {panel === 'overview' && <OverviewPanel />}
-            {panel === 'core' && <CorePanel />}
-            {panel === 'agents' && <AgentsPanel />}
-            {panel === 'system' && <SystemPanel onLaunch={onLaunch} launched={launched} />}
-          </div>
-        )}
+        <div className="relative flex-1 overflow-hidden">
+          {isMap ? (
+            <div className="absolute inset-0">
+              <MapPanel place={place} loading={mapLoading} />
+            </div>
+          ) : isNews ? (
+            <div className="absolute inset-0 p-3 md:p-4">
+              <KnowledgePanel
+                category={newsCategory ?? 'general'}
+                topic={newsTopic}
+                media={newsMedia}
+                autoOpenTop={newsAutoOpenTop}
+                requestId={newsRequestId}
+                onReadout={onNewsReadout}
+                onClose={onClose}
+              />
+            </div>
+          ) : (
+            <div className="absolute inset-0 overflow-y-auto px-4 py-4 pb-10 md:px-8 md:py-6">
+              {panel === 'overview' && <OverviewPanel />}
+              {panel === 'core' && <CorePanel />}
+              {panel === 'agents' && <AgentsPanel />}
+              {panel === 'system' && <SystemPanel onLaunch={onLaunch} launched={launched} />}
+              {panel === 'kanban' && <KanbanPanel />}
+              {panel === 'sessions' && <SessionsPanel logs={logs} />}
+              {panel === 'channels' && <ChannelsPanel />}
+              {panel === 'instances' && <InstancesPanel />}
+              {panel === 'cron' && <CronPanel />}
+              {panel === 'skills' && <SkillsPanel />}
+              {panel === 'models' && <ModelsPanel />}
+              {panel === 'config' && <ConfigPanel />}
+              {panel === 'keys' && <KeysPanel />}
+              {panel === 'usage' && <UsagePanel />}
+              {panel === 'profiles' && <ProfilesPanel />}
+              {panel === 'pairing' && <PairingPanel />}
+              {panel === 'plugins' && <PluginsPanel />}
+              {panel === 'mcp' && <McpPanel />}
+              {panel === 'webhooks' && <WebhooksPanel />}
+              {panel === 'docs' && <DocsPanel />}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )

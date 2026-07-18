@@ -672,7 +672,7 @@ function AgentCard({ agent, onClick }: { agent: AgentInfo; onClick: () => void }
       className={cn(
         'group flex cursor-pointer flex-col gap-2 rounded border p-2.5 transition-all duration-200',
         isOnline
-          ? 'border-primary/40 bg-primary/5 hover:border-primary hover:bg-primary/10 hover:shadow-[0_0_18px_rgba(56,211,235,0.2)]'
+          ? 'glow-ring border-transparent bg-secondary/50 hover:-translate-y-0.5 hover:bg-secondary/70'
           : agent.status === 'offline'
           ? 'cursor-default border-border/30 bg-background/20 opacity-50'
           : 'border-border bg-secondary/30 hover:border-primary/50 hover:bg-secondary/40',
