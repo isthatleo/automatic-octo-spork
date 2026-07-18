@@ -367,7 +367,11 @@ export default function Page() {
           ? 'thinking'
           : state.listening
             ? 'listening'
-            : 'idle'
+            // Real degraded-mode signal: this browser can't do speech
+            // recognition at all, not a fabricated "warning" for effect.
+            : !state.supported
+              ? 'alert'
+              : 'idle'
 
   if (booting) return <BootSequence onDone={() => setBooting(false)} />
 
@@ -455,6 +459,8 @@ export default function Page() {
             wordIndex={wordIndex}
             interim={state.interim}
             audioElement={speakingAudioEl}
+            quickNav={NAV}
+            onQuickNav={openPanel}
           />
         </section>
       )}
@@ -544,6 +550,8 @@ function HeroVoice({
   wordIndex,
   interim,
   audioElement,
+  quickNav,
+  onQuickNav,
 }: {
   orbState: OrbState
   utterance: string
@@ -551,6 +559,8 @@ function HeroVoice({
   wordIndex: number
   interim: string
   audioElement: HTMLAudioElement | null
+  quickNav?: { key: PanelKey; label: string; icon: typeof Brain }[]
+  onQuickNav?: (k: PanelKey) => void
 }) {
   const [orbSize, setOrbSize] = useState(420)
   useEffect(() => {
@@ -570,7 +580,13 @@ function HeroVoice({
   return (
     <div className="flex min-h-[calc(100dvh-260px)] flex-col items-center justify-center gap-6 py-6 sm:gap-8 sm:py-10">
       <div className="relative">
-        <NancyOrb state={orbState} size={orbSize} audioElement={audioElement} />
+        <NancyOrb
+          state={orbState}
+          size={orbSize}
+          audioElement={audioElement}
+          quickNav={quickNav}
+          onQuickNav={onQuickNav ? (k) => onQuickNav(k as PanelKey) : undefined}
+        />
       </div>
 
       <div className="w-full max-w-xl px-4">
@@ -583,9 +599,6 @@ function HeroVoice({
       </div>
 
 
-      <p className="max-w-md px-4 text-center text-[0.55rem] uppercase tracking-[0.3em] text-muted-foreground/70 sm:text-[0.6rem] sm:tracking-[0.35em]">
-        try &ldquo;Nancy, open the map of Tokyo&rdquo; · &ldquo;Jarvis, show me the dashboard&rdquo; · &ldquo;Billion, system status&rdquo;
-      </p>
     </div>
   )
 }

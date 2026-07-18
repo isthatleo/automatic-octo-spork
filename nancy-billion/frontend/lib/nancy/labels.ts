@@ -6,4 +6,5 @@ export const STATE_HINT: Record<OrbState, string> = {
   thinking: 'Processing',
   speaking: 'Responding',
   executing: 'Executing',
+  alert: 'Degraded',
 }
