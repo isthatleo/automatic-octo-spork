@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 export type OrbState =
@@ -12,15 +12,15 @@ export type OrbState =
   | 'alert'
 
 /*
-  Liquid metal identity: a smooth molten-metal sphere, not a machine part.
-  Every earlier pass (plasma blobs, a mechanical reactor, a precision core
-  with lens rings/turbine iris) added geometry -- rings, spokes, facets.
-  This one removes it. The only moving pieces are the metal's own surface:
-  a real SVG feTurbulence/feDisplacementMap filter warps the fill into
-  genuine liquid ripples (not a hand-animated wobble), and its displacement
-  scale is driven directly by real mic/TTS amplitude -- the surface
-  visibly gets more turbulent exactly when Nancy is actually listening or
-  speaking, and settles to an almost-still mirror at idle.
+  HUD-emblem identity, built from a reference image the user supplied
+  directly: a ring with a bright sweeping arc, a scattered field of tick
+  marks/particles around it, a soft glow, and the name centred inside --
+  no solid sphere body, the centre stays open/transparent.
+
+  Every particle and the sweep arc are driven by the same real, smoothed
+  mic/TTS amplitude signal used throughout this component: the tick field
+  visibly extends and brightens, and the sweep spins faster, exactly when
+  Nancy is actually listening or speaking -- not a looping decoration.
 */
 
 // "Graphite & Ember" palette, matching globals.css's tokens.
@@ -33,11 +33,11 @@ const ALERT = 'rgba(229, 76, 74, 1)'      // --destructive
 
 const PARAMS: Record<OrbState, { speed: number; color: string; secondary: string }> = {
   idle:      { speed: 0.15, color: HUD, secondary: PLUM },
-  listening: { speed: 0.35, color: HUD, secondary: HUD_SOFT },
-  thinking:  { speed: 0.85, color: PLUM, secondary: ROSE },
-  speaking:  { speed: 0.45, color: HUD, secondary: ROSE },
-  executing: { speed: 0.65, color: GOLD, secondary: HUD },
-  alert:     { speed: 0.5,  color: ALERT, secondary: GOLD },
+  listening: { speed: 0.4,  color: HUD, secondary: HUD_SOFT },
+  thinking:  { speed: 0.95, color: PLUM, secondary: ROSE },
+  speaking:  { speed: 0.5,  color: HUD, secondary: ROSE },
+  executing: { speed: 0.75, color: GOLD, secondary: HUD },
+  alert:     { speed: 0.6,  color: ALERT, secondary: GOLD },
 }
 
 const STATE_LABEL: Record<OrbState, string> = {
@@ -51,6 +51,50 @@ const STATE_LABEL: Record<OrbState, string> = {
 
 function alpha(color: string, a: number): string {
   return color.replace(/[\d.]+\)$/, `${a})`)
+}
+
+interface Particle {
+  angle: number
+  radius: number
+  phase: number
+  long: boolean
+}
+
+/** Deterministic, evenly-scattered particle field (golden-angle spacing so
+ * points fill the ring without an obvious repeating lattice, unlike an even
+ * division which would look like a plain dial). Generated once per orb
+ * instance, not re-randomized every frame. */
+function buildParticles(count: number): Particle[] {
+  const GOLDEN = 137.50776 * (Math.PI / 180)
+  return Array.from({ length: count }, (_, i) => {
+    const angle = (i * GOLDEN) % (Math.PI * 2)
+    // Deterministic pseudo-random 0..1 from i, no Math.random() (keeps
+    // server/client render identical, and the scatter stable across re-mounts).
+    const jitter = ((i * 9301 + 49297) % 233280) / 233280
+    return {
+      angle,
+      radius: 37 + jitter * 13,
+      phase: (i * 2.399963) % (Math.PI * 2),
+      long: i % 6 === 0,
+    }
+  })
+}
+
+/** Builds the tick-mark field as one path -- every particle's reach pulses
+ * on its own phase, weighted by real amplitude, so the ring reads as a
+ * live radial spectrum rather than a static decoration. */
+function particlePath(cx: number, cy: number, t: number, amp: number, particles: Particle[]): string {
+  let d = ''
+  for (const p of particles) {
+    const pulse = 0.5 + 0.5 * Math.sin(t * 2.4 + p.phase)
+    const len = (p.long ? 3.4 : 1.5) + pulse * (0.8 + amp * 3.2)
+    const x1 = cx + Math.cos(p.angle) * p.radius
+    const y1 = cy + Math.sin(p.angle) * p.radius
+    const x2 = cx + Math.cos(p.angle) * (p.radius + len)
+    const y2 = cy + Math.sin(p.angle) * (p.radius + len)
+    d += `M${x1.toFixed(2)},${y1.toFixed(2)}L${x2.toFixed(2)},${y2.toFixed(2)}`
+  }
+  return d
 }
 
 /** Reads live microphone amplitude (0..1). Falls back to 0 silently. */
@@ -179,17 +223,17 @@ export function NancyOrb({
   name?: string
   size?: number
   audioElement?: HTMLAudioElement | null
-  /** When provided, clicking the sphere fans these out as a quick-nav ring
+  /** When provided, clicking the ring fans these out as a quick-nav ring
    * around it. Omit to keep an orb purely a status indicator (e.g. the
    * floating workspace-dock orb). */
   quickNav?: OrbQuickNavItem[]
   onQuickNav?: (key: string) => void
 }) {
-  const turbRef = useRef<SVGFETurbulenceElement>(null)
-  const dispRef = useRef<SVGFEDisplacementMapElement>(null)
-  const spec1Ref = useRef<SVGCircleElement>(null)
-  const spec2Ref = useRef<SVGCircleElement>(null)
-  const rimRef = useRef<SVGCircleElement>(null)
+  const particles = useMemo(() => buildParticles(64), [])
+  const particlePathRef = useRef<SVGPathElement>(null)
+  const sweepRef = useRef<SVGCircleElement>(null)
+  const sweep2Ref = useRef<SVGCircleElement>(null)
+  const trackRef = useRef<SVGCircleElement>(null)
   const stateRef = useRef<OrbState>(state)
   stateRef.current = state
   const micLevel = useMicLevel(state === 'listening')
@@ -211,12 +255,12 @@ export function NancyOrb({
     const rect = el.getBoundingClientRect()
     const px = (e.clientX - rect.left) / rect.width - 0.5
     const py = (e.clientY - rect.top) / rect.height - 0.5
-    sphere.style.transform = `perspective(600px) rotateX(${(-py * 14).toFixed(2)}deg) rotateY(${(px * 14).toFixed(2)}deg) scale(${hovered ? 1.03 : 1})`
+    sphere.style.transform = `perspective(700px) rotateX(${(-py * 10).toFixed(2)}deg) rotateY(${(px * 10).toFixed(2)}deg) scale(${hovered ? 1.03 : 1})`
   }
   const onMouseLeave = () => {
     setHovered(false)
     const sphere = sphereRef.current
-    if (sphere) sphere.style.transform = 'perspective(600px) rotateX(0deg) rotateY(0deg) scale(1)'
+    if (sphere) sphere.style.transform = 'perspective(700px) rotateX(0deg) rotateY(0deg) scale(1)'
   }
   const onSphereClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
@@ -243,44 +287,24 @@ export function NancyOrb({
 
       frame++
 
-      // The liquid surface itself -- a real turbulence field slowly
-      // morphing (baseFrequency drifts on its own clock) and warping the
-      // metal fill more violently the louder the real audio gets.
-      if (frame % 2 === 0) {
-        if (turbRef.current) {
-          const freq = 0.016 + Math.sin(t * 0.5) * 0.005
-          turbRef.current.setAttribute('baseFrequency', freq.toFixed(4))
-        }
-        if (dispRef.current) {
-          const scale = 2 + ampSmoothed * 13
-          dispRef.current.setAttribute('scale', scale.toFixed(2))
-        }
+      // Scattered tick field -- every particle pulses on its own phase,
+      // real amplitude widens the whole field's reach and brightness.
+      if (particlePathRef.current && frame % 2 === 0) {
+        particlePathRef.current.setAttribute('d', particlePath(50, 50, t, ampSmoothed, particles))
+        particlePathRef.current.setAttribute('opacity', String(0.55 + ampSmoothed * 0.4))
       }
 
-      // Two specular highlights drift across the surface like light
-      // reflecting off a moving liquid -- real amplitude widens their
-      // orbit and brightens the effect, everything else is idle drift.
-      if (spec1Ref.current) {
-        const spread = 1 + ampSmoothed * 0.6
-        const x = 50 + Math.cos(t * 0.42) * 16 * spread
-        const y = 50 + Math.sin(t * 0.34 + 1.1) * 14 * spread
-        spec1Ref.current.setAttribute('cx', x.toFixed(2))
-        spec1Ref.current.setAttribute('cy', y.toFixed(2))
-        spec1Ref.current.setAttribute('opacity', (0.55 + ampSmoothed * 0.4).toFixed(2))
+      // Bright sweep arc -- the loading-ring read from the reference,
+      // spinning faster and glowing harder with real amplitude/state speed.
+      if (sweepRef.current) {
+        sweepRef.current.style.transform = `rotate(${(t * 70 * (0.6 + p.speed)) % 360}deg)`
       }
-      if (spec2Ref.current) {
-        const spread = 1 + ampSmoothed * 0.5
-        const x = 50 + Math.cos(-t * 0.3 + 2.4) * 20 * spread
-        const y = 50 + Math.sin(-t * 0.37 + 0.6) * 18 * spread
-        spec2Ref.current.setAttribute('cx', x.toFixed(2))
-        spec2Ref.current.setAttribute('cy', y.toFixed(2))
-        spec2Ref.current.setAttribute('opacity', (0.35 + ampSmoothed * 0.35).toFixed(2))
+      if (sweep2Ref.current) {
+        sweep2Ref.current.style.transform = `rotate(${(-t * 40 * (0.6 + p.speed) + 180) % 360}deg)`
+        sweep2Ref.current.setAttribute('opacity', String(0.3 + ampSmoothed * 0.4))
       }
-
-      // Fresnel rim light -- the bright edge a liquid metal sphere always
-      // shows at a grazing angle, breathing gently with real amplitude.
-      if (rimRef.current) {
-        rimRef.current.setAttribute('opacity', (0.35 + ampSmoothed * 0.4).toFixed(2))
+      if (trackRef.current) {
+        trackRef.current.setAttribute('opacity', String(0.18 + ampSmoothed * 0.12))
       }
 
       if (!reduce) t += 0.014 * (0.5 + p.speed)
@@ -298,12 +322,11 @@ export function NancyOrb({
       document.removeEventListener('visibilitychange', onVis)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [particles])
 
   const params = PARAMS[state]
   const hasQuickNav = !!quickNav && quickNav.length > 0
-  const filterId = `orb-liquid-${gradId}`
-  const baseGradId = `orb-base-${gradId}`
+  const circumference = 2 * Math.PI * 34
 
   return (
     <div className="flex flex-col items-center gap-4">
@@ -317,29 +340,26 @@ export function NancyOrb({
         onMouseMove={onMouseMove}
         onMouseLeave={onMouseLeave}
       >
-        {/* soft ambient shadow beneath the sphere -- blur scales with the
-            orb's own size instead of a fixed px value, which at small
-            sizes (e.g. the 120px floating dock orb) blew the glow out so
-            far it swallowed the sphere entirely. */}
+        {/* soft ambient glow -- blur scales with the orb's own size instead
+            of a fixed px value, which at small sizes (e.g. the 120px
+            floating dock orb) blew the glow out so far it swallowed
+            everything else. */}
         <div
           className="absolute rounded-full transition-colors duration-700"
-          style={{ width: '72%', height: '72%', background: alpha(params.color, 0.28), filter: `blur(${size * 0.11}px)` }}
+          style={{ width: '80%', height: '80%', background: alpha(params.color, 0.22), filter: `blur(${size * 0.13}px)` }}
           aria-hidden
         />
 
-        {/* the sphere itself -- click opens quick-nav when provided, tilts
-            toward the cursor on hover, and ripples on every click. */}
+        {/* the emblem itself -- click opens quick-nav when provided, tilts
+            toward the cursor on hover, and ripples on every click. No
+            solid sphere body: the centre stays open, matching the
+            reference -- a ring, a scattered tick field, and the name. */}
         <button
           ref={sphereRef}
           type="button"
           onClick={onSphereClick}
-          className="relative flex cursor-pointer items-center justify-center overflow-hidden rounded-full transition-transform duration-300 ease-out"
-          style={{
-            width: '58%',
-            height: '58%',
-            boxShadow: `0 ${size * 0.055}px ${size * 0.14}px oklch(0 0 0 / 40%), inset 0 1px 0 oklch(1 0 0 / 10%), 0 0 ${size * 0.1}px ${alpha(params.color, 0.3)}`,
-            transition: 'box-shadow 0.6s ease, transform 0.15s ease-out',
-          }}
+          className="relative flex cursor-pointer items-center justify-center transition-transform duration-300 ease-out"
+          style={{ width: '100%', height: '100%' }}
           title={hasQuickNav ? 'Open quick navigation' : 'Nancy'}
         >
           {ripples.map((r) => (
@@ -355,46 +375,60 @@ export function NancyOrb({
             />
           ))}
 
-          {/* liquid metal surface -- a real SVG turbulence/displacement
-              filter warps the metal fill into genuine ripples, not a
-              hand-tuned wobble. Two drifting specular highlights read as
-              light sliding across a moving liquid. */}
-          <svg viewBox="0 0 100 100" className="absolute inset-0">
-            <defs>
-              <filter id={filterId} x="-30%" y="-30%" width="160%" height="160%">
-                <feTurbulence ref={turbRef} type="fractalNoise" baseFrequency="0.016" numOctaves="2" seed="7" result="noise" />
-                <feDisplacementMap ref={dispRef} in="SourceGraphic" in2="noise" scale="2" xChannelSelector="R" yChannelSelector="G" result="warped" />
-                <feGaussianBlur in="warped" stdDeviation="0.35" />
-              </filter>
-              <radialGradient id={baseGradId} cx="38%" cy="28%" r="80%">
-                <stop offset="0%" stopColor="oklch(0.93 0.02 90)" />
-                <stop offset="30%" stopColor={params.color} stopOpacity="0.92" />
-                <stop offset="66%" stopColor={params.secondary} stopOpacity="0.55" />
-                <stop offset="100%" stopColor="oklch(0.07 0.006 75)" />
-              </radialGradient>
-            </defs>
-
-            <g style={{ filter: `url(#${filterId})`, transition: 'filter 0.4s ease' }}>
-              <circle cx="50" cy="50" r="48" fill={`url(#${baseGradId})`} />
-              <circle ref={spec1Ref} cx="42" cy="34" r="9" fill="oklch(0.99 0.01 95 / 65%)" />
-              <circle ref={spec2Ref} cx="62" cy="60" r="6" fill={alpha(params.color, 0.55)} />
-            </g>
-
-            {/* crisp rim light -- outside the liquid filter so it stays sharp */}
-            <circle
-              ref={rimRef}
-              cx="50" cy="50" r="47.6"
+          <svg viewBox="0 0 100 100" className="absolute inset-0 overflow-visible">
+            {/* scattered particle field -- real audio-reactive tick marks */}
+            <path
+              ref={particlePathRef}
               fill="none"
-              stroke="oklch(0.97 0.02 90 / 45%)"
+              stroke={params.color}
               strokeWidth="0.6"
+              strokeLinecap="round"
+              style={{ transition: 'stroke 0.6s ease', filter: `drop-shadow(0 0 1.5px ${alpha(params.color, 0.6)})` }}
+            />
+
+            {/* dim full track ring */}
+            <circle
+              ref={trackRef}
+              cx="50" cy="50" r="34"
+              fill="none"
+              stroke={params.secondary}
+              strokeWidth="0.7"
               style={{ transition: 'stroke 0.6s ease' }}
+            />
+
+            {/* bright sweep arcs -- the "loading ring" read, two counter-
+                rotating segments for depth */}
+            <circle
+              ref={sweepRef}
+              cx="50" cy="50" r="34"
+              fill="none"
+              stroke={params.color}
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeDasharray={`${circumference * 0.22} ${circumference}`}
+              style={{ transformOrigin: '50px 50px', transition: 'stroke 0.6s ease', filter: `drop-shadow(0 0 3px ${params.color})` }}
+            />
+            <circle
+              ref={sweep2Ref}
+              cx="50" cy="50" r="34"
+              fill="none"
+              stroke={params.secondary}
+              strokeWidth="1"
+              strokeLinecap="round"
+              strokeDasharray={`${circumference * 0.12} ${circumference}`}
+              style={{ transformOrigin: '50px 50px', transition: 'stroke 0.6s ease' }}
             />
           </svg>
 
-          <div
-            className="pointer-events-none absolute inset-0 rounded-full"
-            style={{ background: 'radial-gradient(ellipse at 32% 24%, oklch(1 0 0 / 10%) 0%, transparent 45%)' }}
-          />
+          {/* name badge -- centred, the ring's centre stays open behind it */}
+          <div className="relative flex flex-col items-center">
+            <span
+              className="font-sans text-[0.85em] font-semibold tracking-[0.18em] text-foreground transition-colors duration-500"
+              style={{ fontSize: size * 0.09, textShadow: `0 0 ${size * 0.04}px ${alpha(params.color, 0.55)}` }}
+            >
+              {name.toUpperCase()}
+            </span>
+          </div>
         </button>
 
         {/* quick-nav ring */}
@@ -438,12 +472,11 @@ export function NancyOrb({
         )}
       </div>
 
-      {/* caption below the sphere, not a glowing plate inside it */}
+      {/* caption below the ring */}
       <div className="text-center">
-        <div className="font-display text-2xl text-foreground">{name}</div>
         <div
           key={state}
-          className="mt-0.5 animate-[hud-fade-in_0.4s_ease] text-[0.7rem] transition-colors duration-500"
+          className="animate-[hud-fade-in_0.4s_ease] text-[0.7rem] transition-colors duration-500"
           style={{ color: state === 'idle' ? 'var(--muted-foreground)' : params.color }}
         >
           {STATE_LABEL[state]}
