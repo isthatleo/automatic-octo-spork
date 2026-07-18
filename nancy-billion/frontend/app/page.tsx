@@ -386,7 +386,7 @@ export default function Page() {
             <div className="absolute inset-1.5 rounded-full bg-primary/80 shadow-[0_0_12px_var(--hud)]" />
           </div>
           <div>
-            <h1 className="font-heading text-lg leading-none tracking-[0.32em] text-primary hud-glow">
+            <h1 className="font-display text-lg leading-none tracking-[0.32em] text-primary hud-glow">
               NÅNCY
             </h1>
             <p className="text-[0.5rem] uppercase tracking-[0.28em] text-muted-foreground">
@@ -415,7 +415,7 @@ export default function Page() {
         </nav>
 
         <div className="text-right">
-          <div className="font-heading text-sm text-accent hud-glow-amber">
+          <div className="font-display text-sm text-accent hud-glow-amber">
             {clock || '--:--:--'}
           </div>
           <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">
@@ -639,6 +639,11 @@ function WorkspaceLayout({
     <div className="flex h-dvh w-full flex-col bg-transparent">
       {/* Slim workspace header */}
       <div className="relative z-30 flex items-center justify-between gap-3 border-b border-primary/20 bg-background/60 px-4 py-2 backdrop-blur-md">
+        <div
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-px"
+          style={{ background: 'linear-gradient(90deg, transparent, var(--hud) 20%, var(--tertiary) 50%, var(--hud) 80%, transparent)', opacity: 0.5 }}
+          aria-hidden
+        />
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -649,7 +654,8 @@ function WorkspaceLayout({
             <X className="h-3 w-3" /> Voice
           </button>
           <div className="h-4 w-px bg-primary/25" />
-          <span className="font-heading text-sm tracking-[0.28em] text-primary hud-glow">
+          <span className="flex items-center gap-2 font-heading text-sm tracking-[0.28em] text-primary hud-glow">
+            <span className="h-1.5 w-1.5 shrink-0 animate-hud-pulse rounded-full bg-primary" />
             {TITLE[panel] ?? String(panel).toUpperCase()}
           </span>
         </div>
@@ -660,7 +666,7 @@ function WorkspaceLayout({
               type="button"
               onClick={() => onNav(key)}
               className={cn(
-                'flex items-center gap-1.5 rounded border px-2 py-1 text-[0.55rem] uppercase tracking-widest transition-colors',
+                'relative flex items-center gap-1.5 rounded border px-2 py-1 text-[0.55rem] uppercase tracking-widest transition-colors',
                 panel === key
                   ? 'border-primary bg-primary/20 text-primary hud-glow'
                   : 'border-border/50 bg-secondary/10 text-muted-foreground hover:border-primary/40 hover:text-foreground',
@@ -668,11 +674,18 @@ function WorkspaceLayout({
             >
               <Icon className="h-3 w-3" />
               <span className="hidden lg:inline">{label}</span>
+              {panel === key && (
+                <span
+                  className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full"
+                  style={{ background: 'var(--hud)', boxShadow: '0 0 6px var(--hud)' }}
+                  aria-hidden
+                />
+              )}
             </button>
           ))}
         </nav>
         <div className="text-right">
-          <div className="font-heading text-xs text-accent hud-glow-amber">{clock || '--:--:--'}</div>
+          <div className="font-display text-xs text-accent hud-glow-amber">{clock || '--:--:--'}</div>
           <div className="text-[0.45rem] uppercase tracking-widest text-muted-foreground">System Time</div>
         </div>
       </div>

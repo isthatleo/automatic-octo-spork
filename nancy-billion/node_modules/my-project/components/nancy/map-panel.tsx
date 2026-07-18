@@ -493,7 +493,7 @@ export function MapPanel({
             </div>
           </div>
           <div className="hud-panel rounded px-2 py-1 text-right">
-            <div className="font-heading text-sm text-accent hud-glow-amber">
+            <div className="font-display text-sm text-accent hud-glow-amber">
               {localTime}
             </div>
             <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">

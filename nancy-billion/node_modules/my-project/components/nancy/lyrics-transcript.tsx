@@ -89,14 +89,31 @@ export function LyricsTranscript({
   }, [lines, wordIndex])
 
   const now = performance.now()
+  const isSpeakingNow = speaking && lines.some((l) => l.active)
 
   return (
-    <div className="pointer-events-none flex w-full flex-col items-center gap-2 px-4 text-center">
+    <div className="pointer-events-none flex w-full flex-col items-center gap-2.5 px-4 text-center">
       {lines.length === 0 && !interim ? (
-        <p className="text-[0.7rem] uppercase tracking-[0.35em] text-muted-foreground/70">
+        <p className="font-heading text-[0.7rem] uppercase tracking-[0.35em] text-muted-foreground/70">
           {placeholder}
         </p>
       ) : null}
+
+      {isSpeakingNow && (
+        <div className="flex items-end gap-[3px]" aria-hidden>
+          {[0, 1, 2, 3].map((i) => (
+            <span
+              key={i}
+              className="w-[3px] rounded-full bg-primary shadow-[0_0_6px_var(--hud)]"
+              style={{
+                height: '10px',
+                animation: `hud-pulse ${0.5 + i * 0.12}s ease-in-out infinite alternate`,
+                animationDelay: `${i * 0.08}s`,
+              }}
+            />
+          ))}
+        </div>
+      )}
 
       {lines.map((line, idx) => {
         const isCurrent = line.active
@@ -116,10 +133,10 @@ export function LyricsTranscript({
             key={line.id}
             style={{ opacity }}
             className={cn(
-              'text-balance font-medium leading-relaxed tracking-tight transition-all duration-500',
+              'text-balance leading-relaxed tracking-tight transition-all duration-500',
               isCurrent
-                ? 'text-base md:text-lg text-foreground/95'
-                : 'text-[0.72rem] md:text-[0.78rem] text-muted-foreground/70',
+                ? 'font-heading text-lg font-medium text-foreground/95 md:text-xl'
+                : 'font-sans text-[0.72rem] md:text-[0.78rem] text-muted-foreground/70',
             )}
           >
             {line.words.map((w, i) => {
@@ -143,8 +160,8 @@ export function LyricsTranscript({
       })}
 
       {interim && (
-        <p className="mt-1 text-[0.6rem] uppercase tracking-[0.25em] text-accent/70">
-          <span className="opacity-60">you · </span>
+        <p className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 font-mono text-[0.6rem] uppercase tracking-[0.2em] text-accent/90">
+          <span className="h-1.5 w-1.5 shrink-0 animate-hud-pulse rounded-full bg-accent" />
           {interim}
         </p>
       )}

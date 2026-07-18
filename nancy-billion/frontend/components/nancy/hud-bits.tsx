@@ -4,22 +4,47 @@ import { cn } from '@/lib/utils'
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 
+const ACCENT_TEXT: Record<'cyan' | 'amber' | 'violet', string> = {
+  cyan: 'text-primary hud-glow',
+  amber: 'text-accent hud-glow-amber',
+  violet: 'text-tertiary hud-glow-violet',
+}
+const ACCENT_PANEL: Record<'cyan' | 'amber' | 'violet', string> = {
+  cyan: '',
+  amber: 'hud-panel--amber',
+  violet: 'hud-panel--violet',
+}
+
 export function HudPanel({
   title,
   children,
   className,
   right,
+  accent = 'cyan',
+  hero = false,
 }: {
   title?: string
   children: ReactNode
   className?: string
   right?: ReactNode
+  /** Gives a panel a distinct identity instead of every panel on screen
+   * reading as the same cyan-bordered box -- use amber/violet sparingly. */
+  accent?: 'cyan' | 'amber' | 'violet'
+  /** Brighter, more heavily blurred surface for the lead panel on a screen. */
+  hero?: boolean
 }) {
   return (
-    <section className={cn('hud-panel rounded-md p-3', className)}>
+    <section
+      className={cn(
+        'hud-panel rounded-md p-3',
+        ACCENT_PANEL[accent],
+        hero && 'hud-panel--hero',
+        className,
+      )}
+    >
       {title && (
         <header className="mb-2 flex items-center justify-between gap-2">
-          <h2 className="font-heading text-[0.62rem] font-medium uppercase tracking-[0.22em] text-primary hud-glow">
+          <h2 className={cn('font-heading text-[0.62rem] font-medium uppercase tracking-[0.22em]', ACCENT_TEXT[accent])}>
             {title}
           </h2>
           <div className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
@@ -30,6 +55,52 @@ export function HudPanel({
       {children}
     </section>
   )
+}
+
+/** Decorative break between groups of panels -- an optional label centered
+ * on a horizontal accent line, so a long stack of panels doesn't read as
+ * one undifferentiated wall of identical boxes. */
+export function SectionDivider({ label }: { label?: string }) {
+  return (
+    <div className="hud-divider col-span-12 py-1 text-[0.55rem] uppercase tracking-[0.3em]">
+      {label && <span className="shrink-0">{label}</span>}
+    </div>
+  )
+}
+
+/** Animates a numeric value counting up to its target whenever it changes,
+ * instead of snapping instantly -- makes real live data (not fake motion)
+ * feel alive without lying about the number itself. */
+export function AnimatedNumber({
+  value,
+  decimals = 0,
+  className,
+}: {
+  value: number
+  decimals?: number
+  className?: string
+}) {
+  const [display, setDisplay] = useState(value)
+
+  useEffect(() => {
+    const from = display
+    const to = value
+    if (from === to) return
+    const start = performance.now()
+    const duration = 600
+    let raf = 0
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration)
+      const eased = 1 - (1 - t) * (1 - t)
+      setDisplay(from + (to - from) * eased)
+      if (t < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value])
+
+  return <span className={className}>{display.toFixed(decimals)}</span>
 }
 
 export function RadialGauge({
