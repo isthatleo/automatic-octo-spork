@@ -1,12 +1,12 @@
 'use client'
 
 import { useEffect, useCallback, useMemo, useState } from 'react'
-import { ArcReactor, HudPanel, RadialGauge, StatBar } from './hud-bits'
+import { ArcReactor, HudPanel, RadialGauge, StatBar, AnimatedNumber } from './hud-bits'
 import { GlobeView } from './globe-view'
 import type { AgentInfo } from '@/lib/nancy/types'
 import { listAgents, autoRouteAgent, type AgentListResponse } from '@/lib/nancy/agent-client'
 import { AgentTaskModal } from './agent-task-modal'
-import { useSystemHealth, useTradeHistory } from '@/hooks/useSystemData'
+import { useSystemHealth, useTradeHistory, useLlmStatus } from '@/hooks/useSystemData'
 import {
   Area,
   AreaChart,
@@ -41,33 +41,15 @@ import {
   BarChart3,
   Search,
   Rss,
-  Radar,
-  Satellite,
   Waves,
   Radio,
-  Fingerprint,
   Sparkles,
   Signal,
-  Lock,
   ShieldCheck,
-  AlertTriangle,
   Eye,
   Thermometer,
-  Flame,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-
-/* ─── Jitter hook for live gauges ─────────────────────────────── */
-function useJitter(base: number, amp = 6) {
-  const [v, setV] = useState(base)
-  useEffect(() => {
-    const t = setInterval(() => {
-      setV(Math.max(2, Math.min(100, base + (Math.random() - 0.5) * amp * 2)))
-    }, 1600)
-    return () => clearInterval(t)
-  }, [base, amp])
-  return v
-}
 
 function useTick(ms = 1000) {
   const [t, setT] = useState(0)
@@ -127,6 +109,17 @@ function useAgentsBrief(intervalMs = 15000) {
   return { agents, stats }
 }
 
+/** Real logical core count, read client-side only (avoids an SSR/hydration
+ * mismatch, since `navigator` doesn't exist on the server) — replaces a
+ * fabricated "128 cores" figure. */
+function useCpuCoreCount() {
+  const [cores, setCores] = useState<number | null>(null)
+  useEffect(() => {
+    setCores(typeof navigator !== 'undefined' ? navigator.hardwareConcurrency ?? null : null)
+  }, [])
+  return cores
+}
+
 /** Real wall-clock time since this dashboard instance mounted — replaces a
  * fabricated "412d" uptime figure with an honestly-labelled session timer. */
 function useSessionUptime() {
@@ -169,15 +162,18 @@ export function OverviewPanel() {
   const tick = useTick(1200)
   const { agents, stats } = useAgentsBrief()
   const uptime = useSessionUptime()
+  const cores = useCpuCoreCount()
   const telemetryHistory = useMetricHistory({ cpu: health.cpu, mem: health.memory, net: health.networkPercent })
+  const successPct = stats ? stats.success_rate * 100 : 100
 
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
       {/* ── HERO: Reactor + status stripe ── */}
       <div className="col-span-12 grid grid-cols-12 gap-4 xl:col-span-8">
         <HudPanel
+          hero
           title="Central Reactor · Nancy Core"
-          right={<span className="text-primary">ONLINE</span>}
+          right={<span className="text-primary animate-hud-breathe">ONLINE</span>}
           className="col-span-12 md:col-span-7 xl:col-span-7"
         >
           <div className="flex items-center gap-4">
@@ -186,11 +182,11 @@ export function OverviewPanel() {
             </div>
             <div className="flex-1 min-w-0 space-y-3">
               <div>
-                <div className="font-heading text-3xl tracking-tight text-primary hud-glow">
-                  100.00 <span className="text-base text-muted-foreground">%</span>
+                <div className="font-display text-3xl tracking-tight text-primary hud-glow">
+                  <AnimatedNumber value={successPct} decimals={1} /> <span className="text-base text-muted-foreground">%</span>
                 </div>
                 <div className="text-[0.55rem] uppercase tracking-[0.28em] text-muted-foreground">
-                  Reactor Output · Stable
+                  Fleet Success Rate · {stats ? `${stats.total_tasks} tasks` : '…'}
                 </div>
               </div>
               <StatBar label="Neural CPU" value={cpu.toFixed(0)} unit="%" pct={cpu} />
@@ -204,10 +200,9 @@ export function OverviewPanel() {
         {/* Big number cards */}
         <div className="col-span-12 md:col-span-5 xl:col-span-5 grid grid-cols-2 gap-3">
           {[
-            { label: 'Tasks Run',  v: `${stats?.total_tasks ?? 0}`, delta: stats ? `${stats.agents_online} online` : '…', icon: Zap, tone: 'primary' as const },
-            { label: 'Agents',     v: `${stats?.agents_online ?? 0}`, delta: stats ? `${stats.agents_offline} offline` : '…', icon: Radio, tone: 'accent' as const },
-            { label: 'Failures',   v: `${stats?.failed_tasks ?? 0}`, delta: stats ? `${(stats.success_rate * 100).toFixed(0)}% success` : '…', icon: Shield, tone: 'ok' as const },
-            { label: 'Session',    v: uptime, delta: 'this tab', icon: Activity, tone: 'primary' as const },
+            { label: 'Tasks Run',  v: stats?.total_tasks ?? 0, delta: stats ? `${stats.agents_online} online` : '…', icon: Zap, tone: 'primary' as const },
+            { label: 'Agents',     v: stats?.agents_online ?? 0, delta: stats ? `${stats.agents_offline} offline` : '…', icon: Radio, tone: 'accent' as const },
+            { label: 'Failures',   v: stats?.failed_tasks ?? 0, delta: stats ? `${(stats.success_rate * 100).toFixed(0)}% success` : '…', icon: Shield, tone: 'ok' as const },
           ].map((s) => (
             <div key={s.label} className="hud-panel flex flex-col justify-between rounded-md p-3 transition-transform hover:-translate-y-0.5">
               <div className="flex items-center gap-2">
@@ -222,11 +217,25 @@ export function OverviewPanel() {
                 <span className="text-[0.5rem] uppercase tracking-[0.22em] text-muted-foreground">{s.label}</span>
               </div>
               <div>
-                <div className="font-heading text-2xl tracking-tight text-foreground hud-glow">{s.v}</div>
+                <div className="font-display text-2xl tracking-tight text-foreground hud-glow">
+                  <AnimatedNumber value={s.v} />
+                </div>
                 <div className="text-[0.55rem] text-primary/80">{s.delta}</div>
               </div>
             </div>
           ))}
+          <div className="hud-panel flex flex-col justify-between rounded-md p-3 transition-transform hover:-translate-y-0.5">
+            <div className="flex items-center gap-2">
+              <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/15 text-primary">
+                <Activity className="h-4 w-4" />
+              </span>
+              <span className="text-[0.5rem] uppercase tracking-[0.22em] text-muted-foreground">Session</span>
+            </div>
+            <div>
+              <div className="font-display text-2xl tracking-tight text-foreground hud-glow">{uptime}</div>
+              <div className="text-[0.55rem] text-primary/80">this tab</div>
+            </div>
+          </div>
         </div>
 
         {/* Ops timeline */}
@@ -248,7 +257,7 @@ export function OverviewPanel() {
           </div>
         </HudPanel>
 
-        <HudPanel title="Agent Domains" className="col-span-12 md:col-span-5">
+        <HudPanel title="Agent Domains" accent="violet" className="col-span-12 md:col-span-5">
           <AgentDomainChart agents={agents} />
         </HudPanel>
       </div>
@@ -274,16 +283,16 @@ export function OverviewPanel() {
           <WorldTracker />
         </HudPanel>
 
-        <HudPanel title="Trading P/L · Recent">
+        <HudPanel title="Trading P/L · Recent" accent="amber">
           <TradePLChart />
         </HudPanel>
 
         <HudPanel title="Quick Stats">
           <div className="grid grid-cols-3 gap-2 text-center">
             {[
-              { icon: Cpu, label: 'CORES', v: '128' },
-              { icon: Database, label: 'STORAGE', v: '4.2 PB' },
-              { icon: ShieldCheck, label: 'PERIMETER', v: 'GREEN' },
+              { icon: Cpu, label: 'CORES', v: cores != null ? `${cores}` : '…' },
+              { icon: Database, label: 'DISK', v: health.disk != null ? `${health.disk.toFixed(0)}%` : 'N/A' },
+              { icon: Thermometer, label: 'TEMP', v: health.tempC != null ? `${health.tempC.toFixed(0)}°C` : 'N/A' },
             ].map(({ icon: Icon, label, v }) => (
               <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/60 bg-secondary/30 py-2">
                 <Icon className="h-4 w-4 text-primary" />
@@ -522,25 +531,29 @@ function AgentLoadChart({ agents }: { agents: AgentInfo[] }) {
    NEURAL CORE — Cognition dashboard
    ═══════════════════════════════════════════════════════════════ */
 export function CorePanel() {
-  const a = useJitter(72, 8)
-  const b = useJitter(55, 8)
-  const c = useJitter(88, 5)
-  const d = useJitter(64, 10)
+  const health = useSystemHealth()
+  const { stats } = useAgentsBrief()
+  const { data: llm, loading: llmLoading } = useLlmStatus()
+  const fleetOnlinePct = stats && stats.agents_online + stats.agents_offline > 0
+    ? (stats.agents_online / (stats.agents_online + stats.agents_offline)) * 100
+    : 0
 
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
       {/* Big reactor / neural sphere */}
-      <HudPanel title="Neural Substrate" right={<span className="text-primary">STABLE</span>} className="col-span-12 lg:col-span-5">
+      <HudPanel hero title="Neural Substrate" right={<span className="text-primary">STABLE</span>} className="col-span-12 lg:col-span-5">
         <div className="flex flex-col items-center gap-4 py-2">
           <ArcReactor size={280} />
           <div className="grid w-full grid-cols-2 gap-2">
             <div className="rounded border border-border/50 bg-secondary/20 p-2 text-center">
-              <div className="font-heading text-xl text-primary hud-glow">671B</div>
-              <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">Parameters</div>
+              <div className="font-display text-xl text-primary hud-glow">{llm?.backends.length ?? '–'}</div>
+              <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">LLM Backends</div>
             </div>
             <div className="rounded border border-border/50 bg-secondary/20 p-2 text-center">
-              <div className="font-heading text-xl text-accent hud-glow-amber">2.4M</div>
-              <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">Vectors</div>
+              <div className="font-display text-xl text-accent hud-glow-amber">
+                <AnimatedNumber value={stats?.agents_online ?? 0} />
+              </div>
+              <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">Agents Online</div>
             </div>
           </div>
         </div>
@@ -548,39 +561,51 @@ export function CorePanel() {
 
       {/* Gauges & modules */}
       <div className="col-span-12 grid grid-cols-1 gap-4 lg:col-span-7">
-        <HudPanel title="Cognitive Load">
+        <HudPanel title="System Vitals">
           <div className="flex flex-wrap items-center justify-around gap-3 py-2">
-            <RadialGauge value={a} label="Reasoning" color="var(--hud)" size={110} />
-            <RadialGauge value={b} label="Perception" color="var(--accent)" size={110} />
-            <RadialGauge value={c} label="Sync" color="var(--hud)" size={110} />
-            <RadialGauge value={d} label="Attention" color="oklch(0.7 0.16 160)" size={110} />
+            <RadialGauge value={health.cpu ?? 0} label="CPU Load" color="var(--hud)" size={110} />
+            <RadialGauge value={health.memory ?? 0} label="Memory" color="var(--accent)" size={110} />
+            <RadialGauge value={fleetOnlinePct} label="Fleet Online" color="var(--hud)" size={110} />
+            <RadialGauge value={(stats?.success_rate ?? 0) * 100} label="Success Rate" color="var(--tertiary)" size={110} />
           </div>
         </HudPanel>
 
-        <HudPanel title="Model Stack">
-          <ul className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
-            {[
-              ['Reasoning Engine', 'gpt-class · 671B', Zap],
-              ['Vision Cortex',    'multimodal · online', Eye],
-              ['Voice Synthesis',  'neural TTS · ready', Waves],
-              ['Memory Index',     '2.4M vectors', Database],
-              ['Router / Planner', 'DAG · v3.2', Radar],
-              ['Ethics Filter',    'active · pass 100%', ShieldCheck],
-            ].map(([k, v, Icon]) => {
-              const IconComp = Icon as React.ElementType
-              return (
-                <li key={k as string} className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
+        <HudPanel title="Model Stack" accent="amber">
+          {llmLoading && !llm ? (
+            <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
+              <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> Reading live backend chain…
+            </div>
+          ) : (
+            <ul className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
+              {(llm?.backends ?? []).map((b, i) => (
+                <li key={`${b.name}-${i}`} className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
                   <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
-                    <IconComp className="h-3 w-3 text-primary" /> {k as string}
+                    <Zap className="h-3 w-3 text-primary" /> {b.name}
                   </span>
-                  <span className="text-[0.6rem] text-primary">{v as string}</span>
+                  <span className="truncate text-[0.6rem] text-primary">{b.model ?? (i === 0 ? 'primary' : 'fallback')}</span>
                 </li>
-              )
-            })}
-          </ul>
+              ))}
+              {llm?.stt && (
+                <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
+                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                    <Waves className="h-3 w-3 text-primary" /> Speech-to-text
+                  </span>
+                  <span className="truncate text-[0.6rem] text-primary">{llm.stt.backend}{llm.stt.model ? ` · ${llm.stt.model}` : ''}</span>
+                </li>
+              )}
+              {llm?.tts && (
+                <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
+                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                    <Eye className="h-3 w-3 text-primary" /> Voice synthesis
+                  </span>
+                  <span className="truncate text-[0.6rem] text-primary">{llm.tts.backend}</span>
+                </li>
+              )}
+            </ul>
+          )}
         </HudPanel>
 
-        <HudPanel title="Reasoning Trace · Live">
+        <HudPanel title="Reasoning Pipeline" accent="violet">
           <ThoughtTrace />
         </HudPanel>
       </div>
@@ -756,14 +781,14 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
       {/* Left: hero stats + auto-router */}
       <div className="col-span-12 grid grid-cols-1 gap-4 lg:col-span-4">
-        <HudPanel title="Agent Fleet · Overview" right={
+        <HudPanel hero title="Agent Fleet · Overview" right={
           <button type="button" onClick={fetchAgents} disabled={loading} className="text-muted-foreground hover:text-primary">
             <RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} />
           </button>
         }>
           <div className="mb-3 flex items-center gap-1.5 text-[0.55rem]">
             {error ? (<><WifiOff className="h-3 w-3 text-destructive" /><span className="text-destructive">Backend offline</span></>)
-              : (<><Wifi className="h-3 w-3 text-primary" /><span className="text-muted-foreground">Connected · {data?.total ?? '?'} · {lastRefresh.toLocaleTimeString('en-GB')}</span></>)}
+              : (<><Wifi className="h-3 w-3 text-primary animate-hud-breathe" /><span className="text-muted-foreground">Connected · {data?.total ?? '?'} · {lastRefresh.toLocaleTimeString('en-GB')}</span></>)}
           </div>
           {data && (
             <div className="grid grid-cols-3 gap-2 text-center">
@@ -773,7 +798,7 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
                 { label: 'Success', v: `${(data.stats.success_rate * 100).toFixed(0)}%`, tone: 'text-accent' },
               ].map(({ label, v, tone }) => (
                 <div key={label} className="rounded border border-border/60 bg-secondary/20 py-2">
-                  <div className={cn('font-heading text-lg hud-glow', tone)}>{v}</div>
+                  <div className={cn('font-display text-lg hud-glow', tone)}>{v}</div>
                   <div className="text-[0.5rem] uppercase tracking-widest text-muted-foreground">{label}</div>
                 </div>
               ))}
@@ -781,7 +806,7 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
           )}
         </HudPanel>
 
-        <HudPanel title="Auto-Route Query" right={<Sparkles className="h-3 w-3 text-primary" />}>
+        <HudPanel title="Auto-Route Query" accent="violet" right={<Sparkles className="h-3 w-3 text-tertiary" />}>
           <p className="mb-2 text-[0.55rem] text-muted-foreground">
             Ask anything — Nancy picks the right specialist agent.
           </p>
@@ -794,7 +819,7 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
               className="flex-1 rounded border border-border bg-background/60 px-2 py-1.5 text-[0.65rem] text-foreground outline-none focus:border-primary/60"
             />
             <button type="button" onClick={handleAutoRun} disabled={autoRunning}
-              className="rounded border border-primary bg-primary/15 px-2.5 py-1.5 text-primary hover:bg-primary/25 disabled:opacity-50">
+              className="rounded border border-tertiary bg-tertiary/15 px-2.5 py-1.5 text-tertiary hover:bg-tertiary/25 disabled:opacity-50">
               {autoRunning ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
             </button>
           </div>
@@ -805,7 +830,7 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
           )}
         </HudPanel>
 
-        <HudPanel title="Fleet Activity">
+        <HudPanel title="Fleet Activity" accent="amber">
           <AgentLoadChart agents={data?.agents ?? []} />
         </HudPanel>
       </div>
@@ -866,32 +891,27 @@ const APPS = [
 
 export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) => void; launched: string | null }) {
   const tick = useTick(700)
-  const [logs, setLogs] = useState<string[]>([
-    '[boot] jarvis-core online · 0.03s',
-    '[net]  uplink up · 12ms · pkt loss 0.02%',
-    '[sec]  perimeter green · 0 intrusions',
-    '[mem]  vector cache warm · 2.4M',
-    '[ai]   671B weights loaded · fp16',
-  ])
-  useEffect(() => {
-    const lines = [
-      '[net]  packet burst · Prague relay',
-      '[gpu]  cortex idle · 74% headroom',
-      '[sat]  KH-11 frame lock',
-      '[ai]   inference · 42ms',
-      '[ops]  task queue drained',
-    ]
-    const t = setInterval(() => {
-      setLogs((l) => [...l.slice(-40), lines[Math.floor(Math.random() * lines.length)] + '  ·  ' + new Date().toLocaleTimeString('en-GB')])
-    }, 900)
-    return () => clearInterval(t)
-  }, [])
-
   const health = useSystemHealth()
   const cpu = health.cpu ?? 0
   const mem = health.memory ?? 0
   const disk = health.disk ?? 0
   const net = health.networkPercent ?? 0
+  const { stats: agentStats } = useAgentsBrief()
+  const { data: llm } = useLlmStatus()
+  const uptime = useSessionUptime()
+
+  // Real derived log -- each line reflects the actual currently-polled
+  // system values (see useSystemHealth), not a canned random-phrase pool.
+  const [logs, setLogs] = useState<string[]>([])
+  useEffect(() => {
+    if (health.cpu == null) return
+    const line =
+      `[sys] cpu ${health.cpu.toFixed(0)}% · mem ${(health.memory ?? 0).toFixed(0)}% · ` +
+      `disk ${(health.disk ?? 0).toFixed(0)}% · net ${(health.networkPercent ?? 0).toFixed(0)}%` +
+      `  ·  ${new Date().toLocaleTimeString('en-GB')}`
+    setLogs((l) => [...l.slice(-40), line])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [health.cpu, health.memory, health.disk, health.networkPercent])
 
   return (
     <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
@@ -917,13 +937,13 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
           </div>
         </HudPanel>
 
-        <HudPanel title="Perimeter · Security">
+        <HudPanel title="Backend Health" accent="amber">
           <ul className="space-y-1.5 text-[0.6rem]">
             {[
-              ['Firewall', 'active', ShieldCheck, 'ok'],
-              ['Intrusion', '0 detected', Lock, 'ok'],
-              ['Certs',    'valid · 89d', Fingerprint, 'ok'],
-              ['Alerts',   '2 low priority', AlertTriangle, 'warn'],
+              ['Agent Service', agentStats ? `${agentStats.agents_online} online` : 'initialising', ShieldCheck, agentStats ? 'ok' : 'warn'],
+              ['LLM Chain', llm ? `${llm.backends.length} backend${llm.backends.length !== 1 ? 's' : ''}` : '…', Zap, llm ? 'ok' : 'warn'],
+              ['Speech-to-Text', llm?.stt.backend ?? '…', Waves, llm ? 'ok' : 'warn'],
+              ['Voice Synthesis', llm?.tts.backend ?? '…', Eye, llm ? 'ok' : 'warn'],
             ].map(([k, v, Icon, tone]) => {
               const IconComp = Icon as React.ElementType
               return (
@@ -991,12 +1011,12 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
           </div>
         </HudPanel>
 
-        <HudPanel title="Fleet Uplink">
+        <HudPanel title="Fleet Snapshot" accent="violet">
           <div className="grid grid-cols-3 gap-2 text-center">
             {[
-              { icon: Satellite, label: 'SATCOM', v: '12 birds' },
-              { icon: Radar,     label: 'RADAR',  v: '8 sweeps/s' },
-              { icon: Flame,     label: 'REACTOR',v: 'nominal' },
+              { icon: Bot, label: 'AGENTS', v: agentStats ? `${agentStats.agents_online}` : '…' },
+              { icon: Zap, label: 'TASKS', v: agentStats ? `${agentStats.total_tasks}` : '…' },
+              { icon: Activity, label: 'UPTIME', v: uptime },
             ].map(({ icon: Icon, label, v }) => (
               <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/50 bg-secondary/20 py-3">
                 <Icon className="h-5 w-5 text-primary" />

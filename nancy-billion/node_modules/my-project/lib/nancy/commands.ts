@@ -71,21 +71,21 @@ const CONVERSATIONAL_TOPICS: { pattern: RegExp; reply: string }[] = [
   {
     pattern: /\b(weather|forecast|rain|snow|temperature|humidity|wind|storm|sunny|cloudy)\b/,
     reply:
-      "I don't have a live meteorological feed wired in yet, sir. I can pull satellite imagery, run system diagnostics, or take you to any city on the map — say the word.",
+      "I don't have a live meteorological feed wired in yet, Sir. I can pull satellite imagery, run system diagnostics, or take you to any city on the map — say the word.",
   },
   {
     pattern: /\b(joke|funny|entertain|sing|song|music|movie)\b/,
     reply:
-      "Sarcasm is my default setting, but I'll spare you. Would you rather look at a city or check the neural core?",
+      "Sarcasm is my default setting, Sir, but I'll spare you. Would you rather look at a city or check the neural core?",
   },
   {
     pattern: /\b(who are you|your name|what are you|about yourself)\b/,
     reply:
-      "I'm Nancy — Stark-class assistant, voice-first, quietly British. Say 'open the map', 'show agents', or ask me to locate a city.",
+      "I'm Nancy — Stark-class assistant, voice-first, quietly British, at your service, Sir. Say 'open the map', 'show agents', or ask me to locate a city.",
   },
   {
     pattern: /\b(thank(s| you)|cheers|appreciate)\b/,
-    reply: "Always a pleasure. Standing by.",
+    reply: "Always a pleasure, Sir. Standing by.",
   },
   // Deliberately NOT here: "how are you" / "how's it going" style small talk.
   // Unlike weather/news/jokes (topics with no real data feed wired in), these
@@ -101,22 +101,22 @@ export function parseCommand(rawInput: string): CommandResult {
   // Close intents handled upstream — skip here.
 
   if (/\b(hello|hi|hey|good (morning|evening|afternoon))\b/.test(input)) {
-    return { type: 'greet', reply: 'Online and listening. What can I do for you?' }
+    return { type: 'greet', reply: 'Online and listening, Sir. What can I do for you?' }
   }
 
   if (/\b(status|report|systems?|diagnostic)\b/.test(input)) {
     return {
       type: 'status',
-      reply: 'All systems nominal. Reactor at full output, agents synchronized.',
+      reply: 'All systems nominal, Sir. Reactor at full output, agents synchronized.',
     }
   }
 
   if (/\b(scan|analyse|analyze|sweep|perimeter)\b/.test(input)) {
-    return { type: 'scan', reply: 'Initiating deep scan. Compiling telemetry now.' }
+    return { type: 'scan', reply: 'Initiating deep scan, Sir. Compiling telemetry now.' }
   }
 
   if (/\b(time|clock)\b/.test(input) && !/\b(weather|forecast)\b/.test(input)) {
-    return { type: 'time', reply: 'Pulling local chronometer data.' }
+    return { type: 'time', reply: 'Pulling local chronometer data, Sir.' }
   }
 
   // News/briefing — real feed (see knowledge-panel.tsx → /api/news), checked
@@ -135,7 +135,7 @@ export function parseCommand(rawInput: string): CommandResult {
       category,
       topic,
       media,
-      reply: `Pulling up the latest ${media === 'videos' ? 'briefings' : 'coverage'} on ${subject}.`,
+      reply: `Pulling up the latest ${media === 'videos' ? 'briefings' : 'coverage'} on ${subject}, Sir.`,
     }
   }
 
@@ -150,10 +150,10 @@ export function parseCommand(rawInput: string): CommandResult {
   if (launchMatch) {
     const word = launchMatch[2]
     if (PANEL_WORDS[word]) {
-      return { type: 'navigate', panel: PANEL_WORDS[word], reply: `Opening ${word} interface.` }
+      return { type: 'navigate', panel: PANEL_WORDS[word], reply: `Opening ${word} interface, Sir.` }
     }
     const target = LAUNCH_TARGETS.find((t) => word.includes(t)) || word
-    return { type: 'launch', target, reply: `Launching ${target}.` }
+    return { type: 'launch', target, reply: `Launching ${target}, Sir.` }
   }
 
   // Locate / show place on map — requires an EXPLICIT locate verb.
@@ -163,7 +163,7 @@ export function parseCommand(rawInput: string): CommandResult {
   if (locateMatch) {
     const query = clean(locateMatch[1].replace(/^(the|a)\s+/, ''))
     if (query) {
-      return { type: 'locate', query, reply: `Acquiring satellite lock on ${query}.` }
+      return { type: 'locate', query, reply: `Acquiring satellite lock on ${query}, Sir.` }
     }
   }
 
@@ -171,7 +171,7 @@ export function parseCommand(rawInput: string): CommandResult {
   for (const [word, panel] of Object.entries(PANEL_WORDS)) {
     const re = new RegExp(`\\b${word}\\b`)
     if (re.test(input)) {
-      return { type: 'navigate', panel, reply: `Opening the ${panel} interface.` }
+      return { type: 'navigate', panel, reply: `Opening the ${panel} interface, Sir.` }
     }
   }
 
@@ -182,13 +182,13 @@ export function parseCommand(rawInput: string): CommandResult {
     return {
       type: 'unknown',
       reply:
-        "That's outside my current toolkit, sir. Try 'locate Tokyo', 'open the dashboard', or 'system status'.",
+        "That's outside my current toolkit, Sir. Try 'locate Tokyo', 'open the dashboard', or 'system status'.",
     }
   }
 
   return {
     type: 'unknown',
     reply:
-      "I didn't catch a recognised command. Try 'locate Tokyo', 'open agents', or 'system status'.",
+      "I didn't catch a recognised command, Sir. Try 'locate Tokyo', 'open agents', or 'system status'.",
   }
 }

@@ -73,6 +73,47 @@ export function useSystemHealth() {
   return { ...data, loading, error }
 }
 
+export interface LlmStatus {
+  primary_model: string | null
+  backends: { name: string; model?: string }[]
+  stt: { backend: string; model?: string; device?: string }
+  tts: { backend: string }
+  agents_ready: boolean
+}
+
+// Real LLM fallback chain + STT/TTS engine info (see backend's /llm/status).
+// Replaces the AI Core panel's old fully-fictional "Model Stack" card.
+export function useLlmStatus() {
+  const [data, setData] = useState<LlmStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const fetch_data = async () => {
+      try {
+        const res = await fetch('/api/llm/status', { cache: 'no-store' })
+        if (!res.ok) throw new Error('Failed to fetch LLM status')
+        const json = await res.json()
+        if (!cancelled && json.success) setData(json)
+        if (!cancelled) setError(null)
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Unknown error')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    fetch_data()
+    const interval = setInterval(fetch_data, 30000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
+  return { data, loading, error }
+}
+
 // Memory API
 export function useMemorySummary() {
   const [data, setData] = useState<any>(null)

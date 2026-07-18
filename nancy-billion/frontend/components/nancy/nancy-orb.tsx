@@ -13,6 +13,9 @@ export type OrbState =
 const HUD = 'rgba(56, 211, 235, 1)'
 const HUD_SOFT = 'rgba(56, 211, 235, 0.55)'
 const AMBER = 'rgba(232, 178, 70, 1)'
+// Matches the design system's --tertiary token -- gives "thinking" its own
+// identity instead of looking identical to idle/listening (both cyan).
+const VIOLET = 'rgba(196, 130, 235, 1)'
 
 // Per-state animation parameters driving the canvas.
 const PARAMS: Record<
@@ -28,7 +31,7 @@ const PARAMS: Record<
 > = {
   idle: { ringSpeed: 0.15, particleSpeed: 0.2, particleCount: 48, waveAmp: 0.05, waveSpeed: 1.2, color: HUD },
   listening: { ringSpeed: 0.35, particleSpeed: 0.5, particleCount: 64, waveAmp: 0.35, waveSpeed: 3, color: HUD },
-  thinking: { ringSpeed: 1.1, particleSpeed: 1.4, particleCount: 90, waveAmp: 0.18, waveSpeed: 4.5, color: HUD },
+  thinking: { ringSpeed: 1.1, particleSpeed: 1.4, particleCount: 90, waveAmp: 0.18, waveSpeed: 4.5, color: VIOLET },
   speaking: { ringSpeed: 0.5, particleSpeed: 0.7, particleCount: 72, waveAmp: 0.45, waveSpeed: 6, color: HUD },
   executing: { ringSpeed: 0.9, particleSpeed: 1.8, particleCount: 110, waveAmp: 0.3, waveSpeed: 5, color: AMBER },
 }

@@ -1207,6 +1207,37 @@ async def clap_status():
     return {"success": True, **status}
 
 
+@app.get("/llm/status")
+async def llm_status():
+    """Real LLM fallback chain, STT and TTS engine info -- used by the AI
+    Core panel's "Model Stack" card, which previously showed entirely
+    fictional entries (a made-up "671B gpt-class" model, fake version
+    numbers) instead of what's actually running."""
+    backends = []
+    for b in getattr(llm_backend, "backends", []):
+        entry = {"name": b.__class__.__name__}
+        model = getattr(b, "model", None)
+        if model:
+            entry["model"] = model
+        backends.append(entry)
+
+    stt_info = {"backend": stt_backend.__class__.__name__}
+    if hasattr(stt_backend, "model_size"):
+        stt_info["model"] = stt_backend.model_size
+        stt_info["device"] = getattr(stt_backend, "device", None)
+
+    tts_info = {"backend": tts_backend.__class__.__name__}
+
+    return {
+        "success": True,
+        "primary_model": backends[0].get("model") or backends[0].get("name") if backends else None,
+        "backends": backends,
+        "stt": stt_info,
+        "tts": tts_info,
+        "agents_ready": agent_service.is_ready(),
+    }
+
+
 @app.get("/tts/status")
 async def tts_status():
     """Whether TTS is using the real neural voice (NeuTTS-nano) and which
