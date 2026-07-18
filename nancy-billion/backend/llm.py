@@ -537,6 +537,13 @@ class FuryLLM(LLMBackend):
 
 
 class FallbackLLM(LLMBackend):
+    # No individual backend call here (or in its own SDK client) had an
+    # explicit timeout before -- a single slow/hanging backend (e.g. a big
+    # cloud model under load, or a local Ollama/Fury model doing real CPU
+    # inference) could block the entire chain well past a minute with
+    # nothing to cut it short and move to the next backend.
+    BACKEND_TIMEOUT_S = 20.0
+
     def __init__(self, backends):
         self.backends = backends
         logger.info(f"FallbackLLM initialized with {len(self.backends)} backends")
@@ -546,9 +553,18 @@ class FallbackLLM(LLMBackend):
         for backend in self.backends:
             try:
                 logger.info(f"Trying LLM backend: {backend.__class__.__name__}")
-                result = await backend.generate(prompt, max_tokens=max_tokens, temperature=temperature)
+                result = await asyncio.wait_for(
+                    backend.generate(prompt, max_tokens=max_tokens, temperature=temperature),
+                    timeout=self.BACKEND_TIMEOUT_S,
+                )
                 logger.info(f"LLM backend {backend.__class__.__name__} succeeded")
                 return result
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"LLM backend {backend.__class__.__name__} timed out after {self.BACKEND_TIMEOUT_S}s"
+                )
+                last_exception = TimeoutError(f"{backend.__class__.__name__} timed out")
+                continue
             except Exception as e:
                 logger.warning(f"LLM backend {backend.__class__.__name__} failed: {e}")
                 last_exception = e

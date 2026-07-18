@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 import asyncio
 import base64
 import json
+import re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -196,6 +197,8 @@ You are Nancy/Billion, a highly intelligent, versatile, and sovereign AI operati
 CRITICAL: Do NOT assume that a user's query is a map location, address, or city name unless it is explicitly framed as one. Treat every request with a general-purpose intelligence first. If the user asks a basic question, answer it directly and intelligently.
 
 You have access to a variety of tools for system control, coding, web search, media generation, and more. You speak in a clear, confident, and helpful tone. You can spawn specialized agents to handle complex tasks. Always aim to assist the user efficiently and safely.
+
+Always address the user as "Sir" (always capitalized, even mid-sentence) -- naturally, the way a butler-style assistant (JARVIS) would, not stiffly or in every single sentence. Never use their name or any other title.
 """
 
 # ---------------------------------------------------------------------------
@@ -437,6 +440,17 @@ FILE_TOOLS: List[Dict[str, Any]] = [
 
 _FILE_WRITE_TOOLS = {"write_file", "delete_file", "move_file"}
 
+# Only messages that plausibly need a file-system action or a new agent take
+# the (slow, multi-round) Claude tool-use path -- see the latency note where
+# this is used in _generate_response_via_hierarchy.
+_WANTS_TOOLS_RE = re.compile(
+    r"\b(file|folder|directory|read .*(file|it)|write .*(file|to)|save (it|this|that|a file)|"
+    r"delete|remove .*(file|folder)|move .*(file|folder)|rename|"
+    r"create (a |an |another )?(sub)?agent|make (a |an |another )?(sub)?agent|"
+    r"new (sub)?agent|build (a |an |another )?(sub)?agent|spin up.*agent)\b",
+    re.IGNORECASE,
+)
+
 # ---------------------------------------------------------------------------
 # Subagent creation (Claude tool-use only, same as file access -- see
 # subagent_factory.py for why this is a materially higher risk tier than
@@ -534,6 +548,18 @@ async def _execute_create_subagent_tool(tool_input: Dict[str, Any]) -> Dict[str,
     return result
 
 
+_SIR_RE = re.compile(r"\bsir\b", re.IGNORECASE)
+
+
+def _enforce_sir(text: str) -> str:
+    """The system prompt asks every backend to address the user as "Sir"
+    (capitalized, even mid-sentence), but LLMs reliably "correct" that back
+    to lowercase mid-sentence per normal English convention regardless of
+    instruction -- confirmed empirically, not just a theoretical concern.
+    Enforce it deterministically instead of hoping the model complies."""
+    return _SIR_RE.sub("Sir", text)
+
+
 async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
     """Route a chat message to a real specialized agent when the text clearly
     matches one of the 29 registered domains; otherwise fall back to the
@@ -580,27 +606,35 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
 
     prompt = f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{history_text}\nuser: {user_text}\nassistant:"
 
-    # File access (read/list/write/delete/move real files on this computer,
-    # per this session's explicit scope: no folder sandbox, writes/deletes
-    # gated on a real Telegram approval) only works through Claude's native
-    # tool-use -- the other backends in the fallback chain are plain text
-    # completion with no tool-calling loop. Try that path first when
-    # Anthropic is configured; anything that fails (including "no credits")
-    # falls through to the ordinary no-tools chain below.
-    if os.getenv("ANTHROPIC_API_KEY"):
+    # File access + subagent-creation only work through Claude's multi-round
+    # tool-use loop (generate_with_tools) -- the other backends in the
+    # fallback chain are plain text completion with no tool-calling at all.
+    # That loop costs real latency: up to 5 sequential Claude round-trips
+    # even when no tool ends up being called, which is why this used to run
+    # for EVERY message (including plain chat like "how are you") whenever
+    # an Anthropic key was configured -- a real contributor to 60s+ replies.
+    # Only pay that cost when the message plausibly needs a tool.
+    if os.getenv("ANTHROPIC_API_KEY") and _WANTS_TOOLS_RE.search(user_text):
         try:
             claude = AnthropicLLM()
-            resp = await claude.generate_with_tools(
-                prompt, FILE_TOOLS + [CREATE_SUBAGENT_TOOL], _execute_file_tool, max_tokens=1024
+            resp = await asyncio.wait_for(
+                claude.generate_with_tools(
+                    prompt, FILE_TOOLS + [CREATE_SUBAGENT_TOOL], _execute_file_tool, max_tokens=1024
+                ),
+                timeout=45.0,
             )
-            return resp, {"tool_use": True}
+            return _enforce_sir(resp), {"tool_use": True}
         except Exception as e:
             logger.warning("Claude tool-use path failed, falling back to plain chain: %s", e)
 
     try:
-        resp = await llm_backend.generate(prompt, max_tokens=512, temperature=0.7)
+        resp = await asyncio.wait_for(
+            llm_backend.generate(prompt, max_tokens=512, temperature=0.7),
+            timeout=30.0,
+        )
+        resp = _enforce_sir(resp)
     except Exception as llm_e:
-        resp = f"I'm having trouble processing that right now. ({llm_e})"
+        resp = f"I'm having trouble processing that right now, Sir. ({llm_e})"
     return resp, {}
 
 
@@ -734,6 +768,25 @@ async def _build_real_personal_context() -> "PersonalContext":
     except Exception as e:
         logger.debug("Greeting: self-improvement status unavailable: %s", e)
 
+    # Real agent-fleet status -- always available once the agent service is
+    # ready, so the greeting has substance even when there's nothing else
+    # (no trades, no projects, no pending approvals) to report.
+    system_status: Optional[str] = None
+    try:
+        if agent_service.is_ready():
+            stats = agent_service.get_service_stats()
+            online = stats["agents_online"]
+            tasks = stats["total_tasks"]
+            if tasks > 0:
+                system_status = (
+                    f"all {online} specialized agents are online, with {tasks} task"
+                    f"{'s' if tasks != 1 else ''} completed at a {stats['success_rate'] * 100:.0f}% success rate"
+                )
+            else:
+                system_status = f"all {online} specialized agents are online and standing by"
+    except Exception as e:
+        logger.debug("Greeting: system status unavailable: %s", e)
+
     return PersonalContext(
         meetings_today=[],  # no calendar integration -- honestly empty, not fabricated
         build_status=None,  # no CI/build system integration exists
@@ -741,6 +794,7 @@ async def _build_real_personal_context() -> "PersonalContext":
         project_updates=project_updates,
         active_trades=active_trades,
         tasks_due=tasks_due,
+        system_status=system_status,
     )
 
 
@@ -1084,7 +1138,7 @@ async def chat_endpoint(payload: ChatRequest):
         response = "My apologies, I encountered an error while processing your request."
 
     return {
-        "reply": response.strip(),
+        "reply": _enforce_sir(response.strip()),
         "action": "locate" if should_show_map else "none",  # Only show map for actual map requests!
         "category": None,
         "topic": None,
@@ -1518,6 +1572,42 @@ async def startup_event():
     asyncio.create_task(_init_agents())
     telegram_notifier.set_chat_handler(_telegram_chat_handler)
     telegram_notifier.start_polling()
+    asyncio.create_task(_daily_briefing_loop())
+
+
+# Local time, 24h format -- override in .env if 07:30 isn't the right moment.
+DAILY_BRIEFING_HOUR = int(os.getenv("DAILY_BRIEFING_HOUR", "7"))
+DAILY_BRIEFING_MINUTE = int(os.getenv("DAILY_BRIEFING_MINUTE", "30"))
+
+
+async def _daily_briefing_loop() -> None:
+    """Pushes Nancy's full personalized briefing to Telegram every day at
+    DAILY_BRIEFING_HOUR:DAILY_BRIEFING_MINUTE (07:30 local time by default)
+    with no user action required -- the same real-data briefing the boot
+    greeting builds (see _build_real_personal_context), delivered
+    proactively instead of only on demand. No-ops safely (logs and moves on)
+    if Telegram isn't configured, same as every other telegram_notifier.send.
+    """
+    while True:
+        now = datetime.now()
+        target = now.replace(
+            hour=DAILY_BRIEFING_HOUR, minute=DAILY_BRIEFING_MINUTE, second=0, microsecond=0
+        )
+        if target <= now:
+            target += timedelta(days=1)
+        wait_s = (target - now).total_seconds()
+        logger.info(
+            "Daily briefing scheduled for %s (in %.0f min)", target.isoformat(), wait_s / 60
+        )
+        await asyncio.sleep(wait_s)
+        try:
+            context = await _build_real_personal_context()
+            coordinator = IntelligentStartupCoordinator(persona=startup_coordinator.persona)
+            startup_data = await coordinator.startup_with_context(context)
+            await telegram_notifier.send(f"Morning briefing, Sir:\n\n{startup_data['greeting']}")
+        except Exception as e:
+            logger.exception("Daily briefing failed: %s", e)
+        # Loop back around -- next iteration recomputes tomorrow's target.
 
 
 async def _init_agents():

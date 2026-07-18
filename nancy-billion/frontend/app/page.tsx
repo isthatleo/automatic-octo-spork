@@ -187,10 +187,10 @@ export default function Page() {
       if (found) {
         setPlace(found)
         sfx.lock()
-        nancySay(`Target acquired. Displaying ${found.name}, ${found.country}.`)
+        nancySay(`Target acquired, Sir. Displaying ${found.name}, ${found.country}.`)
       } else {
         sfx.error()
-        nancySay(`I could not locate ${query}. Please try another place.`)
+        nancySay(`I could not locate ${query}, Sir. Please try another place.`)
       }
     },
     [nancySay],
@@ -230,7 +230,7 @@ export default function Page() {
           break
         case 'time': {
           const now = new Date().toLocaleTimeString()
-          nancySay(`The local system time is ${now}.`)
+          nancySay(`The local system time is ${now}, Sir.`)
           break
         }
         case 'status':
@@ -261,7 +261,7 @@ export default function Page() {
       if (/^\s*(close|exit|dismiss|hide)\b/i.test(text)) {
         sfx.whooshOut()
         setPanel(null)
-        nancySay('Closing workspace.')
+        nancySay('Closing workspace, Sir.')
         return
       }
       runCommand(text)
@@ -274,7 +274,7 @@ export default function Page() {
       if (/^\s*(close|exit|dismiss|hide)\b/i.test(text)) {
         sfx.whooshOut()
         setPanel(null)
-        nancySay('Closing workspace.')
+        nancySay('Closing workspace, Sir.')
         return
       }
       runCommand(text)
@@ -295,7 +295,7 @@ export default function Page() {
     unlockSfx()
     sfx.boot()
     sfx.startHum()
-    const fallback = 'N-Å-N-C-Y online. Say Nancy, Billion, or Jarvis followed by a command.'
+    const fallback = 'N-Å-N-C-Y online, Sir. Say Nancy, Billion, or Jarvis followed by a command.'
     const t = setTimeout(() => {
       // Real personalized greeting (live forex rates, memory/projects, open
       // trades, pending self-improvement proposals -- see

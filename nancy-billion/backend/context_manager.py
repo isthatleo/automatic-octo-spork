@@ -153,9 +153,13 @@ class IntentClassifier:
         Returns dict of intent → confidence (0.0-1.0)
         """
         text_lower = text.lower()
-        confidences = {}
-
-        total_keywords = sum(len(kws) for kws in self.keywords.values())
+        # Every IntentType gets an entry, not just the ones with a keyword
+        # list -- CHAT, ANALYSIS and MEMORY_QUERY have none (they're
+        # fallback/contextual intents, see classify()), and process_input()
+        # indexes this dict with whatever classify() returned. Omitting them
+        # here caused a KeyError on every plain chat message ("how are you")
+        # since CHAT is exactly the default classify() falls back to.
+        confidences = {intent_type: 0.0 for intent_type in IntentType}
 
         for intent_type, keywords in self.keywords.items():
             matches = sum(1 for kw in keywords if kw in text_lower)
