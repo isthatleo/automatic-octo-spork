@@ -30,6 +30,11 @@ class PersonalContext:
     project_updates: List[str] = field(default_factory=list)  # "Roxan deployment successful"
     active_trades: List[str] = field(default_factory=list)
     tasks_due: List[str] = field(default_factory=list)
+    # Real live agent-fleet status (see main_new.py's _build_real_personal_context),
+    # already phrased as a full clause -- always present once the agent service
+    # is ready, so the greeting never has to fall back to a single bare word
+    # just because there are no meetings/trades/projects to report yet.
+    system_status: Optional[str] = None
 
 
 class ContextualGreetingEngine:
@@ -70,42 +75,49 @@ class ContextualGreetingEngine:
 
         # Build natural greeting
         if not context_items:
-            # Fallback if no context
-            return f"{time_greeting}."
+            # Fallback if no context (e.g. agent service still initialising)
+            return f"{time_greeting}. Systems are still coming online -- give me just a moment."
 
         # Combine greeting naturally
         return self._combine_greeting(time_greeting, context_items)
 
     def _get_time_greeting(self) -> str:
-        """Get time-appropriate greeting prefix"""
+        """Get a full time-appropriate opening address, always as 'sir' --
+        a proper JARVIS-style opening line, not a single clipped word."""
         hour = datetime.now().hour
 
-        if hour < 12:
-            greeting = "Morning"
+        if hour < 5:
+            greeting = "Good evening, Sir — burning the midnight oil, I see"
+        elif hour < 12:
+            greeting = "Good morning, Sir"
         elif hour < 17:
-            greeting = "Afternoon"
+            greeting = "Good afternoon, Sir"
         elif hour < 21:
-            greeting = "Evening"
+            greeting = "Good evening, Sir"
         else:
-            greeting = "Late night"
+            greeting = "Good evening, Sir — it's rather late"
 
-        # Add persona flavor if not Nancy
+        # Persona flavor, layered onto the address rather than replacing it.
         if self.persona == "billion":
             if hour < 12:
-                greeting += " - market opening soon"
+                greeting += "; the markets open shortly"
             elif hour < 17:
-                greeting += " momentum"
-        elif self.persona == "jarvis":
-            greeting = greeting.capitalize() + ", sir"
+                greeting += "; the session's got some momentum"
 
         return greeting
 
     def _extract_context_items(self, context: PersonalContext) -> List[str]:
         """
         Extract priority context items for greeting.
-        Orders by importance: meetings → builds → projects → trades → tasks
+        Orders by importance: system status → meetings → builds → projects → trades → tasks
         """
         items = []
+
+        # 0. SYSTEM STATUS (real live agent-fleet data -- always available once
+        # the agent service is ready, so the greeting has real substance even
+        # on a fresh session with no meetings/trades/projects recorded yet)
+        if context.system_status:
+            items.append(context.system_status)
 
         # 1. MEETINGS (Usually highest priority)
         if context.meetings_today:
@@ -146,17 +158,36 @@ class ContextualGreetingEngine:
         return items
 
     def _combine_greeting(self, time_greeting: str, items: List[str]) -> str:
-        """Combine time greeting with context items into natural sentence"""
+        """Combine time greeting with context items into a fuller, warmer
+        briefing -- a real paragraph rather than a single clipped clause,
+        closing with an invitation so it never just trails off."""
 
         if len(items) == 1:
-            return f"{time_greeting}. {items[0]}."
+            body = f"{items[0]}."
+        elif len(items) == 2:
+            body = f"{items[0]}, and {items[1]}."
+        else:
+            # Multiple items: join with commas, last with "and"
+            body = ", ".join(items[:-1]) + ", and " + items[-1] + "."
 
-        if len(items) == 2:
-            return f"{time_greeting}. {items[0]}, and {items[1]}."
+        # Items are phrased to read naturally mid-sentence ("you have 2
+        # meetings today"); as the first thing after the time greeting's
+        # full stop it needs a capital to read as a proper new sentence.
+        if body:
+            body = body[0].upper() + body[1:]
 
-        # Multiple items: join with commas, last with "and"
-        items_str = ", ".join(items[:-1]) + ", and " + items[-1]
-        return f"{time_greeting}. {items_str}."
+        closing = self._closing_line(items)
+        return f"{time_greeting}. {body} {closing}"
+
+    def _closing_line(self, items: List[str]) -> str:
+        """Pick a closing invitation that reflects whether there's anything
+        actually waiting on the user, instead of a single static stock line."""
+        joined = " ".join(items).lower()
+        if "awaiting your" in joined or "approval" in joined:
+            return "Shall we start with what's waiting on you?"
+        if "open trade" in joined:
+            return "Markets are live whenever you want a closer look."
+        return "Everything's yours to command whenever you're ready, Sir."
 
 
 class IntelligentStartupCoordinator:
