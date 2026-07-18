@@ -380,10 +380,13 @@ export function NancyOrb({
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
       >
-        {/* soft ambient shadow beneath the sphere -- brighter, reactor-grade glow */}
+        {/* soft ambient shadow beneath the sphere -- blur scales with the
+            orb's own size instead of a fixed 64px, which at small sizes
+            (e.g. the 120px floating dock orb) blew the glow out so far it
+            swallowed the sphere entirely and left only a blur visible. */}
         <div
-          className="absolute rounded-full blur-3xl transition-colors duration-700"
-          style={{ width: '78%', height: '78%', background: alpha(params.color, 0.32) }}
+          className="absolute rounded-full transition-colors duration-700"
+          style={{ width: '78%', height: '78%', background: alpha(params.color, 0.32), filter: `blur(${size * 0.12}px)` }}
           aria-hidden
         />
 
@@ -441,7 +444,10 @@ export function NancyOrb({
           style={{
             width: '58%',
             height: '58%',
-            boxShadow: `0 20px 50px oklch(0 0 0 / 40%), inset 0 1px 0 oklch(1 0 0 / 10%), 0 0 40px ${alpha(params.color, 0.35)}`,
+            // Shadow/glow spread scales with size for the same reason as the
+            // ambient shadow above -- fixed pixel values overwhelmed small
+            // renders like the 120px floating dock orb.
+            boxShadow: `0 ${size * 0.055}px ${size * 0.14}px oklch(0 0 0 / 40%), inset 0 1px 0 oklch(1 0 0 / 10%), 0 0 ${size * 0.11}px ${alpha(params.color, 0.35)}`,
             transition: 'box-shadow 0.6s ease',
           }}
           title={hasQuickNav ? 'Open quick navigation' : undefined}

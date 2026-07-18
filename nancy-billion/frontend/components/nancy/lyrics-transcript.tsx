@@ -46,6 +46,7 @@ export function LyricsTranscript({
   const [tick, setTick] = useState(0)
   const lastTextRef = useRef<string>('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  const activeWordRef = useRef<HTMLSpanElement>(null)
 
   useEffect(() => {
     const t = text.trim()
@@ -67,13 +68,12 @@ export function LyricsTranscript({
     })
   }, [text])
 
-  // Keep the active (newest) line pinned in view -- lyrics scroll up and
-  // out rather than growing the page and forcing a manual scroll to follow
-  // what's currently being said.
+  // Follow the exact word currently being spoken -- not just "scroll to the
+  // bottom", which clipped the start of any line long enough to wrap past
+  // the viewport. This keeps the live word centred regardless of sentence
+  // length, and nothing gets truncated: no line-clamp, no "…".
   useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
+    activeWordRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, [lines, tick, wordIndex])
 
   useEffect(() => {
@@ -127,7 +127,7 @@ export function LyricsTranscript({
 
       <div
         ref={scrollRef}
-        className="flex max-h-[9.5rem] w-full flex-col items-center gap-2.5 overflow-y-hidden scroll-smooth"
+        className="flex max-h-[13rem] w-full flex-col items-center gap-2.5 overflow-y-hidden"
       >
         {lines.map((line, idx) => {
           const isCurrent = line.active
@@ -147,10 +147,10 @@ export function LyricsTranscript({
               key={line.id}
               style={{ opacity }}
               className={cn(
-                'text-balance leading-relaxed tracking-tight transition-all duration-500 line-clamp-2 shrink-0',
+                'text-balance leading-relaxed tracking-tight transition-all duration-500 shrink-0',
                 isCurrent
                   ? 'font-heading text-lg font-medium text-foreground/95 md:text-xl'
-                  : 'font-sans text-[0.72rem] md:text-[0.78rem] text-muted-foreground/70',
+                  : 'line-clamp-1 font-sans text-[0.72rem] md:text-[0.78rem] text-muted-foreground/70',
               )}
             >
               {line.words.map((w, i) => {
@@ -159,6 +159,7 @@ export function LyricsTranscript({
                 return (
                   <span
                     key={`${line.id}-${i}`}
+                    ref={isNow ? activeWordRef : undefined}
                     className={cn(
                       'mx-[0.15em] inline-block transition-all duration-300',
                       active ? 'text-primary' : 'opacity-45',
