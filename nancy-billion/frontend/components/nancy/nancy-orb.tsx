@@ -374,7 +374,6 @@ export function NancyOrb({
               strokeWidth="3.2"
               strokeLinecap="round"
               strokeDasharray={`${innerArcC * 0.46} ${innerArcC}`}
-              style={{ filter: `drop-shadow(0 0 ${size * 0.014}px white) drop-shadow(0 0 ${size * 0.03}px ${alphaHex(profile.color, 0.6)})` }}
             />
           </motion.g>
 
@@ -391,7 +390,6 @@ export function NancyOrb({
               strokeWidth="2.6"
               strokeLinecap="round"
               strokeDasharray={`${outerArcC * (55 / 360)} ${outerArcC}`}
-              style={{ filter: `drop-shadow(0 0 ${size * 0.012}px white) drop-shadow(0 0 ${size * 0.025}px ${alphaHex(profile.color, 0.6)})` }}
             />
           </motion.g>
 
