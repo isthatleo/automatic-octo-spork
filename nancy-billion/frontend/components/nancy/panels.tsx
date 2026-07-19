@@ -842,7 +842,7 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
   const [data, setData] = useState<AgentListResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null)
+  const [selectedAgentKey, setSelectedAgentKey] = useState<string | null>(null)
   const [taskAgent, setTaskAgent] = useState<AgentInfo | null>(null)
   const [filter, setFilter] = useState('')
   const [autoQuery, setAutoQuery] = useState('')
@@ -898,9 +898,15 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
   const visibleAgents = activeCategory ? (grouped.get(activeCategory) ?? []) : filteredAgents
 
   const selectAgent = (agent: AgentInfo) => {
-    setSelectedAgent((prev) => (prev?.key === agent.key ? null : agent))
+    setSelectedAgentKey((prev) => (prev === agent.key ? null : agent.key))
     onAgentSelect?.(agent.key)
   }
+
+  // Look up the live object by key on every render instead of holding a
+  // stale snapshot — so a refresh right after running a task (or the 30s
+  // poll) updates the detail rail's stats instead of freezing them at
+  // whatever they were when the row was clicked.
+  const selectedAgent = selectedAgentKey ? (data?.agents.find((a) => a.key === selectedAgentKey) ?? null) : null
 
   const sortedAgents = useMemo(
     () => [...visibleAgents].sort((a, b) => {
@@ -1007,7 +1013,7 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
                     const Icon = DOMAIN_ICON[agent.domain] ?? Bot
                     const isOnline = agent.status === 'online'
                     const color = colorFor(agent.domain)
-                    const selected = selectedAgent?.key === agent.key
+                    const selected = selectedAgentKey === agent.key
                     return (
                       <tr
                         key={agent.key}
