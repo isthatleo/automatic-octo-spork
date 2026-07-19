@@ -53,8 +53,6 @@ import {
   Scale,
   Server,
   Palette,
-  ChevronDown,
-  ChevronRight,
   X,
   Play,
   ClipboardList,
@@ -742,74 +740,6 @@ function colorFor(domain: string): string {
   return AGENT_CATEGORIES.find((c) => c.domains.includes(domain))?.color ?? 'var(--hud)'
 }
 
-function AgentCard({ agent, selected, onClick }: { agent: AgentInfo; selected: boolean; onClick: () => void }) {
-  const Icon = DOMAIN_ICON[agent.domain] ?? Bot
-  const isOnline = agent.status === 'online'
-  const loadPct = Math.min(100, agent.load)
-  const color = colorFor(agent.domain)
-  return (
-    <li
-      onClick={agent.status !== 'offline' ? onClick : undefined}
-      className={cn(
-        'group relative flex flex-col gap-2.5 overflow-hidden rounded-xl border p-3 transition-all duration-200',
-        agent.status === 'offline'
-          ? 'cursor-default border-border/20 bg-background/10 opacity-45'
-          : 'cursor-pointer hover:-translate-y-0.5',
-        selected ? 'border-primary bg-primary/10' : 'border-border/60 bg-secondary/30 hover:bg-secondary/50',
-      )}
-      style={selected ? undefined : { borderTopColor: isOnline ? color : undefined, borderTopWidth: isOnline ? 2 : undefined }}
-    >
-      {/* live agents get a slow-breathing colour wash anchored top-left,
-          not a spinning border -- reads as "active", not as decoration */}
-      {isOnline && (
-        <div
-          className="pointer-events-none absolute -left-8 -top-8 h-28 w-28 rounded-full opacity-25 blur-2xl animate-hud-breathe"
-          style={{ background: color }}
-          aria-hidden
-        />
-      )}
-
-      <div className="relative flex items-center gap-2.5">
-        <span
-          className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
-          style={{ background: `color-mix(in oklch, ${color} 18%, var(--background))`, boxShadow: isOnline ? `0 0 0 1px color-mix(in oklch, ${color} 40%, transparent)` : undefined }}
-        >
-          <Icon className="h-5 w-5" style={{ color }} />
-          <span
-            className={cn('absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-card', isOnline && 'animate-hud-pulse', STATUS_DOT[agent.status] ?? 'bg-muted-foreground')}
-          />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="truncate font-heading text-[0.78rem] text-foreground">{agent.name}</div>
-          <div className="truncate text-[0.55rem] text-muted-foreground">{agent.domain}</div>
-        </div>
-        <span className={cn('shrink-0 text-[0.5rem]', STATUS_COLOR[agent.status] ?? 'text-muted-foreground')}>{agent.status}</span>
-      </div>
-
-      <div className="relative flex items-center gap-2">
-        <div className="h-1 flex-1 overflow-hidden rounded-full bg-background/60">
-          <div
-            className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${loadPct}%`, background: isOnline ? color : '#555' }}
-          />
-        </div>
-        <span className="shrink-0 text-[0.5rem] text-muted-foreground">{loadPct}%</span>
-      </div>
-
-      {agent.specializations.length > 0 && (
-        <div className="relative flex flex-wrap gap-1">
-          {agent.specializations.slice(0, 3).map((s) => (
-            <span key={s} className="rounded-full bg-secondary/50 px-1.5 py-0.5 text-[0.45rem] text-muted-foreground">{s}</span>
-          ))}
-          {agent.specializations.length > 3 && (
-            <span className="self-center text-[0.45rem] text-muted-foreground">+{agent.specializations.length - 3}</span>
-          )}
-        </div>
-      )}
-    </li>
-  )
-}
-
 function AgentDetailRail({
   agent, fallbackAgents, autoQuery, setAutoQuery, handleAutoRun, autoRunning, autoResult, onRunTask,
 }: {
@@ -824,44 +754,45 @@ function AgentDetailRail({
 }) {
   if (!agent) {
     return (
-      <div className="flex flex-col gap-3">
-        <div className="rounded-xl border border-border bg-card/60 p-4">
-          <h3 className="mb-1 font-heading text-xs text-foreground">Auto-route</h3>
-          <p className="mb-2 text-[0.6rem] text-muted-foreground">Ask anything — Nancy picks the right specialist.</p>
+      <div className="flex flex-col gap-3 font-mono">
+        <div className="border border-border/40 bg-background/40 p-4">
+          <h3 className="mb-1 text-[0.68rem] text-foreground">$ auto-route</h3>
+          <p className="mb-2 text-[0.6rem] text-muted-foreground">Ask anything — Billion picks the right specialist.</p>
           <div className="flex gap-1.5">
             <input
               value={autoQuery}
               onChange={(e) => setAutoQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleAutoRun()}
               placeholder="e.g. analyse BTC volatility…"
-              className="flex-1 rounded border border-border bg-background/60 px-2 py-1.5 text-[0.65rem] text-foreground outline-none focus:border-primary/60"
+              className="flex-1 border border-border/60 bg-background/60 px-2 py-1.5 text-[0.65rem] text-foreground outline-none focus:border-primary/60"
             />
             <button type="button" onClick={handleAutoRun} disabled={autoRunning}
-              className="rounded border border-tertiary bg-tertiary/15 px-2.5 py-1.5 text-tertiary hover:bg-tertiary/25 disabled:opacity-50">
+              className="border border-tertiary/60 bg-tertiary/15 px-2.5 py-1.5 text-tertiary hover:bg-tertiary/25 disabled:opacity-50">
               {autoRunning ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
             </button>
           </div>
           {autoResult && (
-            <p className="mt-2 rounded border border-border bg-background/40 px-2 py-1.5 text-[0.55rem] text-muted-foreground">{autoResult}</p>
+            <p className="mt-2 border border-border/50 bg-background/40 px-2 py-1.5 text-[0.55rem] text-muted-foreground">{autoResult}</p>
           )}
         </div>
-        <div className="rounded-xl border border-border bg-card/60 p-4">
-          <h3 className="mb-2 font-heading text-xs text-foreground">Fleet load</h3>
+        <div className="border border-border/40 bg-background/40 p-4">
+          <h3 className="mb-2 text-[0.68rem] text-foreground">$ fleet-load --chart</h3>
           <AgentLoadChart agents={fallbackAgents} />
         </div>
-        <p className="px-1 text-[0.6rem] text-muted-foreground">Select an agent from the roster for full detail and to run a task.</p>
+        <p className="px-1 text-[0.6rem] text-muted-foreground">// select a row for full detail and to run a task</p>
       </div>
     )
   }
   const Icon = DOMAIN_ICON[agent.domain] ?? Bot
+  const detailColor = colorFor(agent.domain)
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-primary/40 bg-card/70 p-4">
+    <div className="flex flex-col gap-3 border-2 bg-background/50 p-4 font-mono" style={{ borderColor: detailColor }}>
       <div className="flex items-center gap-3">
-        <span className="glow-ring flex h-11 w-11 shrink-0 items-center justify-center rounded-full border-transparent bg-secondary/60">
-          <Icon className="h-5 w-5 text-primary" />
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full" style={{ background: `color-mix(in oklch, ${detailColor} 20%, var(--background))` }}>
+          <Icon className="h-5 w-5" style={{ color: detailColor }} />
         </span>
         <div className="min-w-0">
-          <div className="truncate font-display text-lg text-foreground">{agent.name}</div>
+          <div className="truncate text-sm text-foreground">{agent.name}</div>
           <div className="truncate text-[0.6rem] text-muted-foreground">{agent.domain} · {categoryFor(agent.domain)}</div>
         </div>
       </div>
@@ -869,29 +800,29 @@ function AgentDetailRail({
         {agent.description || `${agent.role || 'Specialist agent'} handling ${agent.domain.replace(/-/g, ' ')} tasks.`}
       </p>
       <div className="grid grid-cols-2 gap-2 text-center">
-        <div className="rounded-lg border border-border/60 bg-secondary/20 py-2">
-          <div className="font-display text-base text-foreground">{agent.total_tasks}</div>
+        <div className="border border-border/50 bg-secondary/20 py-2">
+          <div className="text-base text-foreground">{agent.total_tasks}</div>
           <div className="text-[0.5rem] text-muted-foreground">tasks run</div>
         </div>
-        <div className="rounded-lg border border-border/60 bg-secondary/20 py-2">
-          <div className="font-display text-base text-accent">{(agent.confidence * 100).toFixed(0)}%</div>
+        <div className="border border-border/50 bg-secondary/20 py-2">
+          <div className="text-base text-accent">{(agent.confidence * 100).toFixed(0)}%</div>
           <div className="text-[0.5rem] text-muted-foreground">confidence</div>
         </div>
       </div>
       {(agent.mode && agent.mode !== 'production') || agent.hardware_connected === false ? (
         <div className="flex flex-wrap gap-1">
           {agent.mode && agent.mode !== 'production' && (
-            <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[0.5rem] text-accent">{agent.mode.replace(/_/g, ' ')}</span>
+            <span className="border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[0.5rem] text-accent">{agent.mode.replace(/_/g, ' ')}</span>
           )}
           {agent.hardware_connected === false && (
-            <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[0.5rem] text-accent">no hardware attached</span>
+            <span className="border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[0.5rem] text-accent">no hardware attached</span>
           )}
         </div>
       ) : null}
       {agent.specializations.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {agent.specializations.map((s) => (
-            <span key={s} className="rounded-full bg-secondary/50 px-2 py-0.5 text-[0.5rem] text-muted-foreground">{s}</span>
+            <span key={s} className="border border-border/40 bg-secondary/50 px-2 py-0.5 text-[0.5rem] text-muted-foreground">{s}</span>
           ))}
         </div>
       )}
@@ -899,7 +830,7 @@ function AgentDetailRail({
         type="button"
         onClick={() => onRunTask(agent)}
         disabled={agent.status === 'offline'}
-        className="mt-1 flex items-center justify-center gap-1.5 rounded-lg border border-primary bg-primary/15 py-2 text-xs text-primary transition-colors hover:bg-primary/25 disabled:cursor-not-allowed disabled:opacity-40"
+        className="mt-1 flex items-center justify-center gap-1.5 border border-primary bg-primary/15 py-2 text-xs text-primary transition-colors hover:bg-primary/25 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <Play className="h-3.5 w-3.5" /> Run task
       </button>
@@ -918,7 +849,7 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
   const [autoRunning, setAutoRunning] = useState(false)
   const [autoResult, setAutoResult] = useState<string | null>(null)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [activeCategory, setActiveCategory] = useState<string | null>(null)
 
   const fetchAgents = useCallback(async () => {
     setLoading(true); setError(null)
@@ -964,98 +895,173 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
     return map
   }, [filteredAgents])
 
-  const toggleCategory = (label: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (next.has(label)) next.delete(label); else next.add(label)
-      return next
-    })
-  }
+  const visibleAgents = activeCategory ? (grouped.get(activeCategory) ?? []) : filteredAgents
 
   const selectAgent = (agent: AgentInfo) => {
     setSelectedAgent((prev) => (prev?.key === agent.key ? null : agent))
     onAgentSelect?.(agent.key)
   }
 
+  const sortedAgents = useMemo(
+    () => [...visibleAgents].sort((a, b) => {
+      if (a.status === 'online' && b.status !== 'online') return -1
+      if (b.status === 'online' && a.status !== 'online') return 1
+      return b.load - a.load
+    }),
+    [visibleAgents],
+  )
+
   return (
-    <div className="mx-auto flex max-w-[1680px] flex-col gap-4">
-      {/* slim title strip, not a boxed hero panel -- fleet vitals at a glance */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/60 px-4 py-3">
+    <div className="mx-auto flex max-w-[1680px] flex-col gap-3 font-mono">
+      {/* terminal-style title bar -- sharp corners, a coloured status strip
+          instead of a rounded card, deliberately not the soft-panel idiom
+          used everywhere else in this dashboard */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-primary/40 bg-background/60 px-4 py-2.5">
         <div className="flex items-center gap-3">
-          <span className="font-display text-xl text-foreground">Fleet Console</span>
-          <span className={cn('flex items-center gap-1.5 text-[0.62rem]', error ? 'text-destructive' : 'text-muted-foreground')}>
-            {error ? <WifiOff className="h-3 w-3" /> : <Wifi className="h-3 w-3 text-primary animate-hud-breathe" />}
-            {error ? 'Backend offline' : `${data?.total ?? '…'} agents · updated ${lastRefresh.toLocaleTimeString('en-GB')}`}
+          <span className={cn('h-2 w-2 rounded-full', error ? 'bg-destructive' : 'bg-primary animate-hud-pulse')} aria-hidden />
+          <span className="text-sm tracking-tight text-foreground">fleet@billion:~$ status</span>
+          <span className="text-[0.62rem] text-muted-foreground">
+            {error ? 'connection lost' : `${data?.total ?? '…'} agents · synced ${lastRefresh.toLocaleTimeString('en-GB')}`}
           </span>
         </div>
-        <div className="flex items-center gap-4 text-[0.68rem]">
-          <span><span className="font-display text-base text-primary">{data?.stats.agents_online ?? '…'}</span> <span className="text-muted-foreground">online</span></span>
-          <span><span className="font-display text-base text-foreground">{data?.stats.total_tasks ?? '…'}</span> <span className="text-muted-foreground">tasks</span></span>
-          <span><span className="font-display text-base text-accent">{data ? `${(data.stats.success_rate * 100).toFixed(0)}%` : '…'}</span> <span className="text-muted-foreground">success</span></span>
+        <div className="flex items-center gap-4 text-[0.68rem] text-muted-foreground">
+          <span className="text-primary">{data?.stats.agents_online ?? '…'}</span> online
+          <span className="text-foreground">{data?.stats.total_tasks ?? '…'}</span> tasks
+          <span className="text-accent">{data ? `${(data.stats.success_rate * 100).toFixed(0)}%` : '…'}</span> success
           <button type="button" onClick={fetchAgents} disabled={loading} className="text-muted-foreground hover:text-primary">
             <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
-        {/* LEFT: grouped roster, browsable by category */}
-        <div className="flex flex-col gap-3">
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-            <input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filter by name, domain, or specialisation…"
-              className="w-full rounded-lg border border-border bg-background/60 py-2 pl-8 pr-3 text-[0.68rem] text-foreground outline-none focus:border-primary/60"
-            />
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_340px]">
+        {/* LEFT: a real table -- rows and columns, not cards -- with
+            category filters as inline tabs above it */}
+        <div className="flex flex-col gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative flex-1 min-w-[180px]">
+              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="grep agents…"
+                className="w-full border border-border/60 bg-background/60 py-1.5 pl-8 pr-3 text-[0.68rem] text-foreground outline-none focus:border-primary/60"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveCategory(null)}
+              className={cn(
+                'border px-2 py-1 text-[0.6rem] transition-colors',
+                activeCategory === null ? 'border-primary text-primary' : 'border-border/40 text-muted-foreground hover:border-primary/40',
+              )}
+            >
+              all[{filteredAgents.length}]
+            </button>
+            {AGENT_CATEGORIES.map((cat) => {
+              const items = grouped.get(cat.label) ?? []
+              if (items.length === 0) return null
+              return (
+                <button
+                  key={cat.label}
+                  type="button"
+                  onClick={() => setActiveCategory((c) => (c === cat.label ? null : cat.label))}
+                  className={cn(
+                    'border px-2 py-1 text-[0.6rem] transition-colors',
+                    activeCategory === cat.label ? 'border-primary text-primary' : 'border-border/40 text-muted-foreground hover:border-primary/40',
+                  )}
+                  style={activeCategory === cat.label ? { borderColor: cat.color, color: cat.color } : undefined}
+                >
+                  {cat.label.split(' ')[0].toLowerCase()}[{items.length}]
+                </button>
+              )
+            })}
           </div>
 
           {loading && !data ? (
-            <div className="flex items-center justify-center rounded-xl border border-border bg-card/40 py-10 text-[0.62rem] text-muted-foreground">
-              <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading agents…
+            <div className="flex items-center justify-center border border-border/40 bg-background/40 py-10 text-[0.62rem] text-muted-foreground">
+              <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> loading fleet…
             </div>
           ) : error && !data ? (
-            <div className="rounded-xl border border-border bg-card/40 py-6 text-center text-[0.62rem] text-destructive">
+            <div className="border border-border/40 bg-background/40 py-6 text-center text-[0.62rem] text-destructive">
               {error}<br />
-              <button onClick={fetchAgents} className="mt-2 text-primary underline">Retry</button>
+              <button onClick={fetchAgents} className="mt-2 text-primary underline">retry</button>
             </div>
-          ) : filteredAgents.length === 0 ? (
-            <div className="rounded-xl border border-border bg-card/40 py-6 text-center text-[0.62rem] text-muted-foreground">No agents match filter.</div>
+          ) : sortedAgents.length === 0 ? (
+            <div className="border border-border/40 bg-background/40 py-6 text-center text-[0.62rem] text-muted-foreground">no matches</div>
           ) : (
-            AGENT_CATEGORIES.map((cat) => {
-              const items = grouped.get(cat.label) ?? []
-              if (items.length === 0) return null
-              const isCollapsed = collapsed.has(cat.label)
-              const onlineCount = items.filter((a) => a.status === 'online').length
-              return (
-                <div key={cat.label} className="overflow-hidden rounded-xl border border-border bg-card/40">
-                  <button
-                    type="button"
-                    onClick={() => toggleCategory(cat.label)}
-                    className="flex w-full items-center justify-between gap-2 px-3 py-2.5 hover:bg-secondary/20"
-                  >
-                    <span className="flex items-center gap-2 text-xs font-medium text-foreground">
-                      <cat.icon className="h-3.5 w-3.5" style={{ color: cat.color }} />
-                      {cat.label}
-                      <span className="text-muted-foreground">({onlineCount}/{items.length} online)</span>
-                    </span>
-                    {isCollapsed ? <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
-                  </button>
-                  {!isCollapsed && (
-                    <ul className="grid grid-cols-1 gap-2 border-t border-border/60 p-2 sm:grid-cols-2 xl:grid-cols-3">
-                      {items.map((agent) => (
-                        <AgentCard key={agent.key} agent={agent} selected={selectedAgent?.key === agent.key} onClick={() => selectAgent(agent)} />
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )
-            })
+            <div className="overflow-x-auto border border-border/40 bg-background/40">
+              <table className="w-full min-w-[560px] border-collapse text-[0.68rem]">
+                <thead>
+                  <tr className="border-b border-border/50 text-left text-[0.58rem] text-muted-foreground">
+                    <th className="px-3 py-2 font-normal">status</th>
+                    <th className="px-3 py-2 font-normal">agent</th>
+                    <th className="hidden px-3 py-2 font-normal sm:table-cell">category</th>
+                    <th className="px-3 py-2 font-normal">load</th>
+                    <th className="hidden px-3 py-2 font-normal md:table-cell">tasks</th>
+                    <th className="px-3 py-2 font-normal text-right">action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedAgents.map((agent) => {
+                    const Icon = DOMAIN_ICON[agent.domain] ?? Bot
+                    const isOnline = agent.status === 'online'
+                    const color = colorFor(agent.domain)
+                    const selected = selectedAgent?.key === agent.key
+                    return (
+                      <tr
+                        key={agent.key}
+                        onClick={() => agent.status !== 'offline' && selectAgent(agent)}
+                        className={cn(
+                          'border-b border-border/20 transition-colors last:border-none',
+                          agent.status === 'offline' ? 'opacity-40' : 'cursor-pointer hover:bg-secondary/30',
+                          selected && 'bg-primary/10',
+                        )}
+                      >
+                        <td className="px-3 py-2">
+                          <span
+                            className={cn('inline-flex items-center gap-1 text-[0.58rem]', STATUS_COLOR[agent.status] ?? 'text-muted-foreground')}
+                          >
+                            <span className={cn('h-1.5 w-1.5 rounded-full', isOnline && 'animate-hud-pulse', STATUS_DOT[agent.status] ?? 'bg-muted-foreground')} />
+                            [{agent.status}]
+                          </span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className="flex items-center gap-1.5 text-foreground">
+                            <Icon className="h-3.5 w-3.5 shrink-0" style={{ color }} />
+                            <span className="truncate">{agent.name}</span>
+                          </span>
+                        </td>
+                        <td className="hidden px-3 py-2 text-muted-foreground sm:table-cell">{agent.domain}</td>
+                        <td className="px-3 py-2">
+                          <div className="flex items-center gap-1.5">
+                            <div className="h-1 w-14 overflow-hidden bg-secondary/60">
+                              <div className="h-full" style={{ width: `${Math.min(100, agent.load)}%`, background: isOnline ? color : '#555' }} />
+                            </div>
+                            <span className="text-[0.58rem] text-muted-foreground">{agent.load}%</span>
+                          </div>
+                        </td>
+                        <td className="hidden px-3 py-2 text-muted-foreground md:table-cell">{agent.total_tasks}</td>
+                        <td className="px-3 py-2 text-right">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setTaskAgent(agent) }}
+                            disabled={agent.status === 'offline'}
+                            className="inline-flex items-center gap-1 border border-primary/50 px-2 py-0.5 text-[0.58rem] text-primary transition-colors hover:bg-primary/15 disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            <Play className="h-2.5 w-2.5" /> run
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
 
-        {/* RIGHT: persistent detail rail -- selection updates it in place,
+        {/* RIGHT: persistent detail pane -- selection updates it in place,
             no modal takeover for just looking at an agent. */}
         <div className="lg:sticky lg:top-4 lg:self-start">
           <AgentDetailRail
