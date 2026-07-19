@@ -445,7 +445,7 @@ export default function Page() {
   // corner) -- position persists across reloads via localStorage, clamped
   // to the viewport so it can't be dragged out of reach.
   const [orbPos, setOrbPos] = useState<{ x: number; y: number } | null>(null)
-  const orbBtnRef = useRef<HTMLButtonElement>(null)
+  const orbBtnRef = useRef<HTMLDivElement>(null)
   const orbDragRef = useRef({ startX: 0, startY: 0, origX: 0, origY: 0, dragging: false, moved: false })
 
   useEffect(() => {
@@ -455,7 +455,7 @@ export default function Page() {
     } catch { /* ignore corrupt/unavailable storage */ }
   }, [])
 
-  const onOrbPointerDown = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+  const onOrbPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     const btn = orbBtnRef.current
     if (!btn) return
     const rect = btn.getBoundingClientRect()
@@ -463,7 +463,7 @@ export default function Page() {
     btn.setPointerCapture(e.pointerId)
   }, [])
 
-  const onOrbPointerMove = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+  const onOrbPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     const d = orbDragRef.current
     if (!d.dragging) return
     const dx = e.clientX - d.startX
@@ -566,12 +566,14 @@ export default function Page() {
       {/* Floating orb — visible when a workspace panel is open.
           Click to return to voice-first mode. */}
       {workspaceOpen && (
-        <button
+        <div
           ref={orbBtnRef}
-          type="button"
+          role="button"
+          tabIndex={0}
           onPointerDown={onOrbPointerDown}
           onPointerMove={onOrbPointerMove}
           onPointerUp={onOrbPointerUp}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') closeWorkspace() }}
           title="Drag to move · click to return to voice mode"
           aria-label="Nancy orb — drag to move, click to return to voice mode"
           className={cn(
@@ -581,9 +583,9 @@ export default function Page() {
           style={orbPos ? { left: orbPos.x, top: orbPos.y } : undefined}
         >
           <div className="transition-transform duration-300 group-hover:scale-105 group-active:scale-95">
-            <NancyOrb state={orbState} size={120} audioElement={speakingAudioEl} />
+            <NancyOrb state={orbState} size={300} audioElement={speakingAudioEl} />
           </div>
-        </button>
+        </div>
       )}
 
       {/* Bottom dock: voice-first by default (just a mic toggle + a summon

@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 export type OrbState =
@@ -12,89 +13,78 @@ export type OrbState =
   | 'alert'
 
 /*
-  HUD-emblem identity, built from a reference image the user supplied
-  directly: a ring with a bright sweeping arc, a scattered field of tick
-  marks/particles around it, a soft glow, and the name centred inside --
-  no solid sphere body, the centre stays open/transparent.
+  Aerospace/FUI HUD, built to an exact spec: independent concentric layers
+  (core, breathing inner ring, atmospheric glow, a rotating arc, a counter-
+  rotating dotted orbit, drifting ambient particles, a whole-HUD idle
+  drift), each animated on its own clock so nothing synchronizes -- calm
+  and premium rather than a game HUD.
 
-  Every particle and the sweep arc are driven by the same real, smoothed
-  mic/TTS amplitude signal used throughout this component: the tick field
-  visibly extends and brightens, and the sweep spins faster, exactly when
-  Nancy is actually listening or speaking -- not a looping decoration.
+  Framer Motion orchestrates every layer's continuous idle animation
+  (durations/targets keyed off the current OrbState, so Framer smoothly
+  retargets on a state change). Real mic/TTS amplitude drives a separate,
+  ref-based layer on top -- the listening waveform ring and the speaking
+  ripple bursts -- because that has to track actual sound in real time,
+  not a fixed animation curve.
 */
 
-// "Graphite & Ember" palette, matching globals.css's tokens.
-const HUD = 'rgba(241, 129, 84, 1)'       // ember (--hud / --primary)
-const HUD_SOFT = 'rgba(241, 129, 84, 0.5)'
-const GOLD = 'rgba(218, 178, 73, 1)'      // mustard gold (--gold)
-const PLUM = 'rgba(151, 140, 173, 1)'     // muted plum (--tertiary) -- "thinking"
-const ROSE = 'rgba(225, 113, 116, 1)'     // warm rose (--magenta)
-const ALERT = 'rgba(229, 76, 74, 1)'      // --destructive
+const BLUE = '#4B8DFF'
+const GOLD = '#DAB249'
+const PLUM = '#978CAD'
+const ALERT_C = '#E54C4A'
 
-const PARAMS: Record<OrbState, { speed: number; color: string; secondary: string }> = {
-  idle:      { speed: 0.15, color: HUD, secondary: PLUM },
-  listening: { speed: 0.4,  color: HUD, secondary: HUD_SOFT },
-  thinking:  { speed: 0.95, color: PLUM, secondary: ROSE },
-  speaking:  { speed: 0.5,  color: HUD, secondary: ROSE },
-  executing: { speed: 0.75, color: GOLD, secondary: HUD },
-  alert:     { speed: 0.6,  color: ALERT, secondary: GOLD },
+function alphaHex(hex: string, a: number): string {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return `rgba(${r}, ${g}, ${b}, ${a})`
 }
 
-const STATE_LABEL: Record<OrbState, string> = {
-  idle: 'Standing by',
-  listening: 'Listening',
-  thinking: 'Thinking',
-  speaking: 'Speaking',
-  executing: 'Working',
-  alert: 'Degraded',
+interface StateProfile {
+  color: string
+  label: string
+  arcDuration: number
+  dotDuration: number
+  glowRange: [number, number]
+  ringPulseMs: number | null
 }
 
-function alpha(color: string, a: number): string {
-  return color.replace(/[\d.]+\)$/, `${a})`)
+const PROFILES: Record<OrbState, StateProfile> = {
+  idle:      { color: BLUE,    label: 'Standing by', arcDuration: 11, dotDuration: 48, glowRange: [0.4, 0.75], ringPulseMs: null },
+  listening: { color: BLUE,    label: 'Listening',   arcDuration: 9,  dotDuration: 42, glowRange: [0.55, 0.9], ringPulseMs: null },
+  thinking:  { color: PLUM,    label: 'Thinking',    arcDuration: 6,  dotDuration: 26, glowRange: [0.5, 0.88], ringPulseMs: 700 },
+  speaking:  { color: BLUE,    label: 'Speaking',    arcDuration: 7,  dotDuration: 36, glowRange: [0.55, 0.95], ringPulseMs: null },
+  executing: { color: GOLD,    label: 'Working',     arcDuration: 6,  dotDuration: 26, glowRange: [0.5, 0.88], ringPulseMs: 700 },
+  alert:     { color: ALERT_C, label: 'Degraded',    arcDuration: 10, dotDuration: 50, glowRange: [0.5, 0.8], ringPulseMs: null },
 }
 
-interface Particle {
-  angle: number
-  radius: number
-  phase: number
-  long: boolean
-}
+interface AmbientParticle { x: number; y: number; driftX: number; driftY: number; duration: number; delay: number; size: number }
 
-/** Deterministic, evenly-scattered particle field (golden-angle spacing so
- * points fill the ring without an obvious repeating lattice, unlike an even
- * division which would look like a plain dial). Generated once per orb
- * instance, not re-randomized every frame. */
-function buildParticles(count: number): Particle[] {
-  const GOLDEN = 137.50776 * (Math.PI / 180)
+/** Deterministic scatter (no Math.random() per frame/render -- keeps
+ * server/client render identical and the field stable across re-mounts). */
+function buildAmbientParticles(count: number): AmbientParticle[] {
   return Array.from({ length: count }, (_, i) => {
-    const angle = (i * GOLDEN) % (Math.PI * 2)
-    // Deterministic pseudo-random 0..1 from i, no Math.random() (keeps
-    // server/client render identical, and the scatter stable across re-mounts).
-    const jitter = ((i * 9301 + 49297) % 233280) / 233280
+    const s1 = ((i * 9301 + 49297) % 233280) / 233280
+    const s2 = ((i * 4933 + 12345) % 99991) / 99991
+    const s3 = ((i * 7919 + 7) % 65535) / 65535
+    const angle = s1 * Math.PI * 2
+    const radius = 40 + s2 * 22
     return {
-      angle,
-      radius: 37 + jitter * 13,
-      phase: (i * 2.399963) % (Math.PI * 2),
-      long: i % 6 === 0,
+      x: 50 + Math.cos(angle) * radius,
+      y: 50 + Math.sin(angle) * radius,
+      driftX: (s2 - 0.5) * 12,
+      driftY: (s3 - 0.5) * 12,
+      duration: 3 + s1 * 4,
+      delay: s3 * 3,
+      size: s2 > 0.72 ? 1.8 : 1,
     }
   })
 }
 
-/** Builds the tick-mark field as one path -- every particle's reach pulses
- * on its own phase, weighted by real amplitude, so the ring reads as a
- * live radial spectrum rather than a static decoration. */
-function particlePath(cx: number, cy: number, t: number, amp: number, particles: Particle[]): string {
-  let d = ''
-  for (const p of particles) {
-    const pulse = 0.5 + 0.5 * Math.sin(t * 2.4 + p.phase)
-    const len = (p.long ? 3.4 : 1.5) + pulse * (0.8 + amp * 3.2)
-    const x1 = cx + Math.cos(p.angle) * p.radius
-    const y1 = cy + Math.sin(p.angle) * p.radius
-    const x2 = cx + Math.cos(p.angle) * (p.radius + len)
-    const y2 = cy + Math.sin(p.angle) * (p.radius + len)
-    d += `M${x1.toFixed(2)},${y1.toFixed(2)}L${x2.toFixed(2)},${y2.toFixed(2)}`
-  }
-  return d
+function buildDots(count: number, radius: number) {
+  return Array.from({ length: count }, (_, i) => {
+    const a = (i / count) * Math.PI * 2
+    return { x: 50 + Math.cos(a) * radius, y: 50 + Math.sin(a) * radius }
+  })
 }
 
 /** Reads live microphone amplitude (0..1). Falls back to 0 silently. */
@@ -172,6 +162,14 @@ function useElementAudioLevel(el: HTMLAudioElement | null) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const AC = window.AudioContext || (window as any).webkitAudioContext
       ctx = new AC()
+      // A freshly-created AudioContext can start "suspended" since this
+      // effect runs a tick after the triggering user gesture, not
+      // synchronously inside it. If it stays suspended, createMediaElementSource
+      // below silently reroutes the audio element's output into a graph that
+      // never renders -- .play() succeeds, the transcript updates, but
+      // nothing is actually heard. Explicitly resume; harmless no-op if
+      // already running.
+      ctx.resume().catch(() => {})
       const source = ctx.createMediaElementSource(el)
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 256
@@ -213,7 +211,7 @@ export interface OrbQuickNavItem {
 
 export function NancyOrb({
   state = 'idle',
-  name = 'Nancy',
+  name = 'BILLION',
   size = 360,
   audioElement = null,
   quickNav,
@@ -223,46 +221,78 @@ export function NancyOrb({
   name?: string
   size?: number
   audioElement?: HTMLAudioElement | null
-  /** When provided, clicking the ring fans these out as a quick-nav ring
+  /** When provided, clicking the core fans these out as a quick-nav ring
    * around it. Omit to keep an orb purely a status indicator (e.g. the
    * floating workspace-dock orb). */
   quickNav?: OrbQuickNavItem[]
   onQuickNav?: (key: string) => void
 }) {
-  const particles = useMemo(() => buildParticles(64), [])
-  const particlePathRef = useRef<SVGPathElement>(null)
-  const sweepRef = useRef<SVGCircleElement>(null)
-  const sweep2Ref = useRef<SVGCircleElement>(null)
-  const trackRef = useRef<SVGCircleElement>(null)
-  const stateRef = useRef<OrbState>(state)
-  stateRef.current = state
+  const particles = useMemo(() => buildAmbientParticles(20), [])
+  const dots = useMemo(() => buildDots(80, 49), [])
   const micLevel = useMicLevel(state === 'listening')
   const speakingLevel = useElementAudioLevel(audioElement)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [hovered, setHovered] = useState(false)
-  const gradId = useId().replace(/:/g, '')
-  const sphereRef = useRef<HTMLButtonElement>(null)
-  const outerRef = useRef<HTMLDivElement>(null)
   const [ripples, setRipples] = useState<{ id: number; x: number; y: number }[]>([])
   const rippleSeq = useRef(0)
+  const [speakRipples, setSpeakRipples] = useState<{ id: number }[]>([])
+  const speakRippleSeq = useRef(0)
+  const waveformRef = useRef<SVGCircleElement>(null)
+  const ampGlowRef = useRef<HTMLDivElement>(null)
+  const coreRef = useRef<HTMLButtonElement>(null)
+  const pulseRef = useRef<HTMLDivElement>(null)
 
-  // Tilt-toward-cursor -- direct DOM writes (no state) so it stays smooth
-  // at 60fps without fighting the rAF loop's own style writes.
-  const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    const el = outerRef.current
-    const sphere = sphereRef.current
-    if (!el || !sphere) return
-    const rect = el.getBoundingClientRect()
-    const px = (e.clientX - rect.left) / rect.width - 0.5
-    const py = (e.clientY - rect.top) / rect.height - 0.5
-    sphere.style.transform = `perspective(700px) rotateX(${(-py * 10).toFixed(2)}deg) rotateY(${(px * 10).toFixed(2)}deg) scale(${hovered ? 1.03 : 1})`
-  }
-  const onMouseLeave = () => {
-    setHovered(false)
-    const sphere = sphereRef.current
-    if (sphere) sphere.style.transform = 'perspective(700px) rotateX(0deg) rotateY(0deg) scale(1)'
-  }
-  const onSphereClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+  const profile = PROFILES[state]
+
+  // Real haptic feedback (not just visual) on the moment Nancy actually
+  // starts listening or speaking -- navigator.vibrate is a real browser
+  // API, silently a no-op on desktop/unsupported browsers rather than
+  // throwing, so this is safe everywhere.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !navigator.vibrate) return
+    if (state === 'listening') navigator.vibrate(30)
+    else if (state === 'speaking') navigator.vibrate([20, 40, 20])
+  }, [state])
+
+  // Speaking: spawn a thin ripple ring outward every ~450ms while actually
+  // speaking, real amplitude gates whether one fires -- a silent gap in
+  // the audio doesn't spawn empty ripples.
+  useEffect(() => {
+    if (state !== 'speaking') return
+    const iv = setInterval(() => {
+      if (speakingLevel.current < 0.04) return
+      const id = speakRippleSeq.current++
+      setSpeakRipples((r) => [...r.slice(-3), { id }])
+    }, 450)
+    return () => clearInterval(iv)
+  }, [state, speakingLevel])
+
+  // Real-time amplitude layer -- the listening waveform ring, the
+  // amplitude-synced glow boost, and a physical-feeling pulse/scale on the
+  // whole HUD, updated every frame directly via refs (Framer Motion's
+  // declarative `animate` targets aren't a good fit for continuous
+  // real-audio data).
+  useEffect(() => {
+    let raf = 0
+    const draw = () => {
+      const live = state === 'listening' ? micLevel.current : state === 'speaking' ? speakingLevel.current : 0
+      if (pulseRef.current) {
+        pulseRef.current.style.transform = `scale(${1 + live * 0.045})`
+      }
+      if (waveformRef.current) {
+        const r = 32 + live * 7
+        waveformRef.current.setAttribute('r', String(r))
+        waveformRef.current.setAttribute('opacity', String(live * 0.55))
+      }
+      if (ampGlowRef.current) {
+        ampGlowRef.current.style.opacity = String(live * 0.5)
+      }
+      raf = requestAnimationFrame(draw)
+    }
+    draw()
+    return () => cancelAnimationFrame(raf)
+  }, [state, micLevel, speakingLevel])
+
+  const onCoreClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
     const id = rippleSeq.current++
     setRipples((r) => [...r, { id, x: e.clientX - rect.left, y: e.clientY - rect.top }])
@@ -270,97 +300,152 @@ export function NancyOrb({
     if (quickNav && quickNav.length > 0) setMenuOpen((v) => !v)
   }
 
-  useEffect(() => {
-    const reduce = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    let raf = 0
-    let t = 0
-    let ampSmoothed = 0
-    let frame = 0
-
-    const draw = () => {
-      const p = PARAMS[stateRef.current]
-      const live =
-        stateRef.current === 'listening' ? micLevel.current
-        : stateRef.current === 'speaking' ? speakingLevel.current
-        : 0
-      ampSmoothed += (live - ampSmoothed) * 0.12
-
-      frame++
-
-      // Scattered tick field -- every particle pulses on its own phase,
-      // real amplitude widens the whole field's reach and brightness.
-      if (particlePathRef.current && frame % 2 === 0) {
-        particlePathRef.current.setAttribute('d', particlePath(50, 50, t, ampSmoothed, particles))
-        particlePathRef.current.setAttribute('opacity', String(0.55 + ampSmoothed * 0.4))
-      }
-
-      // Bright sweep arc -- the loading-ring read from the reference,
-      // spinning faster and glowing harder with real amplitude/state speed.
-      if (sweepRef.current) {
-        sweepRef.current.style.transform = `rotate(${(t * 70 * (0.6 + p.speed)) % 360}deg)`
-      }
-      if (sweep2Ref.current) {
-        sweep2Ref.current.style.transform = `rotate(${(-t * 40 * (0.6 + p.speed) + 180) % 360}deg)`
-        sweep2Ref.current.setAttribute('opacity', String(0.3 + ampSmoothed * 0.4))
-      }
-      if (trackRef.current) {
-        trackRef.current.setAttribute('opacity', String(0.18 + ampSmoothed * 0.12))
-      }
-
-      if (!reduce) t += 0.014 * (0.5 + p.speed)
-      raf = requestAnimationFrame(draw)
-    }
-    draw()
-
-    const onVis = () => {
-      if (document.hidden) cancelAnimationFrame(raf)
-      else raf = requestAnimationFrame(draw)
-    }
-    document.addEventListener('visibilitychange', onVis)
-    return () => {
-      cancelAnimationFrame(raf)
-      document.removeEventListener('visibilitychange', onVis)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [particles])
-
-  const params = PARAMS[state]
   const hasQuickNav = !!quickNav && quickNav.length > 0
-  const circumference = 2 * Math.PI * 34
+  const innerArcC = 2 * Math.PI * 38
+  const outerArcC = 2 * Math.PI * 44
 
   return (
     <div className="flex flex-col items-center gap-4">
-      <div
-        ref={outerRef}
+      {/* layer 7: idle drift -- the whole HUD wanders within +-2px, barely
+          perceptible, so nothing on screen ever sits perfectly still. */}
+      <motion.div
         className="relative flex items-center justify-center"
         style={{ width: size, height: size }}
         role="img"
-        aria-label={`${name} — ${STATE_LABEL[state]}`}
-        onMouseEnter={() => setHovered(true)}
-        onMouseMove={onMouseMove}
-        onMouseLeave={onMouseLeave}
+        aria-label={`${name} — ${profile.label}`}
+        animate={{ x: [0, 2, -2, 0], y: [0, -1.5, 1.5, 0] }}
+        transition={{ duration: 10, repeat: Infinity, ease: 'easeInOut' }}
       >
-        {/* soft ambient glow -- blur scales with the orb's own size instead
-            of a fixed px value, which at small sizes (e.g. the 120px
-            floating dock orb) blew the glow out so far it swallowed
-            everything else. */}
+      {/* real-time physical pulse -- the whole assembly scales fractionally
+          with real amplitude while listening/speaking, on top of the
+          haptic navigator.vibrate() burst fired on state entry above. */}
+      <div ref={pulseRef} className="relative flex h-full w-full items-center justify-center transition-transform duration-100 ease-out">
+        {/* layer 3: atmospheric glow -- idle ambient pulse (Framer) plus a
+            real-amplitude boost layered on top (ref-driven). */}
+        <motion.div
+          className="absolute rounded-full"
+          style={{ width: '92%', height: '92%', background: `radial-gradient(circle, ${alphaHex(profile.color, 0.9)} 0%, transparent 70%)`, filter: `blur(${size * 0.11}px)` }}
+          animate={{ opacity: profile.glowRange, scale: [1, 1.1, 1] }}
+          transition={{ duration: 5, repeat: Infinity, ease: 'easeInOut' }}
+          aria-hidden
+        />
         <div
-          className="absolute rounded-full transition-colors duration-700"
-          style={{ width: '80%', height: '80%', background: alpha(params.color, 0.22), filter: `blur(${size * 0.13}px)` }}
+          ref={ampGlowRef}
+          className="pointer-events-none absolute rounded-full transition-colors duration-500"
+          style={{ width: '92%', height: '92%', background: `radial-gradient(circle, ${alphaHex(profile.color, 1)} 0%, transparent 65%)`, filter: `blur(${size * 0.11}px)`, opacity: 0 }}
           aria-hidden
         />
 
-        {/* the emblem itself -- click opens quick-nav when provided, tilts
-            toward the cursor on hover, and ripples on every click. No
-            solid sphere body: the centre stays open, matching the
-            reference -- a ring, a scattered tick field, and the name. */}
+        {/* ambient particles -- layer 6 */}
+        {particles.map((p, i) => (
+          <motion.div
+            key={i}
+            className="pointer-events-none absolute rounded-full bg-white"
+            style={{ left: `${p.x}%`, top: `${p.y}%`, width: p.size, height: p.size }}
+            animate={{ x: [0, p.driftX, 0], y: [0, p.driftY, 0], opacity: [0.2, 1, 0.2] }}
+            transition={{ duration: p.duration, repeat: Infinity, ease: 'easeInOut', delay: p.delay }}
+            aria-hidden
+          />
+        ))}
+
+        <svg viewBox="0 0 100 100" className="absolute inset-0 overflow-visible">
+          {/* layer 5: outer dotted orbit, counter-rotating */}
+          <motion.g
+            style={{ transformOrigin: '50px 50px' }}
+            animate={{ rotate: -360 }}
+            transition={{ duration: profile.dotDuration, repeat: Infinity, ease: 'linear' }}
+          >
+            {dots.map((d, i) => (
+              <circle key={i} cx={d.x} cy={d.y} r={0.55} fill="white" fillOpacity={0.35} />
+            ))}
+          </motion.g>
+
+          {/* longer, near-semi-circle arc -- innermost of the two, white,
+              counter-rotating */}
+          <motion.g
+            style={{ transformOrigin: '50px 50px' }}
+            animate={{ rotate: -360 }}
+            transition={{ duration: profile.arcDuration * 1.6, repeat: Infinity, ease: 'linear' }}
+          >
+            <circle
+              cx="50" cy="50" r="38"
+              fill="none"
+              stroke="white"
+              strokeWidth="3.2"
+              strokeLinecap="round"
+              strokeDasharray={`${innerArcC * 0.46} ${innerArcC}`}
+              style={{ filter: `drop-shadow(0 0 ${size * 0.014}px white) drop-shadow(0 0 ${size * 0.03}px ${alphaHex(profile.color, 0.6)})` }}
+            />
+          </motion.g>
+
+          {/* layer 4: shorter arc -- outside the semi-circle, white, clockwise */}
+          <motion.g
+            style={{ transformOrigin: '50px 50px' }}
+            animate={{ rotate: 360 }}
+            transition={{ duration: profile.arcDuration, repeat: Infinity, ease: 'linear' }}
+          >
+            <circle
+              cx="50" cy="50" r="44"
+              fill="none"
+              stroke="white"
+              strokeWidth="2.6"
+              strokeLinecap="round"
+              strokeDasharray={`${outerArcC * (55 / 360)} ${outerArcC}`}
+              style={{ filter: `drop-shadow(0 0 ${size * 0.012}px white) drop-shadow(0 0 ${size * 0.025}px ${alphaHex(profile.color, 0.6)})` }}
+            />
+          </motion.g>
+
+          {/* layer 2: inner ring, breathing (or a fast 700ms pulse while
+              processing) */}
+          <motion.circle
+            cx="50" cy="50" r="32"
+            fill="none"
+            stroke="white"
+            strokeWidth="0.85"
+            style={{ transformOrigin: '50px 50px', filter: `drop-shadow(0 0 ${size * 0.01}px ${alphaHex(profile.color, 0.8)})` }}
+            animate={{
+              scale: profile.ringPulseMs ? [1, 1.06, 1] : [1, 1.03, 1],
+              opacity: profile.ringPulseMs ? [0.85, 1, 0.85] : [0.9, 1, 0.9],
+            }}
+            transition={{ duration: (profile.ringPulseMs ?? 6000) / 1000, repeat: Infinity, ease: 'easeInOut' }}
+          />
+
+          {/* real-time: listening waveform ring, tracks actual mic level */}
+          <circle ref={waveformRef} cx="50" cy="50" r="32" fill="none" stroke={profile.color} strokeWidth="0.6" opacity={0} />
+
+          {/* real-time: speaking ripple bursts, one per detected utterance beat */}
+          <AnimatePresence>
+            {speakRipples.map((r) => (
+              <motion.circle
+                key={r.id}
+                cx="50" cy="50"
+                fill="none"
+                stroke={profile.color}
+                strokeWidth="0.5"
+                initial={{ r: 30, opacity: 0.55 }}
+                animate={{ r: 50, opacity: 0 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 1.2, ease: 'easeOut' }}
+                onAnimationComplete={() => setSpeakRipples((prev) => prev.filter((x) => x.id !== r.id))}
+              />
+            ))}
+          </AnimatePresence>
+        </svg>
+
+        {/* layer 1: core -- static dark disk, radial gradient, centred label */}
         <button
-          ref={sphereRef}
+          ref={coreRef}
           type="button"
-          onClick={onSphereClick}
-          className="relative flex cursor-pointer items-center justify-center transition-transform duration-300 ease-out"
-          style={{ width: '100%', height: '100%' }}
-          title={hasQuickNav ? 'Open quick navigation' : 'Nancy'}
+          onClick={onCoreClick}
+          className="relative flex cursor-pointer items-center justify-center overflow-hidden rounded-full"
+          style={{
+            width: '48%',
+            height: '48%',
+            background: `radial-gradient(circle at 35% 30%, ${alphaHex(profile.color, 0.85)} 0%, ${alphaHex(profile.color, 0.22)} 55%, #05070d 100%)`,
+            boxShadow: `0 ${size * 0.05}px ${size * 0.12}px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08)`,
+            transition: 'background 0.6s ease',
+          }}
+          title={hasQuickNav ? 'Open quick navigation' : name}
         >
           {ripples.map((r) => (
             <span
@@ -368,67 +453,18 @@ export function NancyOrb({
               className="pointer-events-none absolute rounded-full"
               style={{
                 left: r.x, top: r.y, width: 4, height: 4,
-                background: 'oklch(0.98 0.02 90 / 60%)',
+                background: 'rgba(255,255,255,0.6)',
                 transform: 'translate(-50%, -50%)',
                 animation: 'hud-ripple 0.65s ease-out forwards',
               }}
             />
           ))}
-
-          <svg viewBox="0 0 100 100" className="absolute inset-0 overflow-visible">
-            {/* scattered particle field -- real audio-reactive tick marks */}
-            <path
-              ref={particlePathRef}
-              fill="none"
-              stroke={params.color}
-              strokeWidth="0.6"
-              strokeLinecap="round"
-              style={{ transition: 'stroke 0.6s ease', filter: `drop-shadow(0 0 1.5px ${alpha(params.color, 0.6)})` }}
-            />
-
-            {/* dim full track ring */}
-            <circle
-              ref={trackRef}
-              cx="50" cy="50" r="34"
-              fill="none"
-              stroke={params.secondary}
-              strokeWidth="0.7"
-              style={{ transition: 'stroke 0.6s ease' }}
-            />
-
-            {/* bright sweep arcs -- the "loading ring" read, two counter-
-                rotating segments for depth */}
-            <circle
-              ref={sweepRef}
-              cx="50" cy="50" r="34"
-              fill="none"
-              stroke={params.color}
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeDasharray={`${circumference * 0.22} ${circumference}`}
-              style={{ transformOrigin: '50px 50px', transition: 'stroke 0.6s ease', filter: `drop-shadow(0 0 3px ${params.color})` }}
-            />
-            <circle
-              ref={sweep2Ref}
-              cx="50" cy="50" r="34"
-              fill="none"
-              stroke={params.secondary}
-              strokeWidth="1"
-              strokeLinecap="round"
-              strokeDasharray={`${circumference * 0.12} ${circumference}`}
-              style={{ transformOrigin: '50px 50px', transition: 'stroke 0.6s ease' }}
-            />
-          </svg>
-
-          {/* name badge -- centred, the ring's centre stays open behind it */}
-          <div className="relative flex flex-col items-center">
-            <span
-              className="font-sans text-[0.85em] font-semibold tracking-[0.18em] text-foreground transition-colors duration-500"
-              style={{ fontSize: size * 0.09, textShadow: `0 0 ${size * 0.04}px ${alpha(params.color, 0.55)}` }}
-            >
-              {name.toUpperCase()}
-            </span>
-          </div>
+          <span
+            className="relative px-2 text-center"
+            style={{ fontWeight: 300, letterSpacing: '0.09em', fontSize: size * 0.06, color: 'white', whiteSpace: 'nowrap' }}
+          >
+            {name}
+          </span>
         </button>
 
         {/* quick-nav ring */}
@@ -471,15 +507,16 @@ export function NancyOrb({
           </div>
         )}
       </div>
+      </motion.div>
 
-      {/* caption below the ring */}
+      {/* caption below the core */}
       <div className="text-center">
         <div
           key={state}
           className="animate-[hud-fade-in_0.4s_ease] text-[0.7rem] transition-colors duration-500"
-          style={{ color: state === 'idle' ? 'var(--muted-foreground)' : params.color }}
+          style={{ color: state === 'idle' ? 'var(--muted-foreground)' : profile.color }}
         >
-          {STATE_LABEL[state]}
+          {profile.label}
         </div>
       </div>
     </div>

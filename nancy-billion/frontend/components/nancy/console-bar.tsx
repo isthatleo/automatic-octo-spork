@@ -30,7 +30,7 @@ export function ConsoleBar({
   }, [logs])
 
   return (
-    <div className="hud-panel flex flex-col gap-1.5 rounded-xl p-2">
+    <div className="hud-panel mx-auto flex w-full max-w-md flex-col gap-1.5 rounded-xl p-2.5 shadow-lg">
       <div className="flex items-center justify-between">
         <h2 className="text-[0.65rem] font-medium text-foreground">Console</h2>
         <span
