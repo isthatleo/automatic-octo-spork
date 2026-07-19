@@ -422,3 +422,61 @@ export function useForexRecommendation(pair: string) {
   return { data, loading, error }
 }
 
+/** Generic real-endpoint poller -- avoids re-writing the same fetch/loading/
+ * error/interval boilerplate for every simple status-style endpoint. */
+function useSimplePoll<T>(path: string, intervalMs: number) {
+  const [data, setData] = useState<T | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const res = await fetch(path, { cache: 'no-store' })
+        if (!res.ok) throw new Error(`Failed to fetch ${path}`)
+        const json = await res.json()
+        if (!cancelled) {
+          if (json.success === false) throw new Error(json.error || 'Request failed')
+          setData(json)
+          setError(null)
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Unknown error')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    load()
+    const t = setInterval(load, intervalMs)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [path, intervalMs])
+
+  return { data, loading, error }
+}
+
+export interface CronJob {
+  name: string
+  schedule: string
+  next_run: string
+  enabled: boolean
+  description: string
+}
+// Real scheduled-job info (see backend's _daily_briefing_loop / /cron/status).
+export function useCronStatus() {
+  return useSimplePoll<{ success: boolean; jobs: CronJob[] }>('/api/cron/status', 60000)
+}
+
+// Real non-secret backend configuration (see /config/public).
+export function useConfigPublic() {
+  return useSimplePoll<{ success: boolean; config: Record<string, string | number | boolean> }>('/api/config/public', 60000)
+}
+
+// Real Telegram channel connectivity (see telegram_bot.py / /telegram/status).
+export function useTelegramStatus() {
+  return useSimplePoll<{ success: boolean; available: boolean; error: string | null; polling?: boolean }>('/api/telegram/status', 20000)
+}
+

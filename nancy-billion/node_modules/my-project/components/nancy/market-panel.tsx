@@ -64,7 +64,7 @@ export function MarketPanel({
             onClick={handleAdd}
             className="flex h-8 w-8 items-center justify-center rounded border border-border bg-secondary/30 text-muted-foreground transition-colors hover:border-primary/60"
           >
-            <span className="text-[0.5rem] uppercase tracking-widest">+</span>
+            <span className="text-[0.5rem]">+</span>
           </button>
         </div>
 
