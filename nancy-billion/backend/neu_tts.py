@@ -145,9 +145,25 @@ class NeuTTSBackend(TTSBackend):
         # actual generation so two concurrent requests (e.g. a chat reply over
         # the WS handler and a nav-confirmation via POST /tts/synthesize)
         # can't both drive it at once.
-        with self._model_lock:
+        #
+        # Timed acquire, not a plain `with` -- asyncio.wait_for() in
+        # synthesize() below only stops *awaiting* this call after
+        # NEUTTS_TIMEOUT_S; the executor thread running this function keeps
+        # running underneath it regardless (Python threads aren't
+        # cancellable). If that orphaned thread is mid-generation and still
+        # holding a plain lock, every request after it would queue forever
+        # on the same lock -- confirmed live: one slow/aborted call left
+        # every subsequent request hanging indefinitely even though each
+        # had its own timeout. A bounded acquire means a request that can't
+        # get the lock in time fails fast into the Pyttsx3 fallback instead
+        # of joining a queue with no end.
+        if not self._model_lock.acquire(timeout=NEUTTS_TIMEOUT_S):
+            raise RuntimeError("NeuTTS busy with a prior request past the timeout window")
+        try:
             chunks = self._tts.speak(text=text, ref_text=ref_text, ref_audio_path=ref_path)
             audio = np.concatenate(list(chunks))
+        finally:
+            self._model_lock.release()
         return _encode_wav(audio, NEUTTS_SAMPLE_RATE)
 
     async def synthesize(self, text: str) -> bytes:

@@ -167,6 +167,19 @@ class VoiceWakeWord(WakeWordDetector):
         if self.model is None:
             return ""
 
+        # Cheap energy gate before the expensive Whisper pass -- without
+        # this, the loop below ran a full transcription every interval
+        # regardless of whether there was any sound at all, which on a
+        # CPU-only machine meant continuous background inference competing
+        # for the same cores as on-demand TTS synthesis and command
+        # transcription -- the real cause of both blowing well past their
+        # own timeouts (confirmed live: this loop's log spam correlated
+        # exactly with TTS/chat replies taking 30s-2min instead of single
+        # digits). Silence now costs a numpy RMS call, not a model pass.
+        rms = float(np.sqrt(np.mean(np.square(self.audio_buffer))))
+        if rms < float(os.getenv("VOICE_WAKEWORD_RMS_GATE", "0.01")):
+            return ""
+
         # Faster-whisper expects float32 in [-1,1]
         segments, _info = self.model.transcribe(
             self.audio_buffer,

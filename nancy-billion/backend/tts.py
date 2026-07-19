@@ -1,10 +1,20 @@
 import logging
 import os
+import sys
 import tempfile
 import asyncio
+import threading
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+
+if sys.platform == "win32":
+    import pythoncom
+else:
+    pythoncom = None
+
+PYTTSX3_TIMEOUT_S = float(os.getenv("PYTTSX3_TIMEOUT_S", "12"))
 
 
 class TTSBackend(ABC):
@@ -20,10 +30,43 @@ class TTSBackend(ABC):
 
 
 class Pyttsx3TTS(TTSBackend):
+    """Windows SAPI via pyttsx3 -- last-resort fallback when NeuTTS is
+    unreachable or times out.
+
+    pyttsx3's SAPI5 driver on Windows is COM-based and not safe to drive
+    from a thread other than the one that created the engine (a documented
+    cause of runAndWait() hanging indefinitely). The engine used to be
+    created in __init__ (the main/event-loop thread) while every actual
+    call ran on asyncio's default executor (a *different* worker thread
+    each time) -- confirmed live as the real second cause of TTS requests
+    hanging for 20s+ even after NeuTTS's own timeout correctly fired and
+    fell back to this class. Fixed by pinning all pyttsx3 work to one
+    dedicated worker thread and creating the engine lazily on that same
+    thread, plus a hard timeout so a hang degrades to an error instead of
+    blocking the request forever.
+    """
+
     def __init__(self):
         self.engine = None
-        self._init_engine()
-        logger.info("Initialized Pyttsx3 TTS")
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pyttsx3")
+        self._com_ready = threading.local()
+        logger.info("Initialized Pyttsx3 TTS (lazy engine, dedicated thread)")
+
+    def _ensure_engine(self):
+        # SAPI5 is COM-based; a worker thread spun up by a plain
+        # ThreadPoolExecutor never gets CoInitialize() called on it the way
+        # the main thread implicitly does, so every SAPI call from here
+        # would silently hang waiting on COM machinery that was never set
+        # up -- confirmed live: pyttsx3 synthesized in ~0.2s in a standalone
+        # script (main thread) but hung past a 12s timeout every single
+        # time when driven from this executor's thread. One CoInitialize()
+        # per thread lifetime (this pool has exactly one worker) fixes it;
+        # repeat calls on the same thread are a documented harmless no-op.
+        if pythoncom is not None and not getattr(self._com_ready, "done", False):
+            pythoncom.CoInitialize()
+            self._com_ready.done = True
+        if self.engine is None:
+            self._init_engine()
 
     def _init_engine(self):
         import pyttsx3
@@ -99,6 +142,7 @@ class Pyttsx3TTS(TTSBackend):
         loop = asyncio.get_event_loop()
 
         def _synthesize():
+            self._ensure_engine()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as fp:
                 temp_path = fp.name
             try:
@@ -112,16 +156,30 @@ class Pyttsx3TTS(TTSBackend):
                 except Exception:
                     pass
 
-        return await loop.run_in_executor(None, _synthesize)
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(self._executor, _synthesize),
+                timeout=PYTTSX3_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Pyttsx3 synthesis hung past %.0fs -- no further fallback available", PYTTSX3_TIMEOUT_S)
+            raise RuntimeError("TTS synthesis timed out on every backend")
 
     async def speak(self, text: str):
         loop = asyncio.get_event_loop()
 
         def _speak():
+            self._ensure_engine()
             self.engine.say(text)
             self.engine.runAndWait()
 
-        await loop.run_in_executor(None, _speak)
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(self._executor, _speak),
+                timeout=PYTTSX3_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Pyttsx3 speak() hung past %.0fs", PYTTSX3_TIMEOUT_S)
 
 
 def get_tts_backend():
