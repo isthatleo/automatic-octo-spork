@@ -1,9 +1,12 @@
 from .base_specialized_agent import SpecializedAgent
+import logging
 import math
 import re
 from typing import Dict, Any, List, Set, Tuple
 from collections import Counter
 from ..real_compute import tfidf_scores, kmeans_cluster, compute_statistics, cosine_similarity
+
+logger = logging.getLogger(__name__)
 
 _METHODOLOGY_KEYWORDS: Dict[str, List[str]] = {
     "qualitative": ["interview", "focus group", "ethnograph", "phenomenolog", "grounded theory", "narrative", "case study", "thematic analysis"],
@@ -54,6 +57,56 @@ class ResearchAgent(SpecializedAgent):
                 "research-methodology-guides"
             ]
         })
+
+    async def _fetch_real_sources(self, topic: str, limit: int = 3) -> Tuple[List[str], List[str]]:
+        """Fetches genuinely real background text on `topic` from Wikipedia's
+        public API (no key required) -- search for relevant pages, then pull
+        each one's real summary extract. Used whenever a caller doesn't
+        supply their own `abstracts`, so the statistical machinery below
+        (tf-idf, methodology classification, etc.) always operates on real
+        fetched text instead of the fabricated placeholder abstracts (fake
+        "Smith (2023)"-style citations) this agent used to fall back to.
+        Returns (texts, source_titles); both empty on any failure -- callers
+        must handle that honestly rather than substituting invented text."""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                search_resp = await client.get(
+                    "https://en.wikipedia.org/w/api.php",
+                    params={
+                        "action": "query", "list": "search", "srsearch": topic,
+                        "format": "json", "srlimit": limit,
+                    },
+                    headers={"User-Agent": "Nancy-Billion-ResearchAgent/1.0"},
+                )
+                search_resp.raise_for_status()
+                hits = search_resp.json().get("query", {}).get("search", [])
+                if not hits:
+                    return [], []
+
+                texts: List[str] = []
+                titles: List[str] = []
+                for hit in hits[:limit]:
+                    title = hit.get("title", "")
+                    if not title:
+                        continue
+                    try:
+                        summary_resp = await client.get(
+                            f"https://en.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}",
+                            headers={"User-Agent": "Nancy-Billion-ResearchAgent/1.0"},
+                        )
+                        summary_resp.raise_for_status()
+                        extract = summary_resp.json().get("extract", "")
+                        if extract:
+                            texts.append(extract)
+                            titles.append(title)
+                    except Exception as e:
+                        logger.warning("Research agent: failed to fetch summary for '%s': %s", title, e)
+                return texts, titles
+        except Exception as e:
+            logger.warning("Research agent: real-source fetch failed for topic '%s': %s", topic, e)
+            return [], []
 
     def _tokenize(self, text: str) -> List[str]:
         text = text.lower()
@@ -161,18 +214,18 @@ class ResearchAgent(SpecializedAgent):
     async def _conduct_literature_review(self, params: Dict[str, Any]) -> Dict[str, Any]:
         topic = params.get("topic", "general topic")
         depth = params.get("depth", "standard")
-        abstracts = params.get("abstracts", [
-            f"This study examines {topic} using quantitative methods. Recent advances in {topic} show promising developments. "
-            f"However, limited longitudinal studies exist on {topic}, and findings remain inconsistent across populations. "
-            f"According to Smith (2023), the field requires more rigorous experimental designs. Johnson et al. (2022) "
-            f"highlighted emerging trends in methodology.",
-            f"A systematic review of {topic} reveals interdisciplinary applications. Meta-analysis by Williams (2021) "
-            f"showed moderate effect sizes. There is a need for cross-cultural validation and integration with "
-            f"emerging technologies. Several methodological limitations were identified in current research.",
-            f"Machine learning approaches to {topic} have emerged as a computational paradigm. Deep learning models "
-            f"show promise for predictive applications. However, the field suffers from a paucity of replication studies "
-            f"and outdated datasets. Mixed methods approaches could bridge current gaps."
-        ])
+        abstracts = params.get("abstracts")
+        real_sources: List[str] = []
+        if not abstracts:
+            abstracts, real_sources = await self._fetch_real_sources(topic)
+        if not abstracts:
+            return {
+                "success": False,
+                "task_type": "literature-review",
+                "topic": topic,
+                "error": "No abstracts were supplied and no real sources could be fetched for this topic -- "
+                         "not returning a fabricated review.",
+            }
 
         combined_text = " ".join(abstracts)
         summaries = [self._extractive_summarize(ab, 2) for ab in abstracts]
@@ -209,8 +262,11 @@ class ResearchAgent(SpecializedAgent):
                 ]
             },
             "metadata": {
-                "sources_consulted": ["PubMed", "IEEE Xplore", "arXiv", "Google Scholar"],
-                "date_range": "last 5 years",
+                # Real provenance -- either the actual Wikipedia page titles
+                # fetched, or an honest note that the caller supplied its
+                # own abstracts (never a fabricated "PubMed/IEEE/arXiv" claim
+                # about databases this agent never actually queried).
+                "sources_consulted": real_sources if real_sources else ["caller-supplied abstracts"],
                 "confidence_level": round(0.8 + (score_stats.get("mean", 0) * 0.2 if score_stats else 0.02), 4)
             },
             "_computation": {
@@ -356,14 +412,17 @@ class ResearchAgent(SpecializedAgent):
 
     async def _analyze_trends(self, params: Dict[str, Any]) -> Dict[str, Any]:
         topic = params.get("topic", "scientific research")
-        abstracts = params.get("abstracts", [
-            f"Machine learning approaches to {topic} have grown substantially. Deep learning models show improved performance "
-             f"over traditional methods. Open science practices are increasing adoption across the field.",
-            f"A systematic review of {topic} demonstrates interdisciplinary collaboration growth. Data sharing initiatives "
-             f"have accelerated progress. Reproducibility remains a key concern in the literature.",
-            f"Emerging technologies in {topic} include AI-assisted methods and real-world evidence integration. "
-             f"Citizen science approaches are gaining traction in longitudinal studies."
-        ])
+        abstracts = params.get("abstracts")
+        if not abstracts:
+            abstracts, _real_sources = await self._fetch_real_sources(topic)
+        if not abstracts:
+            return {
+                "success": False,
+                "task_type": "trend-analysis",
+                "topic": topic,
+                "error": "No abstracts were supplied and no real sources could be fetched for this topic -- "
+                         "not returning a fabricated trend analysis.",
+            }
 
         combined = " ".join(abstracts)
         tfidf = self._compute_tfidf(abstracts)
@@ -416,11 +475,18 @@ class ResearchAgent(SpecializedAgent):
 
     async def _general_research(self, params: Dict[str, Any]) -> Dict[str, Any]:
         query = params.get("query", "general research topic")
-        abstracts = params.get("abstracts", [
-            f"Initial investigation reveals multiple perspectives on {query}. "
-             f"The evidence base shows moderate strength with opportunities for further investigation. "
-             f"Practical applications are emerging in related fields."
-        ])
+        abstracts = params.get("abstracts")
+        real_sources: List[str] = []
+        if not abstracts:
+            abstracts, real_sources = await self._fetch_real_sources(query)
+        if not abstracts:
+            return {
+                "success": False,
+                "task_type": "general-research",
+                "query": query,
+                "error": "No abstracts were supplied and no real sources could be fetched for this query -- "
+                         "not returning fabricated findings.",
+            }
 
         combined = " ".join(abstracts)
         tfidf = self._compute_tfidf(abstracts)
