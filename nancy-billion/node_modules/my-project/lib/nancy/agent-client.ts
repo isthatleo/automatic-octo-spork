@@ -178,3 +178,52 @@ export function getTaskPresets(agentKey: string): TaskPreset[] {
     { label: 'Query', task_type: 'query', payload: { query: 'Hello, what can you do?' }, description: 'Ask the agent a question' },
   ]
 }
+
+// ---------------------------------------------------------------------------
+// Human-readable result formatting — agent results are arbitrary JSON with
+// wildly different shapes (an LLM agent returns a `response` string, a
+// domain agent returns nested stats/arrays), so every place that surfaces a
+// result to the user goes through these instead of a raw JSON dump.
+// ---------------------------------------------------------------------------
+
+/** snake_case / kebab-case / camelCase -> "Title Case" */
+export function humanizeKey(key: string): string {
+  return key
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+const PROSE_KEYS = ['response', 'result', 'summary', 'message'] as const
+/** Keys already surfaced elsewhere in the UI (status/error banners etc.) — skip in generic renders. */
+export const RESULT_META_KEYS = new Set([
+  'success', 'agent_key', 'task_type', 'latency_ms', 'timestamp', 'error', 'raw',
+])
+
+/** Pull a single human-language string out of a result if one exists (LLM-backed agents). */
+export function proseFromResult(result: Record<string, unknown>): string | null {
+  for (const k of PROSE_KEYS) {
+    const v = result[k]
+    if (typeof v === 'string' && v.trim().length > 0) return v.trim()
+  }
+  return null
+}
+
+/** Short one-line human summary for compact contexts (Kanban cards, auto-route inline result). */
+export function summarizeResult(result: AgentResult): string {
+  if (!result.success) return result.error || 'Task failed — no further detail returned'
+  const obj = result as unknown as Record<string, unknown>
+  const prose = proseFromResult(obj)
+  if (prose) return prose
+  const parts: string[] = []
+  for (const [k, v] of Object.entries(obj)) {
+    if (RESULT_META_KEYS.has(k)) continue
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      parts.push(`${humanizeKey(k)}: ${v}`)
+    }
+    if (parts.length >= 4) break
+  }
+  return parts.length > 0 ? parts.join(' · ') : 'Completed — see full details'
+}

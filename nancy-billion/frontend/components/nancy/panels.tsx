@@ -4,7 +4,7 @@ import { useEffect, useCallback, useMemo, useRef, useState } from 'react'
 import { ArcReactor, HudPanel, RadialGauge, StatBar, AnimatedNumber } from './hud-bits'
 import { GlobeView } from './globe-view'
 import type { AgentInfo } from '@/lib/nancy/types'
-import { listAgents, autoRouteAgent, type AgentListResponse } from '@/lib/nancy/agent-client'
+import { listAgents, autoRouteAgent, summarizeResult, type AgentListResponse } from '@/lib/nancy/agent-client'
 import { AgentTaskModal } from './agent-task-modal'
 import { useSystemHealth, useTradeHistory, useLlmStatus } from '@/hooks/useSystemData'
 import {
@@ -872,7 +872,7 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
       const res = await autoRouteAgent(autoQuery)
       const route = res.routed_to ?? res.agent_key ?? '?'
       const msg = res.success
-        ? `Routed to ${route} · ${JSON.stringify(res).slice(0, 160)}…`
+        ? `Routed to ${route} — ${summarizeResult(res)}`
         : `Error (${route}): ${res.error}`
       setAutoResult(msg)
     } finally { setAutoRunning(false) }

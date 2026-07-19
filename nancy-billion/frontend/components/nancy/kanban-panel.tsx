@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { HudPanel } from './hud-bits'
-import { listAgents, runAgent } from '@/lib/nancy/agent-client'
+import { listAgents, runAgent, summarizeResult } from '@/lib/nancy/agent-client'
 import type { AgentInfo } from '@/lib/nancy/types'
 import {
   Plus,
@@ -157,11 +157,7 @@ export function KanbanPanel() {
     logEvent(`Dispatching "${card.title}" to ${card.assignedAgent}…`)
     try {
       const res = await runAgent(card.assignedAgent, 'query', { query: card.description || card.title })
-      const text = typeof res.response === 'string'
-        ? res.response
-        : typeof res.result === 'string'
-          ? res.result
-          : res.error || JSON.stringify(res).slice(0, 300)
+      const text = summarizeResult(res)
       setCards((prev) => prev.map((c) => c.id === card.id
         ? { ...c, runResult: { success: res.success, text, at: Date.now() }, column: res.success ? 'review' : c.column, updatedAt: Date.now() }
         : c))
