@@ -380,109 +380,99 @@ export function MapPanel({
       </div>
 
 
-      <div className="pointer-events-none absolute left-0 right-0 top-0 z-[499] hidden p-3">
-
-        <div className="hud-panel rounded px-2 py-1">
-          <div className="flex items-center gap-1.5 font-heading text-[0.6rem] tracking-[0.22em] text-primary">
-            {showSatellite ? (
-              <Crosshair className="h-3 w-3" />
-            ) : (
-              <Globe2 className="h-3 w-3" />
-            )}
-            {showSatellite ? 'Surface Recon' : 'Orbital View'}
-          </div>
-        </div>
-        {place && (
-          <>
-            <div className="hud-panel max-w-[60%] rounded px-2 py-1 text-right">
-              <div className="truncate font-heading text-xs text-primary">
-                {place.name}
-              </div>
-              <div className="truncate text-[0.55rem] text-muted-foreground">
-                {place.country}
-              </div>
+      {/* Target lock — real place identification + historical intel. This
+          data used to be assembled but rendered inside a permanently
+          `hidden` wrapper, so a resolved place's name/country and any
+          historicalEvents never actually reached the screen. Surfaced here
+          as a bracketed targeting readout, top-left, mirroring the debug
+          readout's position on the right. */}
+      {place && (
+        <div className="pointer-events-none absolute left-3 top-14 z-[500] w-56">
+          <div className="relative border border-primary/40 bg-background/70 px-3 py-2 backdrop-blur-sm">
+            <span className="absolute -left-px -top-px h-2.5 w-2.5 border-l border-t border-primary" />
+            <span className="absolute -right-px -top-px h-2.5 w-2.5 border-r border-t border-primary" />
+            <span className="absolute -bottom-px -left-px h-2.5 w-2.5 border-b border-l border-primary" />
+            <span className="absolute -bottom-px -right-px h-2.5 w-2.5 border-b border-r border-primary" />
+            <div className="text-[0.5rem] tracking-[0.25em] text-primary/70">Target Lock</div>
+            <div className="mt-0.5 truncate font-heading text-sm text-foreground">
+              {place.name}
             </div>
-            
-            {/* Historical Events */}
-            {place.historicalEvents && place.historicalEvents.length > 0 && (
-              <div className="hud-panel max-w-[60%] rounded px-2 py-1 mt-2 text-right text-[0.5rem]">
-                <div className="flex items-center gap-1 mb-1">
-                  <History className="h-3 w-3 text-primary" />
-                  <span className="font-heading text-[0.55rem] text-primary">Historical Significance</span>
-                </div>
-                <div className="space-y-1">
-                  {place.historicalEvents
-                    .slice(0, 3) // Show top 3 events
-                    .map((event) => (
-                      <div
-                        key={event.id}
-                        className="flex items-start gap-2"
-                      >
-                        <div className="flex-shrink-0">
-                          <span className={`text-[0.45rem] px-1.5 py-0.5 rounded ${getEventSignificanceColor(event.significance)}`}>
-                            {event.category.toUpperCase()}
-                          </span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex justify-between items-start">
-                            <h4 className="font-heading text-[0.55rem] text-foreground">{event.title}</h4>
-                            <span className="text-[0.45rem] text-muted-foreground">{event.year}</span>
-                          </div>
-                          <p className="text-[0.45rem] text-muted-foreground line-clamp-2">
-                            {event.description}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-                
-                {place.historicalEvents.length > 3 && (
-                  <div className="mt-1 text-center">
-                    <span className="text-[0.45rem] text-muted-foreground italic">
-                      +{place.historicalEvents.length - 3} more events
+            <div className="truncate text-[0.55rem] text-muted-foreground">
+              {place.country}
+            </div>
+          </div>
+
+          {place.historicalEvents && place.historicalEvents.length > 0 && (
+            <div className="relative mt-1.5 border border-border/50 bg-background/70 px-3 py-2 backdrop-blur-sm">
+              <div className="mb-1.5 flex items-center gap-1.5 text-[0.5rem] tracking-[0.2em] text-primary">
+                <History className="h-3 w-3" /> Historical Intel
+              </div>
+              <div className="space-y-1.5 border-l border-border/60 pl-2">
+                {place.historicalEvents.slice(0, 3).map((event) => (
+                  <div key={event.id} className="relative">
+                    <span className="absolute -left-[9px] top-1 h-1.5 w-1.5 rounded-full bg-primary" />
+                    <div className="flex items-baseline justify-between gap-2">
+                      <h4 className="truncate text-[0.55rem] text-foreground">{event.title}</h4>
+                      <span className="shrink-0 text-[0.45rem] text-muted-foreground">{event.year}</span>
+                    </div>
+                    <p className="line-clamp-2 text-[0.48rem] leading-snug text-muted-foreground">
+                      {event.description}
+                    </p>
+                    <span
+                      className={`mt-0.5 inline-block rounded-sm px-1 py-px text-[0.42rem] ${getEventSignificanceColor(event.significance)}`}
+                    >
+                      {event.category.toUpperCase()}
                     </span>
                   </div>
-                )}
+                ))}
               </div>
-            )}
-          </>
-        )}
-      </div>
+              {place.historicalEvents.length > 3 && (
+                <p className="mt-1.5 text-center text-[0.45rem] italic text-muted-foreground">
+                  +{place.historicalEvents.length - 3} more events
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
-      {/* footer telemetry */}
+      {/* footer telemetry — a single instrument-cluster strip instead of
+          three separately floating chips. */}
       {place && sun && (
-        <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-[500] flex flex-wrap items-end justify-between gap-2 p-3">
-          <div className="hud-panel rounded px-2 py-1 text-[0.55rem] leading-relaxed text-muted-foreground">
-            <div>
-              LAT{' '}
-              <span className="text-primary">{place.lat.toFixed(4)}</span>
-            </div>
-            <div>
-              LON{' '}
-              <span className="text-primary">{place.lon.toFixed(4)}</span>
-            </div>
-          </div>
-          <div className="hud-panel flex items-center gap-2 rounded px-2 py-1">
-            {sun.isDay ? (
-              <Sun className="h-4 w-4 text-accent" />
-            ) : (
-              <Moon className="h-4 w-4 text-primary" />
-            )}
-            <div className="text-[0.55rem] leading-tight">
-              <div className="font-heading text-foreground">
-                {sun.phase}
+        <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-[500] flex justify-center p-3">
+          <div className="flex items-stretch divide-x divide-border/50 border border-border/50 bg-background/70 text-[0.55rem] backdrop-blur-sm">
+            <div className="flex flex-col justify-center gap-0.5 px-3 py-1.5 leading-relaxed text-muted-foreground">
+              <div>
+                LAT{' '}
+                <span className="text-primary">{place.lat.toFixed(4)}</span>
               </div>
-              <div className="text-muted-foreground">
-                SUN ALT {sun.altitude.toFixed(1)}&deg;
+              <div>
+                LON{' '}
+                <span className="text-primary">{place.lon.toFixed(4)}</span>
               </div>
             </div>
-          </div>
-          <div className="hud-panel rounded px-2 py-1 text-right">
-            <div className="font-display text-sm text-accent">
-              {localTime}
+            <div className="flex items-center gap-2 px-3 py-1.5">
+              {sun.isDay ? (
+                <Sun className="h-4 w-4 text-accent" />
+              ) : (
+                <Moon className="h-4 w-4 text-primary" />
+              )}
+              <div className="leading-tight">
+                <div className="font-heading text-foreground">
+                  {sun.phase}
+                </div>
+                <div className="text-muted-foreground">
+                  SUN ALT {sun.altitude.toFixed(1)}&deg;
+                </div>
+              </div>
             </div>
-            <div className="text-[0.5rem] text-muted-foreground">
-              Local Solar Time
+            <div className="flex flex-col justify-center px-3 py-1.5 text-right">
+              <div className="font-display text-sm text-accent">
+                {localTime}
+              </div>
+              <div className="text-[0.5rem] text-muted-foreground">
+                Local Solar Time
+              </div>
             </div>
           </div>
         </div>
