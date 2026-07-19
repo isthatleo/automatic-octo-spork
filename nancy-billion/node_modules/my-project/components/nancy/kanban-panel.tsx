@@ -200,7 +200,21 @@ export function KanbanPanel() {
   // you shouldn't also have to manually hit Run. Any card sitting in Inbox or
   // Assigned with an agent and no result yet gets picked up shortly after it
   // appears, moving Inbox -> Assigned -> In Progress on its own.
+  //
+  // Real bug this replaced: the Inbox->Assigned setCards call below used to
+  // happen inside the same effect that scheduled the run via setTimeout,
+  // with `cards` as a dependency and a `clearTimeout` cleanup. That setCards
+  // call changes `cards`, which re-runs this very effect, and React tears
+  // down the *previous* instance first -- clearTimeout cancelled the timer
+  // that had just been scheduled, before it ever fired. The card visibly
+  // moved to "Assigned" and then just sat there forever, since the
+  // already-picked-up guard (autoPickedUp) also blocked any later effect
+  // run from rescheduling it. Fix: the timer's lifetime is no longer tied
+  // to this effect's cleanup -- only a genuine component-unmount cancels it.
   const autoPickedUp = useRef<Set<string>>(new Set())
+  const unmountedRef = useRef(false)
+  useEffect(() => () => { unmountedRef.current = true }, [])
+
   useEffect(() => {
     if (!loaded || runningId) return
     const pending = cards.find((c) =>
@@ -215,8 +229,10 @@ export function KanbanPanel() {
       setCards((prev) => prev.map((c) => c.id === pending.id ? { ...c, column: 'assigned', updatedAt: Date.now() } : c))
       logEvent(`${pending.assignedAgent} picked up "${pending.title}"`)
     }
-    const t = setTimeout(() => { void runCard(pending) }, 900)
-    return () => clearTimeout(t)
+    setTimeout(() => {
+      if (unmountedRef.current) return
+      void runCard(pending)
+    }, 900)
   }, [cards, loaded, runningId, logEvent, runCard])
 
   const grouped = useMemo(() => {
