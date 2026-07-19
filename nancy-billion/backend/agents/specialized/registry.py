@@ -36,6 +36,10 @@ from .quantum_reasoning_accelerator import QuantumReasoningAccelerator
 # Real LLM-backed planning/orchestration agents
 from .planning_agent import PlanningAgent
 from .dispatcher_agent import DispatcherAgent
+# Real analogues of Claude Code's own subagent types
+from .explore_agent import ExploreAgent
+from .llm_utility_agents import GeneralPurposeAgent, ClaudeAgent, ClaudeCodeGuideAgent
+from .statusline_setup_agent import StatuslineSetupAgent
 
 # Registry of all available specialized agents
 SPECIALIZED_AGENTS = {
@@ -74,6 +78,12 @@ SPECIALIZED_AGENTS = {
     # ---- Real LLM-backed planning/orchestration agents ----
     "planning":                 PlanningAgent,
     "dispatcher":               DispatcherAgent,
+    # ---- Real analogues of Claude Code's own subagent types ----
+    "explore":                  ExploreAgent,
+    "general_purpose":          GeneralPurposeAgent,
+    "claude":                   ClaudeAgent,
+    "claude_code_guide":        ClaudeCodeGuideAgent,
+    "statusline_setup":         StatuslineSetupAgent,
 }
 
 def get_available_agents():
