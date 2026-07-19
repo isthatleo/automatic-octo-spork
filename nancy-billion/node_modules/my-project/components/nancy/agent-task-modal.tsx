@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { X, Play, Loader2, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Zap } from 'lucide-react'
-import { runAgent, getTaskPresets, type TaskPreset } from '@/lib/nancy/agent-client'
+import { runAgent, getTaskPresets, humanizeKey, proseFromResult, RESULT_META_KEYS, type TaskPreset } from '@/lib/nancy/agent-client'
 import type { AgentInfo, AgentResult } from '@/lib/nancy/types'
 import { cn } from '@/lib/utils'
 
@@ -12,7 +12,7 @@ interface AgentTaskModalProps {
 }
 
 function JsonView({ data }: { data: unknown }) {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
   const str = JSON.stringify(data, null, 2)
   const lines = str.split('\n').length
 
@@ -24,13 +24,105 @@ function JsonView({ data }: { data: unknown }) {
         className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[0.55rem] text-muted-foreground hover:text-foreground"
       >
         {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        JSON Result ({lines} lines)
+        Raw JSON ({lines} lines)
       </button>
       {expanded && (
         <pre className="max-h-72 overflow-y-auto px-3 pb-3 text-[0.6rem] leading-relaxed text-primary">
           {str}
         </pre>
       )}
+    </div>
+  )
+}
+
+/** Recursively renders an arbitrary JSON value as readable, labelled UI instead of raw braces/quotes. */
+function ValueNode({ value, depth = 0 }: { value: unknown; depth?: number }) {
+  if (value === null || value === undefined || value === '') {
+    return <span className="italic text-muted-foreground/60">—</span>
+  }
+  if (typeof value === 'boolean') {
+    return <span className={value ? 'text-primary' : 'text-destructive'}>{value ? 'Yes' : 'No'}</span>
+  }
+  if (typeof value === 'number') {
+    return <span className="text-accent">{value.toLocaleString()}</span>
+  }
+  if (typeof value === 'string') {
+    return <span className="whitespace-pre-wrap text-foreground">{value}</span>
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="italic text-muted-foreground/60">None</span>
+    const allPrimitive = value.every((v) => v === null || typeof v !== 'object')
+    if (allPrimitive) {
+      return (
+        <ul className="flex flex-col gap-1">
+          {value.map((v, i) => (
+            <li key={i} className="flex items-start gap-1.5 text-[0.62rem]">
+              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary/60" />
+              <ValueNode value={v} depth={depth + 1} />
+            </li>
+          ))}
+        </ul>
+      )
+    }
+    return (
+      <div className="flex flex-col gap-1.5">
+        {value.map((v, i) => (
+          <div key={i} className="rounded border border-border/40 bg-secondary/20 px-2 py-1.5">
+            <ValueNode value={v} depth={depth + 1} />
+          </div>
+        ))}
+      </div>
+    )
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+    if (entries.length === 0) return <span className="italic text-muted-foreground/60">Empty</span>
+    return (
+      <div className={cn('flex flex-col gap-2', depth > 0 && 'border-l border-border/40 pl-3')}>
+        {entries.map(([k, v]) => (
+          <div key={k}>
+            <span className="text-[0.55rem] uppercase tracking-wide text-muted-foreground">{humanizeKey(k)}</span>
+            <div className="mt-0.5">
+              <ValueNode value={v} depth={depth + 1} />
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+  return <span>{String(value)}</span>
+}
+
+const PROSE_DISPLAY_KEYS = new Set(['response', 'result', 'summary', 'message'])
+
+/** Human-readable presentation of an agent result: prose response up top (if the
+ * agent returned one), then every other field laid out as labelled sections —
+ * a raw JSON dump is still available below, collapsed, for anyone who wants it. */
+function ResultView({ result }: { result: AgentResult }) {
+  const obj = result as unknown as Record<string, unknown>
+  const prose = proseFromResult(obj)
+  const rest = Object.entries(obj).filter(([k]) => !RESULT_META_KEYS.has(k) && !(prose !== null && PROSE_DISPLAY_KEYS.has(k)))
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      {prose && (
+        <div className="whitespace-pre-wrap rounded border border-primary/30 bg-primary/5 px-3 py-2.5 text-[0.68rem] leading-relaxed text-foreground">
+          {prose}
+        </div>
+      )}
+      {rest.length > 0 && (
+        <div className="flex flex-col gap-3 rounded border border-border/50 bg-background/40 px-3 py-2.5">
+          {rest.map(([k, v]) => (
+            <div key={k}>
+              <span className="font-heading text-[0.55rem] tracking-wide text-primary/80">{humanizeKey(k)}</span>
+              <div className="mt-1 text-[0.62rem]">
+                <ValueNode value={v} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <JsonView data={result} />
     </div>
   )
 }
@@ -215,7 +307,7 @@ export function AgentTaskModal({ agent, onClose }: AgentTaskModalProps) {
                 {result.error}
               </p>
             )}
-            <JsonView data={result} />
+            <ResultView result={result} />
           </div>
         )}
 

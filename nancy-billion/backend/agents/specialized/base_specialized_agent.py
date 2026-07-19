@@ -84,6 +84,36 @@ class SpecializedAgent(BaseAgent):
                 "error":       str(exc),
             }
 
+    async def _llm_answer(self, query: str, *, max_tokens: int = 500, temperature: float = 0.5) -> Optional[str]:
+        """
+        Real LLM-backed answer to a free-text query, scoped to this agent's
+        domain. Used by subclasses' generic/fallback task handlers so an
+        ad-hoc question actually gets answered instead of only returning a
+        static capabilities blurb that ignores what was asked.
+
+        Returns None (never raises) on failure so callers can fall back to
+        their existing static response rather than surfacing an error for
+        what should be a soft-fail enhancement.
+        """
+        if not query or not query.strip():
+            return None
+        try:
+            from llm import llm_backend  # deferred: avoid import-order coupling with the registry
+            system = (
+                f"You are {self.agent_name}, a specialist in {self.domain.replace('-', ' ')}. "
+                f"{self.capabilities.get('description', '')} "
+                "Answer the user's specific question or request directly and concretely, "
+                "drawing on your domain expertise. Do not just list your capabilities."
+            )
+            prompt = f"{system}\n\nUser: {query}\n\nResponse:"
+            return await asyncio.wait_for(
+                llm_backend.generate(prompt, max_tokens=max_tokens, temperature=temperature),
+                timeout=20.0,
+            )
+        except Exception as exc:
+            self.logger.warning("_llm_answer failed for %s: %s", self.agent_name, exc)
+            return None
+
     async def shutdown(self) -> None:
         """Graceful shutdown -- drains the task queue."""
         self.logger.info("Shutting down agent '%s' (%d tasks in queue)...",
