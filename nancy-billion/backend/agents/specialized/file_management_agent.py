@@ -5,12 +5,24 @@ Handles file organization, backup, synchronization, and version control
 from .base_specialized_agent import SpecializedAgent
 import os
 import os.path
+import shutil
 import time
 import hashlib
 import stat
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 from collections import defaultdict
+
+# Real system directories this agent will refuse to write into or delete
+# from, regardless of what a task asks for -- a hard safety floor under the
+# generic path resolution below, which otherwise follows any path it's given.
+_PROTECTED_ROOTS = [
+    os.path.normcase(os.path.abspath(p)) for p in [
+        os.environ.get("WINDIR", "C:\\Windows"),
+        "C:\\Program Files",
+        "C:\\Program Files (x86)",
+    ]
+]
 
 FILE_CATEGORIES: Dict[str, List[str]] = {
     "documents": [".pdf", ".doc", ".docx", ".txt", ".rtf", ".odt", ".xls", ".xlsx", ".ppt", ".pptx", ".csv"],
@@ -35,6 +47,11 @@ class FileManagementAgent(SpecializedAgent):
             "description": "Advanced file management agent for organization, backup, synchronization, and version control",
             "confidence": 0.86,
             "specializations": [
+                "file-creation",
+                "file-viewing",
+                "file-editing",
+                "file-deletion",
+                "directory-listing",
                 "file-organization",
                 "backup-recovery",
                 "sync-replication",
@@ -69,6 +86,16 @@ class FileManagementAgent(SpecializedAgent):
                 return await self._manage_synchronization(task_data)
             elif task_type == "version-control":
                 return await self._manage_version_control(task_data)
+            elif task_type in ("create", "create-file"):
+                return await self._create_file(task_data)
+            elif task_type in ("read", "view", "read-file"):
+                return await self._read_file(task_data)
+            elif task_type in ("edit", "write", "edit-file"):
+                return await self._edit_file(task_data)
+            elif task_type in ("delete", "delete-file"):
+                return await self._delete_file(task_data)
+            elif task_type in ("list", "list-directory"):
+                return await self._list_directory(task_data)
             else:
                 return await self._general_file_overview(task_data)
         except Exception as e:
@@ -79,6 +106,117 @@ class FileManagementAgent(SpecializedAgent):
             return os.getcwd()
         path = os.path.abspath(os.path.expanduser(path_str))
         return path
+
+    def _is_protected_path(self, path: str) -> bool:
+        normalized = os.path.normcase(os.path.abspath(path))
+        return any(normalized == root or normalized.startswith(root + os.sep) for root in _PROTECTED_ROOTS)
+
+    async def _create_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        path_str = params.get("path", "")
+        if not path_str:
+            return {"success": False, "error": "A 'path' is required"}
+        resolved = self._resolve_path(path_str)
+        if self._is_protected_path(resolved):
+            return {"success": False, "error": f"Refusing to write into a protected system path: {resolved}"}
+        overwrite = bool(params.get("overwrite", False))
+        if os.path.exists(resolved) and not overwrite:
+            return {"success": False, "error": f"{resolved} already exists — pass overwrite=true to replace it"}
+        content = params.get("content", "")
+        try:
+            parent = os.path.dirname(resolved)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            Path(resolved).write_text(content, encoding="utf-8")
+        except OSError as e:
+            return {"success": False, "error": f"Failed to create file: {e}"}
+        return {
+            "success": True, "task_type": "create", "path": resolved,
+            "bytes_written": len(content.encode("utf-8")),
+        }
+
+    async def _read_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        path_str = params.get("path", "")
+        if not path_str:
+            return {"success": False, "error": "A 'path' is required"}
+        resolved = self._resolve_path(path_str)
+        if not os.path.isfile(resolved):
+            return {"success": False, "error": f"No such file: {resolved}"}
+        max_bytes = int(params.get("max_bytes", 2_000_000))
+        size = os.path.getsize(resolved)
+        if size > max_bytes:
+            return {"success": False, "error": f"File is {size:,} bytes, over the {max_bytes:,}-byte read limit"}
+        try:
+            content = Path(resolved).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return {"success": False, "error": "File is not valid UTF-8 text (likely binary) — cannot display as text"}
+        except OSError as e:
+            return {"success": False, "error": f"Failed to read file: {e}"}
+        return {
+            "success": True, "task_type": "read", "path": resolved,
+            "size_bytes": size, "content": content,
+        }
+
+    async def _edit_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        path_str = params.get("path", "")
+        if not path_str:
+            return {"success": False, "error": "A 'path' is required"}
+        resolved = self._resolve_path(path_str)
+        if self._is_protected_path(resolved):
+            return {"success": False, "error": f"Refusing to modify a protected system path: {resolved}"}
+        if not os.path.isfile(resolved):
+            return {"success": False, "error": f"No such file: {resolved} — use task type 'create' to make a new one"}
+        content = params.get("content", "")
+        mode = params.get("mode", "overwrite")
+        try:
+            if mode == "append":
+                with open(resolved, "a", encoding="utf-8") as f:
+                    f.write(content)
+            else:
+                Path(resolved).write_text(content, encoding="utf-8")
+        except OSError as e:
+            return {"success": False, "error": f"Failed to edit file: {e}"}
+        return {
+            "success": True, "task_type": "edit", "path": resolved,
+            "mode": mode, "bytes_written": len(content.encode("utf-8")),
+        }
+
+    async def _delete_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        path_str = params.get("path", "")
+        if not path_str:
+            return {"success": False, "error": "A 'path' is required"}
+        if not params.get("confirm"):
+            return {"success": False, "error": "Deletion requires confirm=true — this is irreversible"}
+        resolved = self._resolve_path(path_str)
+        if self._is_protected_path(resolved):
+            return {"success": False, "error": f"Refusing to delete a protected system path: {resolved}"}
+        if not os.path.exists(resolved):
+            return {"success": False, "error": f"No such file or directory: {resolved}"}
+        try:
+            if os.path.isdir(resolved):
+                if params.get("recursive"):
+                    shutil.rmtree(resolved)
+                else:
+                    os.rmdir(resolved)  # fails with a clear OSError if not empty -- safe default
+            else:
+                os.remove(resolved)
+        except OSError as e:
+            return {"success": False, "error": f"Failed to delete: {e}"}
+        return {"success": True, "task_type": "delete", "path": resolved, "deleted": True}
+
+    async def _list_directory(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        directory = params.get("path") or params.get("directory") or os.getcwd()
+        resolved = self._resolve_path(directory)
+        if not os.path.isdir(resolved):
+            return {"success": False, "error": f"No such directory: {resolved}"}
+        entries = []
+        try:
+            for name in sorted(os.listdir(resolved)):
+                full = os.path.join(resolved, name)
+                stats = self._get_file_stats(full)
+                entries.append({"name": name, "type": "directory" if os.path.isdir(full) else "file", **stats})
+        except OSError as e:
+            return {"success": False, "error": f"Failed to list directory: {e}"}
+        return {"success": True, "task_type": "list", "path": resolved, "entries": entries, "count": len(entries)}
 
     def _safe_list_dir(self, directory: str) -> List[str]:
         try:
