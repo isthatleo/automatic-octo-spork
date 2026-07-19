@@ -190,9 +190,12 @@ class SecurityAgent(SpecializedAgent):
         }
 
     async def _general_security_overview(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general security question")
+        answer = await self._llm_answer(query)
         return {
             "success": True, "task_type": "security-overview",
-            "query": params.get("query", "general security question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "capabilities": [
                 {"name": "PII Detection", "description": "Detect emails, phones, SSNs, credit cards, IPs"},
                 {"name": "Vulnerability Scanning", "description": "SQL injection, XSS, command injection, path traversal"},

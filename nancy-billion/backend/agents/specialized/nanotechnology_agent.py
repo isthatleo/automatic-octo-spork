@@ -557,10 +557,14 @@ class NanotechnologyAgent(SpecializedAgent):
         ratios = [abs(lj["mean_interaction"]), abs(lj["total_potential"]) * 0.1, abs(md["kinetic_energy"]), abs(md["potential_energy"]), abs(band["bandwidth_ev"])]
         stats = compute_statistics(ratios)
 
+        query = params.get("query", "general nanotechnology question")
+        answer = await self._llm_answer(query)
+
         return {
             "success": True,
             "task_type": "general-nano-overview",
-            "query": params.get("query", "general nanotechnology question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "nanotechnology_domains": [
                 {"domain": "nanomedicine", "applications": ["drug_delivery", "diagnostics", "regenerative_medicine"], "market_size": f"${round(100 + band['bandwidth_ev'] * 50, 0):.0f} billion_by_2030"},
                 {"domain": "nanoelectronics", "applications": ["transistors", "sensors", "memory_devices"], "market_size": f"${round(50 + abs(lj['total_potential']) * 20, 0):.0f} billion_by_2030"},

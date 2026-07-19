@@ -53,7 +53,7 @@ class CryptoTradingAgent(SpecializedAgent):
         elif task_type == "defi-analysis":
             return self._analyze_defi_protocols(task_data)
         else:
-            return self._general_crypto_analysis(task_data)
+            return await self._general_crypto_analysis(task_data)
 
     def _perform_technical_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
         symbol = params.get("symbol", "BTC")
@@ -405,11 +405,14 @@ class CryptoTradingAgent(SpecializedAgent):
             ]
         }
 
-    def _general_crypto_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _general_crypto_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general crypto analysis")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-crypto-analysis",
-            "query": params.get("query", "general crypto analysis"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "market_overview": {
                 "description": "General cryptocurrency market analysis agent",
                 "capabilities": [

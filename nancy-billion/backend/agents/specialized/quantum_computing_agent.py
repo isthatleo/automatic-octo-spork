@@ -553,10 +553,13 @@ class QuantumComputingAgent(SpecializedAgent):
         }
 
     async def _general_quantum_overview(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general quantum computing question")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-quantum-overview",
-            "query": params.get("query", "general quantum computing question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "quantum_advantage_areas": [
                 {"area": "factorization", "algorithm": "shors_algorithm", "speedup": "exponential", "problem_size": "thousands_of_bits", "applications": ["cryptography_breaking"]},
                 {"area": "unstructured_search", "algorithm": "grovers_algorithm", "speedup": "quadratic", "problem_size": "millions_to_billions_of_items", "applications": ["database_search", "optimization"]},

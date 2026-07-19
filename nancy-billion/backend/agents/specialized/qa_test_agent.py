@@ -207,9 +207,12 @@ class QATestAgent(SpecializedAgent):
         }
 
     async def _general_qa_consultation(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general QA question")
+        answer = await self._llm_answer(query)
         return {
             "success": True, "task_type": "general-qa-consultation",
-            "query": params.get("query", "general QA question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "testing_methodologies": ["Black-box testing", "White-box testing", "Gray-box testing", "Exploratory testing", "Risk-based testing"],
             "test_levels": [
                 {"level": "unit", "description": "Testing individual components or functions"},

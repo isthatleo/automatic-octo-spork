@@ -205,9 +205,11 @@ class CreativeDesignAgent(SpecializedAgent):
         query = params.get("query", "")
         query_embedding = [ord(c) for c in query[:100]]
         query_len = len(query_embedding)
+        answer = await self._llm_answer(query)
 
         return {
             "success": True, "task_type": "design-consultation", "query": query,
+            **({"response": answer} if answer else {}),
             "design_principles": [
                 "Balance, contrast, emphasis, movement, pattern, rhythm, unity, proportion",
                 f"Golden ratio φ = {(1 + math.sqrt(5)) / 2:.4f} in layout composition"
