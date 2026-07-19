@@ -57,6 +57,8 @@ import {
   ChevronRight,
   X,
   Play,
+  ClipboardList,
+  GitBranch,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -715,6 +717,13 @@ const DOMAIN_ICON: Record<string, React.ElementType> = {
   'nanotechnology': Sparkles,
   'crypto-trading': BarChart3,
   'creative-design': Palette,
+  'planning': ClipboardList,
+  'dispatcher': GitBranch,
+  'explore': Search,
+  'general-purpose': Bot,
+  'claude': Sparkles,
+  'claude-code-guide': Code2,
+  'statusline-setup': Terminal,
 }
 interface AgentCategory { label: string; icon: React.ElementType; domains: string[]; color: string }
 const AGENT_CATEGORIES: AgentCategory[] = [
@@ -724,6 +733,7 @@ const AGENT_CATEGORIES: AgentCategory[] = [
   { label: 'Infrastructure & Ops', icon: Server, color: 'oklch(0.72 0.14 200)', domains: ['devops', 'system-monitoring', 'file-management', 'swarm-coordinator', 'communication'] },
   { label: 'Physical & Interface', icon: Cpu, color: 'oklch(0.7 0.14 150)', domains: ['environmental-control', 'holographic-display', 'nanotechnology'] },
   { label: 'Business & Creative', icon: Palette, color: 'oklch(0.68 0.15 20)', domains: ['crypto-trading', 'creative-design'] },
+  { label: 'Meta & Orchestration', icon: Sparkles, color: 'oklch(0.7 0.14 250)', domains: ['planning', 'dispatcher', 'explore', 'general-purpose', 'claude', 'claude-code-guide', 'statusline-setup'] },
 ]
 function categoryFor(domain: string): string {
   return AGENT_CATEGORIES.find((c) => c.domains.includes(domain))?.label ?? 'Other'
