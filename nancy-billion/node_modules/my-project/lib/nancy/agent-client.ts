@@ -99,6 +99,15 @@ export async function getAgentStatus(agentKey: string): Promise<Record<string, u
   }
 }
 
+/** Write real content to a real file on the user's actual Desktop. */
+export async function saveToDesktop(filename: string, content: string): Promise<{ success: boolean; path?: string; filename?: string; error?: string }> {
+  try {
+    return await post('/files/save-desktop', { filename, content })
+  } catch (err) {
+    return { success: false, error: String(err) }
+  }
+}
+
 /** Get aggregate service stats. */
 export async function getAgentStats(): Promise<AgentServiceStats> {
   try {

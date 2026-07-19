@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { HudPanel } from './hud-bits'
-import { listAgents, runAgent, summarizeResult } from '@/lib/nancy/agent-client'
-import type { AgentInfo } from '@/lib/nancy/types'
+import { listAgents, runAgent, summarizeResult, saveToDesktop, proseFromResult } from '@/lib/nancy/agent-client'
+import type { AgentInfo, AgentResult } from '@/lib/nancy/types'
 import {
   Plus,
   X,
@@ -17,6 +17,7 @@ import {
   Bot,
   CheckCircle2,
   XCircle,
+  FileDown,
 } from 'lucide-react'
 
 type ColumnKey = 'inbox' | 'assigned' | 'in_progress' | 'review' | 'done'
@@ -33,7 +34,8 @@ interface KanbanCard {
   column: ColumnKey
   createdAt: number
   updatedAt: number
-  runResult?: { success: boolean; text: string; at: number }
+  saveToDesktop: boolean
+  runResult?: { success: boolean; text: string; at: number; savedFile?: string }
 }
 
 interface FeedEvent {
@@ -71,7 +73,9 @@ function loadCards(): KanbanCard[] {
     const raw = window.localStorage.getItem(STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    // Normalize cards saved before `saveToDesktop` existed.
+    return parsed.map((c: Partial<KanbanCard>) => ({ saveToDesktop: false, ...c }) as KanbanCard)
   } catch {
     return []
   }
@@ -160,17 +164,30 @@ export function KanbanPanel() {
   const runCard = useCallback(async (card: KanbanCard) => {
     if (!card.assignedAgent) return
     setRunningId(card.id)
+    setCards((prev) => prev.map((c) => c.id === card.id ? { ...c, column: 'in_progress', updatedAt: Date.now() } : c))
     logEvent(`Dispatching "${card.title}" to ${card.assignedAgent}…`)
     try {
-      const res = await runAgent(card.assignedAgent, 'query', { query: card.description || card.title })
+      const res: AgentResult = await runAgent(card.assignedAgent, 'query', { query: card.description || card.title })
       const text = summarizeResult(res)
+      let savedFile: string | undefined
+      if (res.success && card.saveToDesktop) {
+        const content = proseFromResult(res as unknown as Record<string, unknown>) ?? JSON.stringify(res, null, 2)
+        const slug = card.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'task-output'
+        const saved = await saveToDesktop(`${slug}.txt`, content)
+        if (saved.success && saved.filename) {
+          savedFile = saved.filename
+          logEvent(`Saved "${card.title}" output to Desktop\\${saved.filename}`)
+        } else {
+          logEvent(`Could not save "${card.title}" to Desktop: ${saved.error || 'unknown error'}`)
+        }
+      }
       setCards((prev) => prev.map((c) => c.id === card.id
-        ? { ...c, runResult: { success: res.success, text, at: Date.now() }, column: res.success ? 'review' : c.column, updatedAt: Date.now() }
+        ? { ...c, runResult: { success: res.success, text, at: Date.now(), savedFile }, column: res.success ? 'review' : 'assigned', updatedAt: Date.now() }
         : c))
       logEvent(`${card.assignedAgent} ${res.success ? 'completed' : 'failed'}: "${card.title}"`)
     } catch (e) {
       setCards((prev) => prev.map((c) => c.id === card.id
-        ? { ...c, runResult: { success: false, text: String(e), at: Date.now() } }
+        ? { ...c, runResult: { success: false, text: String(e), at: Date.now() }, column: 'assigned', updatedAt: Date.now() }
         : c))
       logEvent(`${card.assignedAgent} errored on "${card.title}"`)
     } finally {
@@ -178,6 +195,29 @@ export function KanbanPanel() {
       refreshAgents()
     }
   }, [logEvent, refreshAgents])
+
+  // Auto-pickup: assigning an agent to a card is enough to get it worked on --
+  // you shouldn't also have to manually hit Run. Any card sitting in Inbox or
+  // Assigned with an agent and no result yet gets picked up shortly after it
+  // appears, moving Inbox -> Assigned -> In Progress on its own.
+  const autoPickedUp = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!loaded || runningId) return
+    const pending = cards.find((c) =>
+      c.assignedAgent &&
+      !c.runResult &&
+      (c.column === 'inbox' || c.column === 'assigned') &&
+      !autoPickedUp.current.has(c.id),
+    )
+    if (!pending) return
+    autoPickedUp.current.add(pending.id)
+    if (pending.column === 'inbox') {
+      setCards((prev) => prev.map((c) => c.id === pending.id ? { ...c, column: 'assigned', updatedAt: Date.now() } : c))
+      logEvent(`${pending.assignedAgent} picked up "${pending.title}"`)
+    }
+    const t = setTimeout(() => { void runCard(pending) }, 900)
+    return () => clearTimeout(t)
+  }, [cards, loaded, runningId, logEvent, runCard])
 
   const grouped = useMemo(() => {
     const g: Record<ColumnKey, KanbanCard[]> = { inbox: [], assigned: [], in_progress: [], review: [], done: [] }
@@ -268,11 +308,24 @@ export function KanbanPanel() {
                       )}
                       {card.runResult && (
                         <div className={cn(
-                          'mb-1.5 flex items-start gap-1 rounded border px-1.5 py-1 text-[0.5rem]',
+                          'mb-1.5 flex flex-col gap-1 rounded border px-1.5 py-1 text-[0.5rem]',
                           card.runResult.success ? 'border-primary/30 bg-primary/5 text-primary' : 'border-destructive/30 bg-destructive/5 text-destructive',
                         )}>
-                          {card.runResult.success ? <CheckCircle2 className="mt-px h-3 w-3 shrink-0" /> : <XCircle className="mt-px h-3 w-3 shrink-0" />}
-                          <span className="line-clamp-2">{card.runResult.text}</span>
+                          <div className="flex items-start gap-1">
+                            {card.runResult.success ? <CheckCircle2 className="mt-px h-3 w-3 shrink-0" /> : <XCircle className="mt-px h-3 w-3 shrink-0" />}
+                            <span className="line-clamp-2">{card.runResult.text}</span>
+                          </div>
+                          {card.runResult.savedFile && (
+                            <div className="flex items-center gap-1 text-primary/80">
+                              <FileDown className="h-2.5 w-2.5 shrink-0" />
+                              <span className="truncate">Desktop\{card.runResult.savedFile}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {runningId === card.id && (
+                        <div className="mb-1.5 flex items-center gap-1 rounded border border-accent/30 bg-accent/5 px-1.5 py-1 text-[0.5rem] text-accent">
+                          <Loader2 className="h-3 w-3 shrink-0 animate-spin" /> running…
                         </div>
                       )}
                       <div className="flex items-center justify-between gap-1 text-[0.45rem] text-muted-foreground">
@@ -368,6 +421,7 @@ function CardComposer({
   const [priority, setPriority] = useState<Priority>(card?.priority ?? 'medium')
   const [dueDate, setDueDate] = useState(card?.dueDate ?? '')
   const [column, setColumn] = useState<ColumnKey>(card?.column ?? 'inbox')
+  const [saveToDesktopFlag, setSaveToDesktopFlag] = useState(card?.saveToDesktop ?? false)
 
   const submit = () => {
     if (!title.trim()) return
@@ -381,6 +435,7 @@ function CardComposer({
       priority,
       dueDate: dueDate || null,
       column,
+      saveToDesktop: saveToDesktopFlag,
       createdAt: card?.createdAt ?? now,
       updatedAt: now,
       runResult: card?.runResult,
@@ -418,6 +473,7 @@ function CardComposer({
           <div className="grid grid-cols-2 gap-2">
             <label className="flex flex-col gap-1 text-[0.5rem] text-muted-foreground">
               <span className="flex items-center gap-1"><Bot className="h-3 w-3" /> Assign agent</span>
+              <span className="text-[0.42rem] normal-case tracking-normal opacity-70">Assigning an agent dispatches this task automatically — no need to also hit Run.</span>
               <select
                 value={assignedAgent}
                 onChange={(e) => setAssignedAgent(e.target.value)}
@@ -470,6 +526,15 @@ function CardComposer({
               placeholder="e.g. research, urgent"
               className="rounded border border-border bg-background/60 px-2.5 py-1.5 text-[0.6rem] text-foreground outline-none focus:border-primary/60"
             />
+          </label>
+          <label className="flex items-center gap-2 text-[0.55rem] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={saveToDesktopFlag}
+              onChange={(e) => setSaveToDesktopFlag(e.target.checked)}
+              className="h-3 w-3 accent-primary"
+            />
+            <span className="flex items-center gap-1"><FileDown className="h-3 w-3" /> Save the agent's output to a file on the Desktop</span>
           </label>
         </div>
 
