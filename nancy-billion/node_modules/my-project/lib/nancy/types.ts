@@ -7,7 +7,10 @@ export interface LogEntry {
   text: string
 }
 
-export type PanelKey = 'overview' | 'map' | 'core' | 'agents' | 'system' | 'projects' | 'market' | 'news' | 'media'
+export type PanelKey =
+  | 'overview' | 'map' | 'core' | 'agents' | 'system' | 'projects' | 'market' | 'news' | 'media' | 'kanban'
+  | 'sessions' | 'channels' | 'instances' | 'cron' | 'skills' | 'models' | 'keys' | 'config' | 'usage'
+  | 'pairing' | 'profiles' | 'plugins' | 'mcp' | 'webhooks' | 'docs'
 
 export interface AgentInfo {
   key: string

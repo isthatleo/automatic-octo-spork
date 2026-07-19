@@ -1,46 +1,40 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
-import { Chakra_Petch, Space_Grotesk, JetBrains_Mono, Orbitron } from 'next/font/google'
+import { Geist, Geist_Mono, Instrument_Serif } from 'next/font/google'
 import './globals.css'
 
-// Chakra Petch → JARVIS-style sharp technical display face for headings & HUD.
-const chakraPetch = Chakra_Petch({
-  variable: '--font-heading',
-  subsets: ['latin'],
-  weight: ['300', '400', '500', '600', '700'],
-  display: 'swap',
-})
-// Space Grotesk → refined, modern, distinctive body face.
-const spaceGrotesk = Space_Grotesk({
+// Geist → the everyday face. Clean, humanist, confident without shouting —
+// this is the whole UI's actual voice, not a decorative sci-fi label font.
+const geist = Geist({
   variable: '--font-sans',
   subsets: ['latin'],
-  weight: ['300', '400', '500', '600', '700'],
   display: 'swap',
 })
-const jetbrainsMono = JetBrains_Mono({
+// Geist Mono → data, telemetry, code. Legible at small sizes, no gimmicks.
+const geistMono = Geist_Mono({
   variable: '--font-mono',
   subsets: ['latin'],
   display: 'swap',
 })
-// Orbitron → reserved for hero moments only (reactor readout, the orb's own
-// name plate, the biggest number on a panel) so it reads as a deliberate
-// accent rather than the everyday typeface.
-const orbitron = Orbitron({
+// Instrument Serif Italic → reserved for real hero moments only (the
+// wordmark, one big number per screen). A single deliberate, warm,
+// editorial accent instead of tracked-out all-caps sci-fi everywhere.
+const instrumentSerif = Instrument_Serif({
   variable: '--font-display',
   subsets: ['latin'],
-  weight: ['500', '700', '900'],
+  weight: '400',
+  style: 'italic',
   display: 'swap',
 })
 
 export const metadata: Metadata = {
-  title: 'NÅNCY // Stark-class Interface',
-  description:
-    'NÅNCY — a Jarvis-class voice-first assistant with holographic recon, satellite intelligence, and an autonomous agent core.',
+  title: 'Nancy — Control',
+  description: 'A calm, precise control surface for Nancy — voice, agents, and everything she runs.',
 }
 
 export const viewport: Viewport = {
   colorScheme: 'dark',
-  themeColor: '#05080d',
+  themeColor: '#131211',
   userScalable: false,
   width: 'device-width',
   initialScale: 1,
@@ -54,7 +48,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`dark ${chakraPetch.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable} ${orbitron.variable}`}
+      className={`dark ${geist.variable} ${geistMono.variable} ${instrumentSerif.variable}`}
     >
       <body className="bg-background font-sans antialiased">
         {children}

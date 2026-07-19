@@ -21,7 +21,7 @@ function JsonView({ data }: { data: unknown }) {
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[0.55rem] uppercase tracking-widest text-muted-foreground hover:text-foreground"
+        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[0.55rem] text-muted-foreground hover:text-foreground"
       >
         {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         JSON Result ({lines} lines)
@@ -95,10 +95,10 @@ export function AgentTaskModal({ agent, onClose }: AgentTaskModalProps) {
           <div>
             <div className="flex items-center gap-2">
               <Zap className="h-4 w-4 text-primary" />
-              <h2 className="font-heading text-base tracking-widest text-primary hud-glow">
+              <h2 className="font-heading text-base text-primary">
                 {agent.name}
               </h2>
-              <span className={cn('text-[0.5rem] uppercase tracking-widest', statusColor)}>
+              <span className={cn('text-[0.5rem]', statusColor)}>
                 {agent.status}
               </span>
             </div>
@@ -117,7 +117,7 @@ export function AgentTaskModal({ agent, onClose }: AgentTaskModalProps) {
         {agent.specializations.length > 0 && (
           <div className="flex flex-wrap gap-1">
             {agent.specializations.slice(0, 8).map((s) => (
-              <span key={s} className="rounded border border-border bg-secondary/30 px-1.5 py-0.5 text-[0.45rem] uppercase tracking-widest text-muted-foreground">
+              <span key={s} className="rounded border border-border bg-secondary/30 px-1.5 py-0.5 text-[0.45rem] text-muted-foreground">
                 {s}
               </span>
             ))}
@@ -129,7 +129,7 @@ export function AgentTaskModal({ agent, onClose }: AgentTaskModalProps) {
 
         {/* Task preset selector */}
         <div>
-          <label className="mb-1.5 block text-[0.55rem] uppercase tracking-widest text-muted-foreground">
+          <label className="mb-1.5 block text-[0.55rem] text-muted-foreground">
             Task Preset
           </label>
           <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
@@ -154,7 +154,7 @@ export function AgentTaskModal({ agent, onClose }: AgentTaskModalProps) {
 
         {/* Payload editor */}
         <div>
-          <label className="mb-1.5 block text-[0.55rem] uppercase tracking-widest text-muted-foreground">
+          <label className="mb-1.5 block text-[0.55rem] text-muted-foreground">
             Payload JSON
           </label>
           <textarea
@@ -178,10 +178,10 @@ export function AgentTaskModal({ agent, onClose }: AgentTaskModalProps) {
           onClick={handleRun}
           disabled={running || agent.status === 'offline'}
           className={cn(
-            'flex items-center justify-center gap-2 rounded border py-2.5 font-heading text-[0.65rem] uppercase tracking-widest transition-all',
+            'flex items-center justify-center gap-2 rounded border py-2.5 font-heading text-[0.65rem] transition-all',
             running || agent.status === 'offline'
               ? 'cursor-not-allowed border-border text-muted-foreground opacity-50'
-              : 'border-primary bg-primary/15 text-primary hover:bg-primary/25 hud-glow',
+              : 'border-primary bg-primary/15 text-primary hover:bg-primary/25',
           )}
         >
           {running ? (
@@ -200,7 +200,7 @@ export function AgentTaskModal({ agent, onClose }: AgentTaskModalProps) {
               ) : (
                 <AlertCircle className="h-3.5 w-3.5 text-destructive" />
               )}
-              <span className={cn('text-[0.6rem] uppercase tracking-widest', result.success ? 'text-primary' : 'text-destructive')}>
+              <span className={cn('text-[0.6rem]', result.success ? 'text-primary' : 'text-destructive')}>
                 {result.success ? 'Success' : 'Failed'}
               </span>
               {elapsed !== null && (
