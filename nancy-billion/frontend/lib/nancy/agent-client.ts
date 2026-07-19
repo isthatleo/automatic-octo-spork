@@ -173,6 +173,14 @@ export const AGENT_TASK_PRESETS: Record<string, TaskPreset[]> = {
     { label: 'Haptic Emit', task_type: 'haptic_emit', payload: { haptic_type: 'vibration', intensity: 0.7, duration_ms: 200, location: 'palm' }, description: 'Emit haptic feedback' },
     { label: 'Sensor Fusion', task_type: 'perception_fuse', payload: {}, description: 'Fuse all sensor modalities' },
   ],
+  file_management: [
+    { label: 'List Directory', task_type: 'list', payload: { path: '~' }, description: 'List entries in a real directory' },
+    { label: 'Read File', task_type: 'read', payload: { path: '' }, description: 'View a real file\'s contents' },
+    { label: 'Create File', task_type: 'create', payload: { path: '', content: '' }, description: 'Create a new real file' },
+    { label: 'Edit File', task_type: 'edit', payload: { path: '', content: '', mode: 'overwrite' }, description: 'Overwrite or append to a real file' },
+    { label: 'Delete File', task_type: 'delete', payload: { path: '', confirm: true }, description: 'Permanently delete a real file (irreversible)' },
+    { label: 'Organize Plan', task_type: 'organization', payload: { directory: '~', rule: 'by_type' }, description: 'Analyse a directory and propose an organization plan' },
+  ],
   // Generic presets for remaining agents
   data_science: [
     { label: 'Status', task_type: 'status', payload: {}, description: 'Agent status' },
