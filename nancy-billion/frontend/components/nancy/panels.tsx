@@ -562,106 +562,130 @@ export function CorePanel() {
     : 0
 
   return (
-    <div className="mx-auto grid max-w-[1680px] grid-cols-12 gap-4">
-      {/* ── Hero row: reactor and vitals sit as a matched pair, not a lone
-          reactor beside a stacked column of unrelated cards. ── */}
-      <HudPanel hero title="Neural Substrate" right={<span className="text-primary">STABLE</span>} className="col-span-12 lg:col-span-5">
-        <div className="flex flex-col items-center gap-4 py-2">
-          <ArcReactor size={240} />
-          <div className="grid w-full grid-cols-2 gap-2">
-            <div className="rounded border border-border/50 bg-secondary/20 p-2 text-center">
-              <div className="font-display text-xl text-primary">{llm?.backends.length ?? '–'}</div>
-              <div className="text-[0.5rem] text-muted-foreground">LLM Backends</div>
-            </div>
-            <div className="rounded border border-border/50 bg-secondary/20 p-2 text-center">
-              <div className="font-display text-xl text-accent">
-                <AnimatedNumber value={stats?.agents_online ?? 0} />
-              </div>
-              <div className="text-[0.5rem] text-muted-foreground">Agents Online</div>
-            </div>
+    <div className="mx-auto flex max-w-[1680px] flex-col gap-4">
+      {/* ── Hero: reactor as the visual anchor, vitals wrapped as a ring of
+          gauges beneath it rather than a boxed grid beside it -- a
+          genuinely different composition from Overview's briefing-strip
+          layout. ── */}
+      <div className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-br from-card via-card to-primary/5 p-6">
+        <div className="pointer-events-none absolute -left-20 -bottom-20 h-56 w-56 rounded-full bg-primary/10 blur-3xl" aria-hidden />
+        <div className="relative flex flex-col items-center gap-5">
+          <div className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+            <span className="h-1.5 w-1.5 rounded-full bg-primary animate-hud-pulse" /> Neural Substrate · <span className="text-primary">STABLE</span>
+          </div>
+          <ArcReactor size={220} />
+          <div className="grid w-full max-w-2xl grid-cols-2 gap-3 sm:grid-cols-4">
+            <RadialGauge value={health.cpu ?? 0} label="CPU Load" color="var(--hud)" size={84} />
+            <RadialGauge value={health.memory ?? 0} label="Memory" color="var(--accent)" size={84} />
+            <RadialGauge value={fleetOnlinePct} label="Fleet Online" color="var(--hud)" size={84} />
+            <RadialGauge value={(stats?.success_rate ?? 0) * 100} label="Success Rate" color="var(--tertiary)" size={84} />
           </div>
         </div>
+      </div>
+
+      {/* ── Real reasoning pipeline: the actual STT -> LLM fallback chain ->
+          TTS flow this system runs, sourced from /llm/status. Replaces a
+          previous fully-fabricated "thought trace" animation that looped a
+          hardcoded, unrelated script regardless of what was really
+          happening -- this shows the real chain instead. ── */}
+      <HudPanel title="Reasoning Pipeline · Live Chain" accent="violet" right={<span className="text-primary text-[0.5rem]">{llm ? 'synced' : '…'}</span>}>
+        <ReasoningPipeline llm={llm} loading={llmLoading} />
       </HudPanel>
 
-      <HudPanel title="System Vitals" className="col-span-12 lg:col-span-7">
-        <div className="grid h-full grid-cols-2 place-items-center gap-3 py-2 sm:grid-cols-4">
-          <RadialGauge value={health.cpu ?? 0} label="CPU Load" color="var(--hud)" size={110} />
-          <RadialGauge value={health.memory ?? 0} label="Memory" color="var(--accent)" size={110} />
-          <RadialGauge value={fleetOnlinePct} label="Fleet Online" color="var(--hud)" size={110} />
-          <RadialGauge value={(stats?.success_rate ?? 0) * 100} label="Success Rate" color="var(--tertiary)" size={110} />
-        </div>
-      </HudPanel>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_320px]">
+        <HudPanel title="Model Stack" accent="amber">
+          {llmLoading && !llm ? (
+            <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
+              <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> Reading live backend chain…
+            </div>
+          ) : (
+            <ul className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
+              {(llm?.backends ?? []).map((b, i) => (
+                <li key={`${b.name}-${i}`} className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
+                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                    <Zap className="h-3 w-3 text-primary" /> {b.name}
+                  </span>
+                  <span className="truncate text-[0.6rem] text-primary">{b.model ?? (i === 0 ? 'primary' : 'fallback')}</span>
+                </li>
+              ))}
+              {llm?.stt && (
+                <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
+                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                    <Waves className="h-3 w-3 text-primary" /> Speech-to-text
+                  </span>
+                  <span className="truncate text-[0.6rem] text-primary">{llm.stt.backend}{llm.stt.model ? ` · ${llm.stt.model}` : ''}</span>
+                </li>
+              )}
+              {llm?.tts && (
+                <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
+                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                    <Eye className="h-3 w-3 text-primary" /> Voice synthesis
+                  </span>
+                  <span className="truncate text-[0.6rem] text-primary">{llm.tts.backend}</span>
+                </li>
+              )}
+            </ul>
+          )}
+        </HudPanel>
 
-      {/* ── Second row: model stack and reasoning pipeline sit side by
-          side instead of stacked in a single narrow column. ── */}
-      <HudPanel title="Model Stack" accent="amber" className="col-span-12 lg:col-span-7">
-        {llmLoading && !llm ? (
-          <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
-            <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> Reading live backend chain…
+        <HudPanel title="Agent Fleet" accent="violet">
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between rounded border border-border/50 bg-secondary/20 px-2.5 py-2">
+              <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground"><Bot className="h-3.5 w-3.5 text-primary" /> Online</span>
+              <span className="font-heading text-sm text-primary"><AnimatedNumber value={stats?.agents_online ?? 0} /></span>
+            </div>
+            <div className="flex items-center justify-between rounded border border-border/50 bg-secondary/20 px-2.5 py-2">
+              <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground"><Zap className="h-3.5 w-3.5 text-primary" /> Tasks Run</span>
+              <span className="font-heading text-sm text-foreground"><AnimatedNumber value={stats?.total_tasks ?? 0} /></span>
+            </div>
+            <div className="flex items-center justify-between rounded border border-border/50 bg-secondary/20 px-2.5 py-2">
+              <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground"><Shield className="h-3.5 w-3.5 text-primary" /> Failures</span>
+              <span className="font-heading text-sm text-foreground"><AnimatedNumber value={stats?.failed_tasks ?? 0} /></span>
+            </div>
           </div>
-        ) : (
-          <ul className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
-            {(llm?.backends ?? []).map((b, i) => (
-              <li key={`${b.name}-${i}`} className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
-                <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
-                  <Zap className="h-3 w-3 text-primary" /> {b.name}
-                </span>
-                <span className="truncate text-[0.6rem] text-primary">{b.model ?? (i === 0 ? 'primary' : 'fallback')}</span>
-              </li>
-            ))}
-            {llm?.stt && (
-              <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
-                <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
-                  <Waves className="h-3 w-3 text-primary" /> Speech-to-text
-                </span>
-                <span className="truncate text-[0.6rem] text-primary">{llm.stt.backend}{llm.stt.model ? ` · ${llm.stt.model}` : ''}</span>
-              </li>
-            )}
-            {llm?.tts && (
-              <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
-                <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
-                  <Eye className="h-3 w-3 text-primary" /> Voice synthesis
-                </span>
-                <span className="truncate text-[0.6rem] text-primary">{llm.tts.backend}</span>
-              </li>
-            )}
-          </ul>
-        )}
-      </HudPanel>
-
-      <HudPanel title="Reasoning Pipeline" accent="violet" className="col-span-12 lg:col-span-5">
-        <ThoughtTrace />
-      </HudPanel>
+        </HudPanel>
+      </div>
     </div>
   )
 }
 
-function ThoughtTrace() {
-  const items = [
-    'Parsed utterance → intent: locate',
-    'Geocoded target → coords resolved',
-    'Solar altitude computed → -4.2°',
-    'Basemap decision → night · tinted satellite',
-    'Fly-to camera path plotted → 2.6s',
-    'Emit spoken response → cadence primed',
+/** The real reasoning chain -- STT -> each LLM backend in real fallback
+ * order -> TTS -- rendered as a flow instead of a fabricated scripted trace. */
+function ReasoningPipeline({ llm, loading }: { llm: ReturnType<typeof useLlmStatus>['data']; loading: boolean }) {
+  if (loading && !llm) {
+    return (
+      <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
+        <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> Reading live chain…
+      </div>
+    )
+  }
+  if (!llm) {
+    return <p className="py-4 text-center text-[0.6rem] text-muted-foreground">Backend chain unavailable.</p>
+  }
+  const stages: { label: string; detail: string; icon: typeof Waves }[] = [
+    { label: 'Speech-to-Text', detail: llm.stt.backend + (llm.stt.model ? ` · ${llm.stt.model}` : ''), icon: Waves },
+    ...llm.backends.map((b, i) => ({
+      label: i === 0 ? 'Primary Reasoning' : `Fallback ${i}`,
+      detail: b.model ?? b.name,
+      icon: Zap,
+    })),
+    { label: 'Voice Synthesis', detail: llm.tts.backend, icon: Eye },
   ]
-  const [n, setN] = useState(0)
-  useEffect(() => {
-    const t = setInterval(() => setN((x) => (x + 1) % (items.length + 1)), 900)
-    return () => clearInterval(t)
-  }, [items.length])
   return (
-    <ol className="flex flex-col gap-1 font-mono text-[0.6rem]">
-      {items.map((line, i) => (
-        <li key={i} className={cn(
-          'flex items-start gap-2 border-l-2 pl-2 transition-colors',
-          i < n ? 'border-primary text-foreground' : 'border-border/40 text-muted-foreground',
-        )}>
-          <span className={cn('mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full', i < n ? 'bg-primary shadow-[0_0_6px_var(--hud)]' : 'bg-muted')} />
-          {line}
-        </li>
+    <div className="flex flex-wrap items-stretch gap-1.5">
+      {stages.map((s, i) => (
+        <div key={`${s.label}-${i}`} className="flex items-stretch gap-1.5">
+          <div className="flex min-w-[130px] flex-1 flex-col items-center gap-1.5 rounded border border-border/50 bg-secondary/20 px-3 py-3 text-center">
+            <s.icon className="h-4 w-4 text-primary" />
+            <span className="font-heading text-[0.58rem] text-foreground">{s.label}</span>
+            <span className="truncate text-[0.52rem] text-muted-foreground">{s.detail}</span>
+          </div>
+          {i < stages.length - 1 && (
+            <span className="flex items-center text-primary/50" aria-hidden>→</span>
+          )}
+        </div>
       ))}
-    </ol>
+    </div>
   )
 }
 
@@ -1157,28 +1181,41 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
         )}
       </HudPanel>
 
-      {/* ── Three-up status row ── */}
-      <HudPanel title="System Diagnostics" className="col-span-12 md:col-span-4">
-        <div className="grid grid-cols-2 gap-2">
-          {[
-            { icon: Cpu, label: 'CPU', v: `${cpu.toFixed(0)}%` },
-            { icon: Database, label: 'MEM', v: `${mem.toFixed(0)}%` },
-            { icon: Folder, label: 'DISK', v: `${disk.toFixed(0)}%` },
-            { icon: Signal, label: 'NET', v: `${net.toFixed(0)}%` },
-            { icon: Thermometer, label: 'TEMP', v: health.tempC != null ? `${health.tempC.toFixed(0)}° C` : 'N/A' },
-          ].map(({ icon: Icon, label, v }) => (
-            <div key={label} className="flex items-center gap-2 rounded border border-border/50 bg-secondary/20 p-2">
-              <Icon className="h-4 w-4 text-primary" />
-              <div>
-                <div className="font-heading text-[0.75rem] text-foreground">{v}</div>
-                <div className="text-[0.45rem] text-muted-foreground">{label}</div>
+      {/* ── One console board instead of three separate boxed-stat panels:
+          live metrics on the left, real service health as a status ladder
+          on the right -- a single cohesive read instead of three
+          disconnected tiles repeating the same "grid of boxes" pattern
+          used everywhere else. ── */}
+      <HudPanel title="Systems Board" className="col-span-12 lg:col-span-8">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-[1fr_auto]">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {[
+              { icon: Cpu, label: 'CPU', v: `${cpu.toFixed(0)}%` },
+              { icon: Database, label: 'MEM', v: `${mem.toFixed(0)}%` },
+              { icon: Folder, label: 'DISK', v: `${disk.toFixed(0)}%` },
+              { icon: Signal, label: 'NET', v: `${net.toFixed(0)}%` },
+              { icon: Thermometer, label: 'TEMP', v: health.tempC != null ? `${health.tempC.toFixed(0)}° C` : 'N/A' },
+              { icon: Activity, label: 'UPTIME', v: uptime },
+            ].map(({ icon: Icon, label, v }) => (
+              <div key={label} className="flex items-center gap-2 rounded border border-border/50 bg-secondary/20 p-2">
+                <Icon className="h-4 w-4 text-primary" />
+                <div>
+                  <div className="font-heading text-[0.75rem] text-foreground">{v}</div>
+                  <div className="text-[0.45rem] text-muted-foreground">{label}</div>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
+          <div className="flex flex-col items-center justify-center gap-1 border-t border-border/40 pt-3 sm:w-28 sm:border-l sm:border-t-0 sm:pl-4 sm:pt-0">
+            <Bot className="h-5 w-5 text-primary" />
+            <span className="font-heading text-lg text-foreground">{agentStats ? agentStats.agents_online : '…'}</span>
+            <span className="text-[0.45rem] text-muted-foreground">agents online</span>
+            <span className="mt-1 text-[0.5rem] text-muted-foreground">{agentStats ? `${agentStats.total_tasks} tasks run` : ''}</span>
+          </div>
         </div>
       </HudPanel>
 
-      <HudPanel title="Backend Health" accent="amber" className="col-span-12 md:col-span-4">
+      <HudPanel title="Backend Health" accent="amber" className="col-span-12 lg:col-span-4">
         <ul className="space-y-1.5 text-[0.6rem]">
           {[
             ['Agent Service', agentStats ? `${agentStats.agents_online} online` : 'initialising', ShieldCheck, agentStats ? 'ok' : 'warn'],
@@ -1198,22 +1235,6 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
             )
           })}
         </ul>
-      </HudPanel>
-
-      <HudPanel title="Fleet Snapshot" accent="violet" className="col-span-12 md:col-span-4">
-        <div className="grid grid-cols-3 gap-2 text-center">
-          {[
-            { icon: Bot, label: 'Agents', v: agentStats ? `${agentStats.agents_online}` : '…' },
-            { icon: Zap, label: 'Tasks', v: agentStats ? `${agentStats.total_tasks}` : '…' },
-            { icon: Activity, label: 'Uptime', v: uptime },
-          ].map(({ icon: Icon, label, v }) => (
-            <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/50 bg-secondary/20 py-3">
-              <Icon className="h-5 w-5 text-primary" />
-              <span className="font-heading text-sm text-foreground">{v}</span>
-              <span className="text-[0.5rem] text-muted-foreground">{label}</span>
-            </div>
-          ))}
-        </div>
       </HudPanel>
 
       <HudPanel title="Live Kernel Log" className="col-span-12" right={<span className="text-primary text-[0.5rem]">tick {tick}</span>}>
