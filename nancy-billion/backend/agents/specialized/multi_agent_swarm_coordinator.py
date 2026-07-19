@@ -797,10 +797,13 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
     
     async def _general_swarm_overview(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Provide general swarm overview"""
+        query = params.get("query", "general swarm question")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-swarm-overview",
-            "query": params.get("query", "general swarm question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "swarm_status": {
                 "total_agents": len(self.registered_agents),
                 "available_agents": len([a for a in self.registered_agents.values() if a["status"] == "available"]),

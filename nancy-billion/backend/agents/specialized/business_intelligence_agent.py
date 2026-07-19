@@ -328,10 +328,13 @@ class BusinessIntelligenceAgent(SpecializedAgent):
 
     async def _general_bi_consultation(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Provide general business intelligence consultation"""
+        query = params.get("query", "general BI question")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-bi-consultation",
-            "query": params.get("query", "general BI question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "bi_lifecycle": [
                 "data_collection",
                 "data_integration",

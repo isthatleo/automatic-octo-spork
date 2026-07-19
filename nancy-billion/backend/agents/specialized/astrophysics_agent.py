@@ -450,10 +450,13 @@ class AstrophysicsAgent(SpecializedAgent):
         }
 
     async def _general_astrophysics_overview(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general astrophysics question")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-astrophysics-overview",
-            "query": params.get("query", "general astrophysics question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "research_areas": [
                 {"area": "cosmology", "focus": ["dark_energy", "dark_matter", "inflation", "cmb"], "facilities": ["planck", "simons_observatory", "cmb-s4"]},
                 {"area": "galactic_astronomy", "focus": ["milky_way_structure", "stellar_populations", "dark_matter_halo"], "facilities": ["gaia", "lsst", "ska"]},

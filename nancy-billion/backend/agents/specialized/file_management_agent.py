@@ -593,10 +593,13 @@ class FileManagementAgent(SpecializedAgent):
         return alerts
 
     async def _general_file_overview(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general file management question")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-file-overview",
-            "query": params.get("query", "general file management question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "file_management_domains": [
                 {"domain": "file_organization", "focus": ["classification", "tagging", "metadata", "retention"], "techniques": ["rule_based", "ml_based", "user_defined"]},
                 {"domain": "backup_and_recovery", "focus": ["full_backup", "incremental", "differential", "snapshot"], "strategies": ["3-2-1_rule", "grandfather_father_son", "tower_of_hanoi"]},

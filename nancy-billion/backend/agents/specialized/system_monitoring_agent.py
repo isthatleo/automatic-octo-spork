@@ -170,9 +170,12 @@ class SystemMonitoringAgent(SpecializedAgent):
         return recs
 
     async def _general_monitoring_overview(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general system monitoring question")
+        answer = await self._llm_answer(query)
         return {
             "success": True, "task_type": "general-monitoring-overview",
-            "query": params.get("query", "general system monitoring question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "monitoring_capabilities": [
                 {"capability": "real_time_monitoring", "metrics": ["cpu", "memory", "disk", "network", "processes"], "frequency": "configurable"},
                 {"capability": "health_checks", "types": ["basic", "detailed", "comprehensive"]}

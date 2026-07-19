@@ -444,10 +444,14 @@ class BioinformaticsAgent(SpecializedAgent):
         sites = self._find_restriction_sites(demo_seq)
         codon = self._codon_usage(demo_seq)
 
+        query = params.get("query", "general bioinformatics question")
+        answer = await self._llm_answer(query)
+
         return {
             "success": True,
             "task_type": "general-bioinformatics-overview",
-            "query": params.get("query", "general bioinformatics question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "key_areas": [
                 "sequence_alignment",
                 "variant_calling",

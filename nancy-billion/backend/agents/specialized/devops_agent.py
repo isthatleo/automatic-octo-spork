@@ -622,11 +622,15 @@ class DevOpsAgent(SpecializedAgent):
         git_info = _get_git_info()
         network_info = _get_network_info()
 
+        query = params.get("query", "general DevOps question")
+        answer = await self._llm_answer(query)
+
         return {
             "success": True,
             "task_type": "general-devops-consultation",
             "timestamp": datetime.datetime.now().isoformat(),
-            "query": params.get("query", "general DevOps question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "current_system": {
                 "hostname": network_info.get("hostname", "unknown"),
                 "cpu_utilization": f"{system_stats.get('cpu', {}).get('percent', 0)}%",

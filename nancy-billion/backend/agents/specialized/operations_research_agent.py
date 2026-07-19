@@ -303,10 +303,13 @@ class OperationsResearchAgent(SpecializedAgent):
 
     async def _general_or_consultation(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Provide general operations research consultation"""
+        query = params.get("query", "general operations research question")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-or-consultation",
-            "query": params.get("query", "general operations research question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "or_methodologies": [
                 {"method": "linear_programming", "applications": ["resource_allocation", "production_planning", "transportation"], "assumptions": ["linearity", "divisibility", "certainty"]},
                 {"method": "integer_programming", "applications": ["facility_location", "network_design", "scheduling"], "assumptions": ["integrality", "linearity"]},

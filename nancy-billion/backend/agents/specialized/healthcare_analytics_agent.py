@@ -376,10 +376,13 @@ class HealthcareAnalyticsAgent(SpecializedAgent):
 
     async def _general_healthcare_analytics(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Handle general healthcare analytics requests"""
+        query = params.get("query", "general healthcare analytics question")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-healthcare-analytics",
-            "query": params.get("query", "general healthcare analytics question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "analytics_capabilities": [
                 "Patient outcomes analysis and reporting",
                 "Treatment effectiveness and comparative effectiveness research",

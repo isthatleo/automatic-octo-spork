@@ -185,10 +185,13 @@ class MarketResearchAgent(SpecializedAgent):
 
     async def _general_research_overview(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Provide general market research overview"""
+        query = params.get("query", "general market research")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-market-research",
-            "query": params.get("query", "general market research"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "key_indicators": [
                 "market_size_growth",
                 "consumer_confidence",

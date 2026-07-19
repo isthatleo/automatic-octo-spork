@@ -748,10 +748,13 @@ class LegalComplianceAgent(SpecializedAgent):
         }
 
     async def _general_legal_overview(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general legal compliance question")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-legal-overview",
-            "query": params.get("query", "general legal compliance question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "legal_domains": [
                 {"domain": "corporate_law", "focus": ["formation", "governance", "mergers_acquisitions"], "jurisdictions": ["delaware", "new_york", "california"]},
                 {"domain": "intellectual_property", "focus": ["patents", "trademarks", "copyrights", "trade_secrets"], "jurisdictions": ["uspto", "wipo", "epo"]},

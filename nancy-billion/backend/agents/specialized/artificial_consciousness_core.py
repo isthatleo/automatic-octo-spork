@@ -554,10 +554,13 @@ class ArtificialConsciousnessCore(SpecializedAgent):
         return recommendations[:3]
 
     async def _general_consciousness_overview(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general consciousness question")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-consciousness-overview",
-            "query": params.get("query", "general consciousness question"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "theoretical_frameworks": [
                 {
                     "name": "Global Workspace Theory (GWT)",

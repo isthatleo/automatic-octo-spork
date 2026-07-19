@@ -52,9 +52,9 @@ class DataScienceAgent(SpecializedAgent):
         elif task_type == "feature-engineering":
             return self._engineer_features(task_data)
         elif task_type in ("status", "query"):
-            return self._general_data_science(task_data)
+            return await self._general_data_science(task_data)
         else:
-            return self._general_data_science(task_data)
+            return await self._general_data_science(task_data)
 
     def _perform_statistical_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
         data = params.get("data", [])
@@ -505,11 +505,14 @@ class DataScienceAgent(SpecializedAgent):
         ]
         return result
 
-    def _general_data_science(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _general_data_science(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "general data science task")
+        answer = await self._llm_answer(query)
         return {
             "success": True,
             "task_type": "general-data-science",
-            "query": params.get("query", "general data science task"),
+            "query": query,
+            **({"response": answer} if answer else {}),
             "capabilities_available": [
                 "Statistical analysis and hypothesis testing",
                 "Machine learning model building and evaluation",
