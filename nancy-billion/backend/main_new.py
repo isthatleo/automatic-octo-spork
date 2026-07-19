@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
@@ -68,6 +69,7 @@ from context_manager import NancyContextualBrain, IntentType
 from memory import MemoryManager, MemoryType
 from cron_store import cron_store
 from skills_store import skills_store
+from webhooks_store import webhook_store, VALID_EVENTS
 from startup import StartupCoordinator, NancyGreeting
 from intelligent_greeting import IntelligentStartupCoordinator, PersonalContext
 from trading import (
@@ -304,6 +306,24 @@ async def _notify_if_long_running(label: str, started_at: float, result: Any) ->
         return
     summary = str(result.get("response") or result.get("result") or result)[:300]
     await telegram_notifier.send(f"Finished {label} ({elapsed:.0f}s):\n\n{summary}")
+
+
+async def _fire_webhooks(event: str, payload: Dict[str, Any]) -> None:
+    """Real outbound delivery -- POSTs the event payload to every enabled
+    webhook subscribed to it. Fire-and-forget: failures are recorded on the
+    subscription (last_status) but never raised, since a broken third-party
+    endpoint must not break the real event that triggered this."""
+    hooks = webhook_store.for_event(event)
+    if not hooks:
+        return
+    body = {"event": event, "fired_at": _time.time(), **payload}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for hook in hooks:
+            try:
+                resp = await client.post(hook.url, json=body)
+                webhook_store.mark_fired(hook.id, "ok" if resp.is_success else f"http_{resp.status_code}")
+            except Exception as exc:
+                webhook_store.mark_fired(hook.id, f"error: {exc}")
 
 
 def _maybe_gate_self_improvement(agent_key: str, result: Dict[str, Any]) -> None:
@@ -674,6 +694,10 @@ class CronJobCreateRequest(BaseModel):
     minute: int
     action_type: str  # "telegram_message" | "agent_task"
     action_payload: Dict[str, Any] = {}
+
+class WebhookCreateRequest(BaseModel):
+    url: str
+    event: str
 
 class SkillCreateRequest(BaseModel):
     name: str
@@ -1336,6 +1360,58 @@ async def delete_cron_job(job_id: str):
     return {"success": True}
 
 
+@app.get("/webhooks")
+async def list_webhooks():
+    """Real, persisted outbound webhook subscriptions (data/webhooks.json) --
+    each one actually gets a real HTTP POST when its subscribed event fires
+    (see _fire_webhooks, called from _cron_execution_loop and /agents/run)."""
+    return {"success": True, "webhooks": [asdict(h) for h in webhook_store.list()], "valid_events": sorted(VALID_EVENTS)}
+
+
+@app.post("/webhooks")
+async def create_webhook(req: WebhookCreateRequest):
+    if req.event not in VALID_EVENTS:
+        raise HTTPException(status_code=400, detail=f"event must be one of {sorted(VALID_EVENTS)}")
+    if not (req.url.startswith("http://") or req.url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="url must start with http:// or https://")
+    hook = webhook_store.create(req.url, req.event)
+    return {"success": True, "webhook": asdict(hook)}
+
+
+@app.patch("/webhooks/{hook_id}")
+async def toggle_webhook(hook_id: str, enabled: bool):
+    hook = webhook_store.set_enabled(hook_id, enabled)
+    if not hook:
+        raise HTTPException(status_code=404, detail="webhook not found")
+    return {"success": True, "webhook": asdict(hook)}
+
+
+@app.delete("/webhooks/{hook_id}")
+async def delete_webhook(hook_id: str):
+    if not webhook_store.delete(hook_id):
+        raise HTTPException(status_code=404, detail="webhook not found")
+    return {"success": True}
+
+
+@app.post("/webhooks/{hook_id}/test")
+async def test_webhook(hook_id: str):
+    """Fires one real test delivery to this specific webhook right now,
+    regardless of whether its real event has actually happened, so the user
+    can confirm their endpoint is reachable before waiting for a real event."""
+    hooks = {h.id: h for h in webhook_store.list()}
+    hook = hooks.get(hook_id)
+    if not hook:
+        raise HTTPException(status_code=404, detail="webhook not found")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.post(hook.url, json={"event": hook.event, "fired_at": _time.time(), "test": True})
+            status = "ok" if resp.is_success else f"http_{resp.status_code}"
+        except Exception as exc:
+            status = f"error: {exc}"
+    webhook_store.mark_fired(hook_id, status)
+    return {"success": not status.startswith("error") and not status.startswith("http_4") and not status.startswith("http_5"), "status": status}
+
+
 @app.get("/skills/custom")
 async def list_custom_skills():
     """User-created skill records -- real, persisted (data/skills.json).
@@ -1504,6 +1580,7 @@ async def run_agent(req: AgentRunRequest):
     result = await agent_service.run(req.agent_key, task_data, timeout=req.timeout)
     await _notify_if_long_running(f"agent '{req.agent_key}' ({req.task_type})", started, result)
     _maybe_gate_self_improvement(req.agent_key, result)
+    await _fire_webhooks("agent_task_completed", {"agent_key": req.agent_key, "task_type": req.task_type, "result": result})
     return result
 
 
@@ -1903,6 +1980,7 @@ async def _cron_execution_loop() -> None:
                         text = job.action_payload.get("text", "")
                         await telegram_notifier.send(text)
                         cron_store.mark_run(job.id, "sent telegram message")
+                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": "sent telegram message"})
                     elif job.action_type == "agent_task":
                         agent_key = job.action_payload.get("agent_key")
                         task_type = job.action_payload.get("task_type", "query")
@@ -1913,6 +1991,7 @@ async def _cron_execution_loop() -> None:
                             cron_store.mark_run(job.id, summary)
                             if telegram_notifier.status["available"]:
                                 await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
+                            await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": result})
                         else:
                             cron_store.mark_run(job.id, "skipped: agent service not ready")
                 except Exception as e:

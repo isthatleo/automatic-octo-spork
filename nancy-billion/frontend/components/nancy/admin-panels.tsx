@@ -1317,40 +1317,227 @@ export function ProfilesPanel() {
   )
 }
 
-/* ═══════════════════ PLUGINS / MCP / WEBHOOKS — honestly not built ═════ */
-export function PluginsPanel() {
+/* ═══════════════════ PLUGINS / MCP — honestly not built ════════════════
+   No fake marketplace or protocol client -- these capabilities genuinely
+   don't exist yet. Redesigned as a considered "not built" state (icon
+   badge + explanation + a real pointer to what actually provides that
+   capability today) instead of the plain EmptyNote box, without
+   pretending either system is real. ══════════════════════════════════ */
+function NotYetBuilt({
+  icon: Icon, title, body, pointerLabel, onPointerClick,
+}: {
+  icon: React.ElementType
+  title: string
+  body: string
+  pointerLabel: string
+  onPointerClick?: () => void
+}) {
   return (
-    <div className="mx-auto max-w-[1680px]">
-      <HudPanel hero title="Plugins" className="col-span-12">
-        <EmptyNote>
-          <PlugZap className="mx-auto mb-2 h-5 w-5 text-muted-foreground" />
-          No plugin system exists in this build. Nancy's extensibility is real specialized agents (see Agents) and self-created subagents, not a plugin marketplace.
-        </EmptyNote>
-      </HudPanel>
+    <div className="mx-auto flex max-w-[560px] flex-col items-center gap-4 rounded-xl border border-dashed border-border/60 bg-card/40 px-6 py-12 text-center">
+      <span className="flex h-14 w-14 items-center justify-center rounded-full border border-border/60 bg-secondary/30">
+        <Icon className="h-6 w-6 text-muted-foreground" />
+      </span>
+      <div>
+        <h2 className="font-heading text-sm text-foreground">{title}</h2>
+        <p className="mt-2 text-[0.62rem] leading-relaxed text-muted-foreground">{body}</p>
+      </div>
+      {onPointerClick && (
+        <button type="button" onClick={onPointerClick} className="flex items-center gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-3 py-1.5 text-[0.58rem] text-primary transition-colors hover:bg-primary/20">
+          <Bot className="h-3 w-3" /> {pointerLabel}
+        </button>
+      )}
     </div>
   )
 }
-export function McpPanel() {
+
+export function PluginsPanel({ onNavigate }: { onNavigate?: () => void } = {}) {
   return (
-    <div className="mx-auto max-w-[1680px]">
-      <HudPanel hero title="MCP Servers" className="col-span-12">
-        <EmptyNote>
-          <Wrench className="mx-auto mb-2 h-5 w-5 text-muted-foreground" />
-          No Model Context Protocol integration is wired up yet — Nancy's tool-use is Claude's native tool-calling (see AI Core → Model Stack) against a fixed local tool set, not external MCP servers.
-        </EmptyNote>
-      </HudPanel>
-    </div>
+    <NotYetBuilt
+      icon={PlugZap}
+      title="No plugin system in this build"
+      body="Nancy's extensibility is real specialized agents and self-created subagents, not a plugin marketplace. Adding a capability here means adding a real agent, not installing a package."
+      pointerLabel="See the real agent fleet →"
+      onPointerClick={onNavigate}
+    />
   )
 }
+export function McpPanel({ onNavigate }: { onNavigate?: () => void } = {}) {
+  return (
+    <NotYetBuilt
+      icon={Wrench}
+      title="No MCP integration wired up yet"
+      body="Nancy's tool-use today is Claude's native tool-calling against a fixed local tool set, not external Model Context Protocol servers. This page will become real the day that integration actually exists."
+      pointerLabel="See the real model stack →"
+      onPointerClick={onNavigate}
+    />
+  )
+}
+/* ═══════════════════ WEBHOOKS — real outbound HTTP delivery ═══════════
+   A genuine subscription system: POST /webhooks stores a real (url, event)
+   pair, and _fire_webhooks in main_new.py actually POSTs to it when the
+   event really happens (_cron_execution_loop for "cron_job_ran", the
+   /agents/run endpoint for "agent_task_completed"). Not a form that writes
+   to a list nothing ever reads. ═══════════════════════════════════════ */
+interface WebhookRecord {
+  id: string
+  url: string
+  event: string
+  enabled: boolean
+  created_at: number
+  last_fired_at: number | null
+  last_status: string | null
+  fire_count: number
+}
+const WEBHOOK_EVENT_LABELS: Record<string, string> = {
+  cron_job_ran: 'Cron job ran',
+  agent_task_completed: 'Agent task completed',
+}
+
 export function WebhooksPanel() {
+  const [hooks, setHooks] = useState<WebhookRecord[]>([])
+  const [validEvents, setValidEvents] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
+  const [url, setUrl] = useState('')
+  const [event, setEvent] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [testingId, setTestingId] = useState<string | null>(null)
+  const [formError, setFormError] = useState<string | null>(null)
+
+  const fetchHooks = useCallback(async () => {
+    try {
+      const res = await fetch('/api/webhooks')
+      const json = await res.json()
+      if (json.success) {
+        setHooks(json.webhooks)
+        setValidEvents(json.valid_events)
+      }
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchHooks()
+    const t = setInterval(fetchHooks, 30_000)
+    return () => clearInterval(t)
+  }, [fetchHooks])
+
+  useEffect(() => {
+    if (!event && validEvents.length > 0) setEvent(validEvents[0])
+  }, [validEvents, event])
+
+  const createHook = async () => {
+    if (!url.trim() || !event) return
+    setCreating(true); setFormError(null)
+    try {
+      const res = await fetch('/api/webhooks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url.trim(), event }),
+      })
+      const json = await res.json()
+      if (!json.success) { setFormError(json.detail || 'Failed to create webhook'); return }
+      setUrl('')
+      fetchHooks()
+    } catch (e) {
+      setFormError(String(e))
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const toggleHook = async (hook: WebhookRecord) => {
+    await fetch(`/api/webhooks/${hook.id}?enabled=${!hook.enabled}`, { method: 'PATCH' })
+    fetchHooks()
+  }
+  const deleteHook = async (hook: WebhookRecord) => {
+    await fetch(`/api/webhooks/${hook.id}`, { method: 'DELETE' })
+    fetchHooks()
+  }
+  const testHook = async (hook: WebhookRecord) => {
+    setTestingId(hook.id)
+    try {
+      await fetch(`/api/webhooks/${hook.id}/test`, { method: 'POST' })
+      fetchHooks()
+    } finally {
+      setTestingId(null)
+    }
+  }
+
   return (
-    <div className="mx-auto max-w-[1680px]">
-      <HudPanel hero title="Webhooks" className="col-span-12">
-        <EmptyNote>
-          <Webhook className="mx-auto mb-2 h-5 w-5 text-muted-foreground" />
-          No outbound webhook subscription system exists. Real-time delivery today is Telegram push notifications (see Channels) and the live WebSocket session, not configurable webhooks.
-        </EmptyNote>
-      </HudPanel>
+    <div className="mx-auto flex max-w-[900px] flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/60 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Webhook className="h-4 w-4 text-primary" />
+          <span className="font-heading text-xs text-foreground">Outbound Webhooks</span>
+        </div>
+        <span className="text-[0.55rem] text-muted-foreground">
+          {hooks.length} subscribed · real delivery on {validEvents.map((e) => WEBHOOK_EVENT_LABELS[e] ?? e).join(' & ') || '…'}
+        </span>
+      </div>
+
+      <div className="rounded-xl border border-border bg-card/60 p-4">
+        <h3 className="mb-2.5 flex items-center gap-2 font-heading text-[0.68rem] text-foreground">
+          <Plus className="h-3.5 w-3.5 text-primary" /> New Subscription
+        </h3>
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-[1fr_180px_auto]">
+          <div>
+            <FieldLabel>Target URL</FieldLabel>
+            <input className={inputCls} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/hook" />
+          </div>
+          <div>
+            <FieldLabel>Event</FieldLabel>
+            <select className={inputCls} value={event} onChange={(e) => setEvent(e.target.value)}>
+              {validEvents.map((ev) => <option key={ev} value={ev}>{WEBHOOK_EVENT_LABELS[ev] ?? ev}</option>)}
+            </select>
+          </div>
+          <div className="flex items-end">
+            <PrimaryButton onClick={createHook} disabled={creating || !url.trim()}>
+              {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Add
+            </PrimaryButton>
+          </div>
+        </div>
+        {formError && <p className="mt-2 text-[0.55rem] text-destructive">{formError}</p>}
+      </div>
+
+      <div className="rounded-xl border border-border bg-card/60">
+        <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">
+          Real HTTP POST delivery — fired by the actual cron execution loop and the agent-run endpoint in the backend, not simulated.
+        </p>
+        {loading && hooks.length === 0 ? (
+          <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
+            <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…
+          </div>
+        ) : hooks.length === 0 ? (
+          <EmptyNote>No webhooks yet — add one above. It&rsquo;ll receive a real POST the next time its event fires.</EmptyNote>
+        ) : (
+          <ul className="divide-y divide-border/40">
+            {hooks.map((h) => (
+              <li key={h.id} className="flex flex-wrap items-center gap-3 px-4 py-2.5">
+                <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full border', h.enabled ? 'border-primary/40 bg-primary/10' : 'border-border/50 bg-secondary/20')}>
+                  <Webhook className={cn('h-3.5 w-3.5', h.enabled ? 'text-primary' : 'text-muted-foreground')} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[0.62rem] text-foreground">{h.url}</div>
+                  <div className="text-[0.5rem] text-muted-foreground">
+                    {WEBHOOK_EVENT_LABELS[h.event] ?? h.event} · fired {h.fire_count}x
+                    {h.last_status && <> · last: <span className={h.last_status === 'ok' ? 'text-primary' : 'text-destructive'}>{h.last_status}</span></>}
+                  </div>
+                </div>
+                <button type="button" onClick={() => testHook(h)} disabled={testingId === h.id} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Send test delivery">
+                  {testingId === h.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                </button>
+                <button type="button" onClick={() => toggleHook(h)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Toggle enabled">
+                  {h.enabled ? <ToggleRight className="h-4 w-4 text-primary" /> : <ToggleLeft className="h-4 w-4" />}
+                </button>
+                <button type="button" onClick={() => deleteHook(h)} className="rounded p-1.5 text-muted-foreground hover:text-destructive" title="Delete">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   )
 }

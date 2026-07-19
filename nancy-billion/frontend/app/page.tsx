@@ -883,8 +883,8 @@ function WorkspaceLayout({
               {panel === 'usage' && <UsagePanel />}
               {panel === 'profiles' && <ProfilesPanel />}
               {panel === 'pairing' && <PairingPanel />}
-              {panel === 'plugins' && <PluginsPanel />}
-              {panel === 'mcp' && <McpPanel />}
+              {panel === 'plugins' && <PluginsPanel onNavigate={() => onNav('agents')} />}
+              {panel === 'mcp' && <McpPanel onNavigate={() => onNav('core')} />}
               {panel === 'webhooks' && <WebhooksPanel />}
               {panel === 'docs' && <DocsPanel />}
             </div>
