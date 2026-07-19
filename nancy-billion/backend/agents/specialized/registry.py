@@ -33,6 +33,9 @@ from .embodied_cognition_interface import EmbodiedCognitionInterface
 from .temporal_prediction_engine import TemporalPredictionEngine
 from .multi_agent_swarm_coordinator import MultiAgentSwarmCoordinator
 from .quantum_reasoning_accelerator import QuantumReasoningAccelerator
+# Real LLM-backed planning/orchestration agents
+from .planning_agent import PlanningAgent
+from .dispatcher_agent import DispatcherAgent
 
 # Registry of all available specialized agents
 SPECIALIZED_AGENTS = {
@@ -68,6 +71,9 @@ SPECIALIZED_AGENTS = {
     "temporal_prediction":      TemporalPredictionEngine,
     "swarm_coordinator":        MultiAgentSwarmCoordinator,
     "quantum_reasoning":        QuantumReasoningAccelerator,
+    # ---- Real LLM-backed planning/orchestration agents ----
+    "planning":                 PlanningAgent,
+    "dispatcher":               DispatcherAgent,
 }
 
 def get_available_agents():
