@@ -187,51 +187,49 @@ export function OverviewPanel() {
 
   return (
     <div className="mx-auto flex max-w-[1680px] flex-col gap-4">
-      {/* slim briefing strip -- same language as the Fleet Console header,
-          so pages read as one product instead of one-off box grids */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/60 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <span className="font-display text-xl text-foreground">Mission Briefing</span>
-          <span className="flex items-center gap-1.5 text-[0.62rem] text-muted-foreground">
-            <Activity className="h-3 w-3 text-primary animate-hud-breathe" /> Session {uptime}
-          </span>
-        </div>
-        <div className="flex items-center gap-4 text-[0.68rem]">
-          {bigStats.map((s) => (
-            <span key={s.label} className="flex items-center gap-1.5">
-              <s.icon className="h-3.5 w-3.5 text-muted-foreground" />
-              <span className="font-display text-base text-foreground"><AnimatedNumber value={s.v} /></span>
-              <span className="text-muted-foreground">{s.label.toLowerCase()}</span>
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* spotlight core -- a deliberately distinct card (gradient ring
-          border, asymmetric split), not another hairline HudPanel box */}
+      {/* ── One compact hero band (reactor + headline stats + vitals all in
+          a single row) instead of two stacked hero blocks -- a genuine
+          bento grid follows instead of a fixed two-column [content|rail]
+          split, so this reads as its own composition rather than the same
+          "column of cards" shape repeated with different content. ── */}
       <div className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-br from-card via-card to-primary/5 p-5">
         <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-primary/10 blur-3xl" aria-hidden />
-        <div className="relative grid grid-cols-1 gap-6 md:grid-cols-[auto_1fr]">
-          <div className="flex flex-col items-center justify-center gap-2">
-            <ArcReactor size={168} />
-            <div className="text-center">
+        <div className="relative flex flex-wrap items-center gap-6">
+          <div className="flex items-center gap-3">
+            <ArcReactor size={100} />
+            <div>
               <div className="font-display text-2xl tracking-tight text-primary">
                 <AnimatedNumber value={successPct} decimals={1} /> <span className="text-sm text-muted-foreground">%</span>
               </div>
               <div className="text-[0.55rem] text-muted-foreground">fleet success</div>
             </div>
           </div>
-          <div className="flex flex-col justify-center gap-3">
+          <div className="h-10 w-px bg-border/50" />
+          <div className="flex items-center gap-1.5 text-[0.62rem] text-muted-foreground">
+            <Activity className="h-3 w-3 text-primary animate-hud-breathe" /> Session {uptime}
+          </div>
+          <div className="ml-auto flex flex-wrap items-center gap-4 text-[0.68rem]">
+            {bigStats.map((s) => (
+              <span key={s.label} className="flex items-center gap-1.5">
+                <s.icon className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="font-display text-base text-foreground"><AnimatedNumber value={s.v} /></span>
+                <span className="text-muted-foreground">{s.label.toLowerCase()}</span>
+              </span>
+            ))}
+          </div>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-[260px] sm:flex-1">
             <StatBar label="Neural CPU" value={cpu.toFixed(0)} unit="%" pct={cpu} />
             <StatBar label="Memory" value={mem.toFixed(0)} unit="%" pct={mem} amber />
-            <StatBar label="Uplink" value={net.toFixed(0)} unit="%" pct={net} />
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        {/* LEFT column */}
-        <div className="flex flex-col gap-4">
+      {/* ── Bento grid: varied tile sizes instead of a uniform two-up or
+          three-up repeat. Global Track spans two rows on the right; the
+          telemetry chart leads wide on the left; activity closes full
+          width at the bottom. ── */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
+        <div className="md:col-span-8">
           <HudPanel title="System Telemetry · Live" right={<span className="text-primary text-[0.5rem]">Δ {tick}</span>}>
             <SystemTelemetryChart history={telemetryHistory} height={208} />
             <div className="mt-3 flex items-center gap-3 text-[0.5rem] text-muted-foreground">
@@ -240,50 +238,9 @@ export function OverviewPanel() {
               <LegendDot color="oklch(0.7 0.16 160)" label="uplink" />
             </div>
           </HudPanel>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <HudPanel title="Agent Domains" accent="violet">
-              <AgentDomainChart agents={agents} />
-            </HudPanel>
-            <HudPanel title="Fleet & System Vitals">
-              <div className="flex flex-wrap items-center justify-around gap-2 py-1">
-                <RadialGauge value={cpu} label="CPU" color="var(--hud)" size={72} />
-                <RadialGauge value={fleetOnlinePct} label="Fleet" color="var(--accent)" size={72} />
-                <RadialGauge value={health.disk ?? 0} label="Disk" color="var(--tertiary)" size={72} />
-              </div>
-              <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-                {[
-                  { icon: Cpu, label: 'Cores', v: cores != null ? `${cores}` : '…' },
-                  { icon: Database, label: 'Mem', v: `${mem.toFixed(0)}%` },
-                  { icon: Thermometer, label: 'Temp', v: health.tempC != null ? `${health.tempC.toFixed(0)}°C` : 'N/A' },
-                ].map(({ icon: Icon, label, v }) => (
-                  <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/60 bg-secondary/30 py-2">
-                    <Icon className="h-4 w-4 text-primary" />
-                    <span className="font-heading text-xs text-foreground">{v}</span>
-                    <span className="text-[0.45rem] text-muted-foreground">{label}</span>
-                  </div>
-                ))}
-              </div>
-            </HudPanel>
-          </div>
-
-          {/* Activity as a real timeline (connecting rail + dots), not a
-              bordered box of list rows -- visually distinct from every
-              other panel on this page. */}
-          <div className="rounded-xl border border-border bg-card/60 p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="flex items-center gap-2 font-heading text-[0.72rem] font-medium text-foreground/90">
-                <span className="h-1.5 w-1.5 rounded-full bg-primary" /> Activity
-              </h2>
-              <span className="text-primary text-xs">Live</span>
-            </div>
-            <ActivityTimeline cpu={cpu} mem={mem} net={net} stats={stats} />
-          </div>
         </div>
 
-        {/* RIGHT rail -- one continuous card with internal dividers instead
-            of three stacked, identical boxes. */}
-        <div className="flex flex-col gap-4 rounded-xl border border-border bg-card/60 p-4 xl:sticky xl:top-4 xl:self-start">
+        <div className="flex flex-col gap-4 rounded-xl border border-border bg-card/60 p-4 md:col-span-4 md:row-span-2">
           <div>
             <div className="mb-2 flex items-center justify-between">
               <h2 className="font-heading text-[0.72rem] font-medium text-foreground/90">Global Track</h2>
@@ -296,6 +253,46 @@ export function OverviewPanel() {
             <h2 className="mb-2 font-heading text-[0.72rem] font-medium text-foreground/90">Trading P/L · Recent</h2>
             <TradePLChart />
           </div>
+        </div>
+
+        <div className="md:col-span-4">
+          <HudPanel title="Agent Domains" accent="violet">
+            <AgentDomainChart agents={agents} />
+          </HudPanel>
+        </div>
+        <div className="md:col-span-4">
+          <HudPanel title="Fleet & System Vitals">
+            <div className="flex flex-wrap items-center justify-around gap-2 py-1">
+              <RadialGauge value={cpu} label="CPU" color="var(--hud)" size={72} />
+              <RadialGauge value={fleetOnlinePct} label="Fleet" color="var(--accent)" size={72} />
+              <RadialGauge value={health.disk ?? 0} label="Disk" color="var(--tertiary)" size={72} />
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+              {[
+                { icon: Cpu, label: 'Cores', v: cores != null ? `${cores}` : '…' },
+                { icon: Database, label: 'Mem', v: `${mem.toFixed(0)}%` },
+                { icon: Thermometer, label: 'Temp', v: health.tempC != null ? `${health.tempC.toFixed(0)}°C` : 'N/A' },
+              ].map(({ icon: Icon, label, v }) => (
+                <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/60 bg-secondary/30 py-2">
+                  <Icon className="h-4 w-4 text-primary" />
+                  <span className="font-heading text-xs text-foreground">{v}</span>
+                  <span className="text-[0.45rem] text-muted-foreground">{label}</span>
+                </div>
+              ))}
+            </div>
+          </HudPanel>
+        </div>
+
+        {/* Activity as a real timeline (connecting rail + dots), full width
+            across the bottom of the grid instead of tucked in a column. */}
+        <div className="rounded-xl border border-border bg-card/60 p-4 md:col-span-12">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="flex items-center gap-2 font-heading text-[0.72rem] font-medium text-foreground/90">
+              <span className="h-1.5 w-1.5 rounded-full bg-primary" /> Activity
+            </h2>
+            <span className="text-primary text-xs">Live</span>
+          </div>
+          <ActivityTimeline cpu={cpu} mem={mem} net={net} stats={stats} />
         </div>
       </div>
     </div>
