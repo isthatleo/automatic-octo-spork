@@ -691,6 +691,10 @@ class KeyUpsertRequest(BaseModel):
     name: str
     value: str
 
+class SaveFileRequest(BaseModel):
+    filename: str
+    content: str
+
 
 # ---------------------------------------------------------------------------
 # REST routes — Core
@@ -1520,6 +1524,43 @@ async def auto_route_agent(req: AgentAutoRequest):
     await _notify_if_long_running(f"auto-routed task: {req.text[:80]}", started, result)
     _maybe_gate_self_improvement(result.get("agent_key", ""), result)
     return result
+
+
+_DESKTOP_DIR = Path(os.path.expanduser("~")) / "Desktop"
+_UNSAFE_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+def _safe_desktop_path(filename: str) -> Path:
+    """Resolve a user-supplied filename to a real, collision-free path under
+    the real Desktop folder — strips directory components and Windows-illegal
+    characters so this can't be used to write outside Desktop or clobber an
+    existing file the user didn't ask to overwrite."""
+    name = os.path.basename(filename).strip() or "output.txt"
+    name = _UNSAFE_FILENAME_CHARS.sub("_", name)[:200]
+    _DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
+    path = _DESKTOP_DIR / name
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    n = 2
+    while path.exists():
+        path = _DESKTOP_DIR / f"{stem} ({n}){suffix}"
+        n += 1
+    return path
+
+
+@app.post("/files/save-desktop", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def save_to_desktop(req: SaveFileRequest):
+    """Write real content to a real file on the user's actual Desktop —
+    used by the Kanban board (and anywhere else) when a task's output is
+    meant to be a deliverable file rather than just an on-screen result."""
+    if not req.content.strip():
+        raise HTTPException(status_code=400, detail="content is empty — nothing to save")
+    path = _safe_desktop_path(req.filename)
+    try:
+        path.write_text(req.content, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write file: {exc}")
+    return {"success": True, "path": str(path), "filename": path.name}
 
 
 # Legacy HTTP agent runner (Fury-based)
