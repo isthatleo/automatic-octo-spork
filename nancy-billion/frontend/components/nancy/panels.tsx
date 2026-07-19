@@ -875,8 +875,8 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
         ? `Routed to ${route} — ${summarizeResult(res)}`
         : `Error (${route}): ${res.error}`
       setAutoResult(msg)
-    } finally { setAutoRunning(false) }
-  }, [autoQuery])
+    } finally { setAutoRunning(false); fetchAgents() }
+  }, [autoQuery, fetchAgents])
 
   const filteredAgents = (data?.agents ?? []).filter((a) =>
     !filter ||
@@ -1077,7 +1077,7 @@ export function AgentsPanel({ onAgentSelect }: { onAgentSelect?: (agentId: strin
         </div>
       </div>
 
-      {taskAgent && <AgentTaskModal agent={taskAgent} onClose={() => setTaskAgent(null)} />}
+      {taskAgent && <AgentTaskModal agent={taskAgent} onClose={() => { setTaskAgent(null); fetchAgents() }} />}
     </div>
   )
 }

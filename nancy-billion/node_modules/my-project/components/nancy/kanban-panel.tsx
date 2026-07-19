@@ -113,11 +113,17 @@ export function KanbanPanel() {
   const [runningId, setRunningId] = useState<string | null>(null)
   const dragCardId = useRef<string | null>(null)
 
+  const refreshAgents = useCallback(() => {
+    listAgents().then((res) => res.success && setAgents(res.agents))
+  }, [])
+
   useEffect(() => {
     setCards(loadCards())
     setLoaded(true)
-    listAgents().then((res) => res.success && setAgents(res.agents))
-  }, [])
+    refreshAgents()
+    const t = setInterval(refreshAgents, 30_000)
+    return () => clearInterval(t)
+  }, [refreshAgents])
 
   useEffect(() => {
     if (loaded) saveCards(cards)
@@ -169,8 +175,9 @@ export function KanbanPanel() {
       logEvent(`${card.assignedAgent} errored on "${card.title}"`)
     } finally {
       setRunningId(null)
+      refreshAgents()
     }
-  }, [logEvent])
+  }, [logEvent, refreshAgents])
 
   const grouped = useMemo(() => {
     const g: Record<ColumnKey, KanbanCard[]> = { inbox: [], assigned: [], in_progress: [], review: [], done: [] }
