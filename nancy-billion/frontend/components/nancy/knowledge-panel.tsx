@@ -294,16 +294,19 @@ export function KnowledgePanel({
         )}
 
         {!isLoading && viewMode === 'list' && items.length > 0 && (
-          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
-            {items.map((it) => (
+          <div className="flex flex-col divide-y divide-border/50 border-t border-border/50">
+            {items.map((it, i) => (
               <button
                 key={it.id}
                 type="button"
                 onClick={() => setSpotlight(it)}
-                className="group flex flex-col overflow-hidden rounded border border-border bg-secondary/20 text-left transition-colors hover:border-primary/60"
+                className="group flex items-start gap-3 py-3 text-left transition-colors hover:bg-secondary/20"
               >
+                <span className="mt-0.5 w-6 shrink-0 text-right font-display text-[0.7rem] text-muted-foreground/50">
+                  {String(i + 1).padStart(2, '0')}
+                </span>
                 {(it.image || feed === 'videos') && (
-                  <div className="relative aspect-video overflow-hidden bg-background/60">
+                  <div className="relative h-14 w-20 shrink-0 overflow-hidden rounded bg-background/60">
                     {it.image && (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
@@ -314,21 +317,21 @@ export function KnowledgePanel({
                     )}
                     {feed === 'videos' && (
                       <span className="absolute inset-0 flex items-center justify-center">
-                        <PlayCircle className="h-9 w-9 text-primary drop-shadow-[0_0_8px_var(--hud)]" />
+                        <PlayCircle className="h-5 w-5 text-primary drop-shadow-[0_0_8px_var(--hud)]" />
                       </span>
                     )}
                   </div>
                 )}
-                <div className="flex flex-1 flex-col gap-1 p-2.5">
-                  <div className="flex items-center justify-between text-[0.5rem]">
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <div className="flex items-center gap-2 text-[0.5rem]">
                     <span className="text-primary">{it.source}</span>
                     <span className="text-muted-foreground">{timeAgo(it.published)}</span>
                   </div>
-                  <p className="line-clamp-3 text-[0.66rem] leading-snug text-foreground">
+                  <p className="line-clamp-2 text-[0.7rem] leading-snug text-foreground transition-colors group-hover:text-primary">
                     {it.title}
                   </p>
                   {it.summary && feed === 'articles' && (
-                    <p className="line-clamp-2 text-[0.56rem] leading-relaxed text-muted-foreground">
+                    <p className="line-clamp-1 text-[0.56rem] leading-relaxed text-muted-foreground">
                       {it.summary}
                     </p>
                   )}
@@ -415,59 +418,52 @@ export function KnowledgePanel({
         )}
         
         {!isLoading && viewMode === 'timeline' && items.length > 0 && (
-          <div className="relative h-full w-full">
-            {/* Timeline axis */}
-            <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-primary/20" />
-            
-            {/* Timeline events */}
-            <div className="relative h-full w-full">
-              {items
-                .sort((a, b) => 
-                  new Date(b.published || 0).getTime() - new Date(a.published || 0).getTime()
+          <div className="relative mx-auto max-w-2xl py-1">
+            {/* Timeline axis — a real hairline running the full flowed height
+                of the list, not a fixed-height overlay, so it always lines
+                up regardless of how many reports came back. */}
+            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-primary/20" />
+
+            <div className="flex flex-col gap-5">
+              {[...items]
+                .sort(
+                  (a, b) =>
+                    new Date(b.published || 0).getTime() - new Date(a.published || 0).getTime(),
                 )
                 .map((item, index) => {
-                  const isLeft = index % 2 === 0;
+                  const isLeft = index % 2 === 0
+                  const body = (
+                    <button
+                      type="button"
+                      onClick={() => setSpotlight(item)}
+                      className={`group flex flex-col gap-1 rounded border border-border/50 bg-secondary/20 px-2.5 py-2 text-left transition-colors hover:border-primary/50 ${isLeft ? 'items-end text-right' : 'items-start text-left'}`}
+                    >
+                      <div className="flex items-center gap-2 text-[0.5rem]">
+                        <span className="text-primary">{item.source}</span>
+                        <span className="text-muted-foreground">
+                          {new Date(item.published || 0).toLocaleDateString()}
+                        </span>
+                      </div>
+                      <div className="text-[0.6rem] leading-snug text-foreground transition-colors group-hover:text-primary">
+                        {item.title}
+                      </div>
+                      {item.summary && feed === 'articles' && (
+                        <p className="line-clamp-2 text-[0.5rem] leading-relaxed text-muted-foreground">
+                          {item.summary}
+                        </p>
+                      )}
+                    </button>
+                  )
                   return (
                     <div
                       key={`timeline-${item.id}`}
-                      className="absolute"
-                      style={{
-                        left: '50%',
-                        top: `${(index / items.length) * 100}%`,
-                        transform: `translateX(-50%)`
-                      }}
+                      className="relative grid grid-cols-[1fr_auto_1fr] items-start gap-3"
                     >
-                      {/* Timeline connector */}
-                      <div className="absolute left-1/2 -translate-x-1/2 w-0.5 bg-primary/20" />
-                      
-                      {/* Event content */}
-                      <div
-                        className={`flex items-start gap-3 ${isLeft ? 'right-1/2' : 'left-1/2'}`}
-                        style={{
-                          width: '40%',
-                          transform: isLeft ? 'translateX(100%)' : 'translateX(-100%)',
-                        }}
-                      >
-                        <div className="flex-shrink-0">
-                          <div className="w-2 h-2 rounded-full bg-primary" />
-                        </div>
-                        <div className="flex-1">
-                          <div className="text-[0.5rem] font-medium text-primary">
-                            {item.source}
-                          </div>
-                          <div className="text-[0.55rem] leading-snug text-foreground">
-                            {item.title}
-                          </div>
-                          {item.summary && feed === 'articles' && (
-                            <p className="text-[0.5rem] text-muted-foreground line-clamp-2 mt-1">
-                              {item.summary}
-                            </p>
-                          )}
-                          <div className="text-[0.45rem] text-muted-foreground mt-1">
-                            {new Date(item.published || 0).toLocaleDateString()}
-                          </div>
-                        </div>
+                      <div>{isLeft && body}</div>
+                      <div className="flex justify-center pt-2.5">
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-full border-2 border-background bg-primary shadow-[0_0_8px_var(--hud)]" />
                       </div>
+                      <div>{!isLeft && body}</div>
                     </div>
                   )
                 })}
