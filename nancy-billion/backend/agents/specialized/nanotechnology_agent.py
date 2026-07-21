@@ -219,9 +219,9 @@ class NanotechnologyAgent(SpecializedAgent):
                         "payload": ["siRNA", "mRNA", "small_molecule_drug"][int(abs(lj["total_potential"]) % 3)]
                     },
                     "properties": {
-                        "size": f"{round(abs(lj["min_distance"]) * 50, 0):.0f} nm",
-                        "zeta_potential": f"{round(lj["mean_interaction"] * 10, 1):.1f} mV",
-                        "encapsulation_efficiency": f"{min(95, max(60, round(abs(lj["total_potential"]) * 10))):.0f}%",
+                        "size": f"{round(abs(lj['min_distance']) * 50, 0):.0f} nm",
+                        "zeta_potential": f"{round(lj['mean_interaction'] * 10, 1):.1f} mV",
+                        "encapsulation_efficiency": f"{min(95, max(60, round(abs(lj['total_potential']) * 10))):.0f}%",
                         "release_kinetics": ["sustained", "pH_sensitive", "enzyme_triggered"][int(abs(lj["n_pairs"]) % 3)]
                     },
                     "function": {

@@ -1,0 +1,33 @@
+# Used by the backend service's build (context: . at the automatic-octo-spork
+# root -- needed so the Dockerfile can reach the sibling fury-main package,
+# a real editable dependency of nancy-billion/backend/requirements.txt that
+# lives outside the nancy-billion/ tree). Excludes everything not needed for
+# that build to keep the upload to the Docker daemon small.
+
+# Unrelated sibling projects.
+MiroFish-main/
+clap-detection-main/
+jarvis-mlx-main/
+personaplex-main/
+open-generative-ai-main/
+modules/
+.git/
+.idea/
+*.md
+*.pdf
+
+# nancy-billion: only backend/ is needed for this build.
+nancy-billion/frontend/
+nancy-billion/node_modules/
+nancy-billion/.git/
+nancy-billion/.idea/
+nancy-billion/backend/.env
+nancy-billion/backend/data/
+nancy-billion/backend/voice_ref/
+nancy-billion/backend/__pycache__/
+
+# fury-main: only the package source is needed, not its own dev/test files.
+fury-main/.git/
+fury-main/tests/
+fury-main/docs/
+fury-main/examples/

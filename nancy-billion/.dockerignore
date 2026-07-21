@@ -1,0 +1,20 @@
+# Used by the frontend service's build (context: . -- an npm-workspaces
+# monorepo, see frontend/Dockerfile). The backend service still builds with
+# context: ./backend and its own backend/.dockerignore.
+
+# Never bake real secrets into an image layer.
+frontend/.env
+frontend/.env.local
+backend/.env
+
+# Stale/host-platform artifacts the Dockerfile installs fresh instead --
+# copying these in would overwrite the container's Linux-built native
+# bindings (sharp, @swc/core) with the host's (Windows) ones.
+node_modules/
+frontend/node_modules/
+frontend/.next/
+
+# Not needed for the frontend build at all.
+backend/
+.git
+*.md

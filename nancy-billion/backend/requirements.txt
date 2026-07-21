@@ -10,6 +10,7 @@ pyttsx3>=2.90
 python-socketio>=5.9.0
 python-dotenv>=1.0.0
 pydantic>=2.6.0
+pydantic-settings>=2.6.0  # config/settings.py needs this separately-packaged split from pydantic v2 -- was missing entirely
 numpy>=1.24.0
 sounddevice>=0.4.6
 fastapi>=0.104.0
@@ -23,6 +24,10 @@ nltk>=3.8.0
 # PDF extraction for agent registry generation (Phase 1.9)
 pypdf>=4.0.0
 # pdfplumber>=0.11.0  # optional; uncomment if preferred
+
+# Image handling for Telegram map snapshots (map_snapshot.py, imported
+# unconditionally by telegram_bot.py) -- was missing from this file entirely.
+Pillow>=10.0.0
 
 # Claude backend — required for AnthropicLLM (llm.py); official SDK, not raw HTTP
 anthropic>=0.40.0
