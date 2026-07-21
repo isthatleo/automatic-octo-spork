@@ -403,6 +403,26 @@ def _live_system_context() -> str:
     )
 
 
+def _live_context_bridge_context() -> str:
+    context = get_live_context_snapshot()
+    if not context:
+        return ""
+    parts = ["Live UI context:"]
+    def _fmt(v):
+        if isinstance(v, dict):
+            return ", ".join(f"{k}={_fmt(vv)}" for k, vv in v.items())
+        if isinstance(v, list):
+            return ", ".join(_fmt(x) for x in v)
+        return str(v)
+    for key in ("active_panel", "panel", "active_suggestions", "channel", "source"):
+        if key in context:
+            parts.append(f"{key}={_fmt(context[key])}")
+    if context.get("environmental"):
+        env = context["environmental"]
+        parts.append("environmental=" + _fmt(env))
+    return " | ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # File access tools (Claude tool-use only -- see AnthropicLLM.generate_with_tools)
 #
@@ -633,7 +653,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             except Exception as e:
                 logger.warning("Specialized agent '%s' failed, falling back to LLM: %s", routed_key, e)
 
-    prompt = f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{history_text}\nuser: {user_text}\nassistant:"
+    prompt = f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n{history_text}\nuser: {user_text}\nassistant:"
 
     # File access + subagent-creation only work through Claude's multi-round
     # tool-use loop (generate_with_tools) -- the other backends in the
@@ -908,6 +928,55 @@ async def analyze_context(payload: ChatRequest):
         "routing_hints": brain_decision['routing_hints'],
         "active_topics": nancy_brain.context.active_topics,
     }
+
+
+# ---------------------------------------------------------------------------
+# Context bridge — shared UI/brain state
+# ---------------------------------------------------------------------------
+
+class _ContextBridge:
+    def __init__(self) -> None:
+        self.payload: Dict[str, Any] = {}
+        self.updated_at: Optional[str] = None
+        self.channel_hints: List[str] = []
+
+    def update(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        self.payload.update(payload)
+        self.updated_at = datetime.now().isoformat()
+        return {
+            "success": True,
+            "updated_at": self.updated_at,
+            "payload": self.payload,
+        }
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "payload": self.payload,
+            "updated_at": self.updated_at,
+            "channel_hints": self.channel_hints,
+        }
+
+_context_bridge = _ContextBridge()
+
+
+@app.post("/context")
+async def context_update(payload: Dict[str, Any]):
+    """Accept dashboard/UI context events as a single canonical source."""
+    result = _context_bridge.update(payload)
+    return result
+
+
+@app.get("/context")
+async def context_snapshot():
+    """Return latest context for UI/channel sync."""
+    return _context_bridge.snapshot()
+
+
+def get_live_context_snapshot() -> Dict[str, Any]:
+    snapshot = _context_bridge.snapshot()
+    payload = snapshot.get("payload", {}) or {}
+    return payload
 
 
 # ---------------------------------------------------------------------------

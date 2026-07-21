@@ -2,18 +2,11 @@ import { z } from 'zod'
 
 export const ContextPayloadSchema = z
   .object({
-    // Client-provided correlation
     requestId: z.string().min(1).optional(),
-
-    // Versioning for forward compatibility
     schemaVersion: z.number().int().positive().default(1),
-
-    // Optional top-level status
     bridgeStatus: z
       .enum(['connected', 'degraded', 'disconnected', 'unknown'])
       .optional(),
-
-    // Arbitrary contextual signals
     environmental: z
       .object({
         lighting: z.string().optional(),
@@ -22,10 +15,7 @@ export const ContextPayloadSchema = z
       })
       .partial()
       .optional(),
-
     active_suggestions: z.number().int().nonnegative().optional(),
-
-    // Client can attach any other structured state
     extra: z.record(z.unknown()).optional(),
   })
   .strict()
@@ -49,7 +39,6 @@ export type ContextMeta = {
 
 const DEFAULT_TTL_MS = 15_000
 
-// In-memory store (production note: swap with Redis/Postgres in multi-instance)
 let latest: StoredContext | null = null
 
 export function setLatestContext(payload: ContextPayload, ttlMs: number = DEFAULT_TTL_MS): StoredContext {
@@ -91,5 +80,4 @@ export function getContextMeta(): ContextMeta {
 export function validateContextPayload(input: unknown): ContextPayload {
   return ContextPayloadSchema.parse(input)
 }
-
 
