@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { HudPanel } from './hud-bits'
 import { listAgents, runAgent, summarizeResult, saveToDesktop, proseFromResult } from '@/lib/nancy/agent-client'
+import { timeAgo } from '@/lib/nancy/time'
 import type { AgentInfo, AgentResult } from '@/lib/nancy/types'
 import {
   Plus,
@@ -87,16 +88,6 @@ function saveCards(cards: KanbanCard[]) {
   } catch {
     // quota / private-mode — the board still works for this session, just won't persist
   }
-}
-
-function timeAgo(ts: number): string {
-  const s = Math.round((Date.now() - ts) / 1000)
-  if (s < 60) return 'just now'
-  const m = Math.round(s / 60)
-  if (m < 60) return `${m}m ago`
-  const h = Math.round(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.round(h / 24)}d ago`
 }
 
 /**
@@ -362,9 +353,10 @@ export function KanbanPanel() {
                             <button
                               type="button"
                               title="Dispatch to agent"
+                              aria-label={`Dispatch "${card.title}" to ${card.assignedAgent}`}
                               onClick={(e) => { e.stopPropagation(); void runCard(card) }}
                               disabled={runningId === card.id}
-                              className="flex h-5 w-5 items-center justify-center rounded border border-primary/40 text-primary opacity-0 transition-opacity hover:bg-primary/15 group-hover:opacity-100"
+                              className="flex h-5 w-5 items-center justify-center rounded border border-primary/40 text-primary opacity-0 transition-opacity hover:bg-primary/15 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
                             >
                               {runningId === card.id ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Play className="h-2.5 w-2.5" />}
                             </button>
@@ -372,8 +364,9 @@ export function KanbanPanel() {
                           <button
                             type="button"
                             title="Delete"
+                            aria-label={`Delete "${card.title}"`}
                             onClick={(e) => { e.stopPropagation(); deleteCard(card.id) }}
-                            className="flex h-5 w-5 items-center justify-center rounded border border-border/50 text-muted-foreground opacity-0 transition-opacity hover:border-destructive/50 hover:text-destructive group-hover:opacity-100"
+                            className="flex h-5 w-5 items-center justify-center rounded border border-border/50 text-muted-foreground opacity-0 transition-opacity hover:border-destructive/50 hover:text-destructive group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
                           >
                             <Trash2 className="h-2.5 w-2.5" />
                           </button>

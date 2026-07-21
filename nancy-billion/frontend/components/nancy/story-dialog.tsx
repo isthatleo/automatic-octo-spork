@@ -3,20 +3,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { NewsItem } from '@/lib/nancy/types'
 import { enrichArticle } from '@/lib/nancy/nancy-client'
+import { timeAgo } from '@/lib/nancy/time'
 import { CornerTicks } from './hud-bits'
 import { ExternalLink, Loader2, Volume2, VolumeX, X } from 'lucide-react'
-
-function timeAgo(iso?: string): string {
-  if (!iso) return ''
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return ''
-  const m = Math.round((Date.now() - t) / 60000)
-  if (m < 1) return 'just now'
-  if (m < 60) return `${m}m ago`
-  const h = Math.round(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.round(h / 24)}d ago`
-}
 
 /**
  * Immersive, JARVIS-style spotlight for a single story. Blurs everything

@@ -1365,14 +1365,15 @@ async def delete_cron_job(job_id: str):
 async def list_economic_calendar_events():
     """Real NFP/CPI/FOMC releases in the tracked window (see
     economic_calendar.py) -- upcoming ones have actual: null; released ones
-    have actual/estimate/previous filled in from the last successful FMP
-    poll. Empty (not an error) if FMP_API_KEY isn't configured yet."""
+    have actual/previous filled in from the last successful FRED poll
+    (estimate is always null -- FRED has no consensus/forecast data).
+    Empty (not an error) if FRED_API_KEY isn't configured yet."""
     events = economic_calendar.get_cached_events()
     return {
         "success": True,
         "events": events,
         "tracked_releases": {k: v["label"] for k, v in economic_calendar.TRACKED_RELEASES.items()},
-        "configured": bool(economic_calendar.FMP_API_KEY),
+        "configured": bool(economic_calendar.FRED_API_KEY),
     }
 
 
@@ -2023,10 +2024,10 @@ async def _economic_calendar_loop() -> None:
     real alert the moment a tracked release's actual value appears: a
     Telegram push (reaches the user anywhere) plus a WebSocket broadcast of
     type 'economic_alert' (the connected dashboard's ws-client.ts triggers a
-    real voice readout from this). Polls FMP every 15 min normally, every
+    real voice readout from this). Polls FRED every 15 min normally, every
     10s inside a live release window (see next_poll_interval_s()) -- so a
     NFP/CPI print gets caught within ~10s of actually posting, not 15 minutes
-    late. No-ops safely if FMP_API_KEY isn't configured, same as every other
+    late. No-ops safely if FRED_API_KEY isn't configured, same as every other
     optional integration in this file."""
     while True:
         try:

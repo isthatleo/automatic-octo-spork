@@ -509,10 +509,10 @@ export function CronPanel() {
                   </div>
                   {item.kind === 'custom' && (
                     <>
-                      <button type="button" onClick={() => toggleJob(item.job)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Toggle enabled">
+                      <button type="button" onClick={() => toggleJob(item.job)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Toggle enabled" aria-label={item.job.enabled ? `Disable job "${item.job.name}"` : `Enable job "${item.job.name}"`}>
                         {item.job.enabled ? <ToggleRight className="h-4 w-4 text-primary" /> : <ToggleLeft className="h-4 w-4" />}
                       </button>
-                      <button type="button" onClick={() => deleteJob(item.job)} className="rounded p-1.5 text-muted-foreground hover:text-destructive" title="Delete">
+                      <button type="button" onClick={() => deleteJob(item.job)} className="rounded p-1.5 text-muted-foreground hover:text-destructive" title="Delete" aria-label={`Delete job "${item.job.name}"`}>
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </>
@@ -1524,13 +1524,13 @@ export function WebhooksPanel() {
                     {h.last_status && <> · last: <span className={h.last_status === 'ok' ? 'text-primary' : 'text-destructive'}>{h.last_status}</span></>}
                   </div>
                 </div>
-                <button type="button" onClick={() => testHook(h)} disabled={testingId === h.id} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Send test delivery">
+                <button type="button" onClick={() => testHook(h)} disabled={testingId === h.id} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Send test delivery" aria-label={`Send test delivery to ${h.url}`}>
                   {testingId === h.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
                 </button>
-                <button type="button" onClick={() => toggleHook(h)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Toggle enabled">
+                <button type="button" onClick={() => toggleHook(h)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Toggle enabled" aria-label={h.enabled ? `Disable webhook to ${h.url}` : `Enable webhook to ${h.url}`}>
                   {h.enabled ? <ToggleRight className="h-4 w-4 text-primary" /> : <ToggleLeft className="h-4 w-4" />}
                 </button>
-                <button type="button" onClick={() => deleteHook(h)} className="rounded p-1.5 text-muted-foreground hover:text-destructive" title="Delete">
+                <button type="button" onClick={() => deleteHook(h)} className="rounded p-1.5 text-muted-foreground hover:text-destructive" title="Delete" aria-label={`Delete webhook to ${h.url}`}>
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
               </li>
