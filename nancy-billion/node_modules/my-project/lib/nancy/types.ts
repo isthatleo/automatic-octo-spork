@@ -112,6 +112,22 @@ export type KnowledgeCategory =
   | 'history'
   | 'literature'
 
+export interface EconomicEvent {
+  key_prefix: 'nfp' | 'cpi' | 'fomc'
+  event_name: string
+  raw_event_name: string
+  /** "YYYY-MM-DD HH:MM:SS" as returned by the data provider (US Eastern release time). */
+  date: string
+  country: string
+  previous: number | null
+  estimate: number | null
+  actual: number | null
+  change: number | null
+  change_percent: number | null
+  unit: string
+  impact: string
+}
+
 export interface MarketAnalysis {
   symbol: string
   summary: string

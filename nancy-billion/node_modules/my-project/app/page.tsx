@@ -21,7 +21,7 @@ import {
 } from '@/components/nancy/admin-panels'
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
-import { askNancy } from '@/lib/nancy/ws-client'
+import { askNancy, onEconomicAlert } from '@/lib/nancy/ws-client'
 import { synthesizeSpeech } from '@/lib/nancy/tts-client'
 import { geocode } from '@/lib/nancy/geocode'
 import type { KnowledgeCategory, LogEntry, PanelKey, Place } from '@/lib/nancy/types'
@@ -249,6 +249,19 @@ export default function Page() {
     },
     [log],
   )
+
+  // Real-time NFP/CPI/FOMC alerts (see backend's _economic_calendar_loop):
+  // the instant a tracked release's actual value posts, the backend pushes
+  // an 'economic_alert' over the WebSocket and this reads it out loud —
+  // independent of any chat message, so it fires even if the user never
+  // typed anything.
+  useEffect(() => {
+    const unsubscribe = onEconomicAlert((payload) => {
+      sfx.confirm()
+      nancySay(payload.text)
+    })
+    return unsubscribe
+  }, [nancySay])
 
   const doLaunch = useCallback((target: string) => {
     setPanel('system')
