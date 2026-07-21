@@ -70,6 +70,7 @@ from memory import MemoryManager, MemoryType
 from cron_store import cron_store
 from skills_store import skills_store
 from webhooks_store import webhook_store, VALID_EVENTS
+import economic_calendar
 from startup import StartupCoordinator, NancyGreeting
 from intelligent_greeting import IntelligentStartupCoordinator, PersonalContext
 from trading import (
@@ -1360,6 +1361,21 @@ async def delete_cron_job(job_id: str):
     return {"success": True}
 
 
+@app.get("/economic-calendar/events")
+async def list_economic_calendar_events():
+    """Real NFP/CPI/FOMC releases in the tracked window (see
+    economic_calendar.py) -- upcoming ones have actual: null; released ones
+    have actual/estimate/previous filled in from the last successful FMP
+    poll. Empty (not an error) if FMP_API_KEY isn't configured yet."""
+    events = economic_calendar.get_cached_events()
+    return {
+        "success": True,
+        "events": events,
+        "tracked_releases": {k: v["label"] for k, v in economic_calendar.TRACKED_RELEASES.items()},
+        "configured": bool(economic_calendar.FMP_API_KEY),
+    }
+
+
 @app.get("/webhooks")
 async def list_webhooks():
     """Real, persisted outbound webhook subscriptions (data/webhooks.json) --
@@ -1926,6 +1942,7 @@ async def startup_event():
     telegram_notifier.start_polling()
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_cron_execution_loop())
+    asyncio.create_task(_economic_calendar_loop())
 
 
 # Local time, 24h format -- override in .env if 07:30 isn't the right moment.
@@ -1999,6 +2016,29 @@ async def _cron_execution_loop() -> None:
                     cron_store.mark_run(job.id, f"error: {e}")
         except Exception:
             logger.exception("Cron execution loop tick failed")
+
+
+async def _economic_calendar_loop() -> None:
+    """Tracks NFP/CPI/FOMC releases (see economic_calendar.py) and fires a
+    real alert the moment a tracked release's actual value appears: a
+    Telegram push (reaches the user anywhere) plus a WebSocket broadcast of
+    type 'economic_alert' (the connected dashboard's ws-client.ts triggers a
+    real voice readout from this). Polls FMP every 15 min normally, every
+    10s inside a live release window (see next_poll_interval_s()) -- so a
+    NFP/CPI print gets caught within ~10s of actually posting, not 15 minutes
+    late. No-ops safely if FMP_API_KEY isn't configured, same as every other
+    optional integration in this file."""
+    while True:
+        try:
+            newly_alerted = await economic_calendar.poll_once()
+            for event in newly_alerted:
+                text = economic_calendar.compose_alert_text(event)
+                await telegram_notifier.send(f"📊 {text}")
+                await manager.broadcast(json.dumps({"type": "economic_alert", "text": text, **event}))
+                logger.info("Economic calendar alert fired: %s", text)
+        except Exception:
+            logger.exception("Economic calendar loop tick failed")
+        await asyncio.sleep(economic_calendar.next_poll_interval_s())
 
 
 async def _init_agents():

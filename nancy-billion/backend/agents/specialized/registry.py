@@ -24,6 +24,12 @@ from .research_agent import ResearchAgent
 from .science_research_agent import ScienceResearchAgent
 from .general_research_agent import GeneralResearchAgent
 from .nuclear_research_agent import NuclearResearchAgent
+from .weather_climate_agent import WeatherClimateAgent
+from .economics_agent import EconomicsAgent
+from .materials_science_agent import MaterialsScienceAgent
+from .personal_finance_agent import PersonalFinanceAgent
+from .energy_grid_agent import EnergyGridAgent
+from .mathematics_agent import MathematicsAgent
 # Phase 1 Enhancement Agents
 from .neural_interface_agent import NeuralInterfaceAgent
 from .holographic_display_controller import HolographicDisplayController
@@ -71,6 +77,12 @@ SPECIALIZED_AGENTS = {
     "science_research":       ScienceResearchAgent,
     "general_research":       GeneralResearchAgent,
     "nuclear_research":       NuclearResearchAgent,
+    "weather_climate":        WeatherClimateAgent,
+    "economics":              EconomicsAgent,
+    "materials_science":      MaterialsScienceAgent,
+    "personal_finance":       PersonalFinanceAgent,
+    "energy_grid":            EnergyGridAgent,
+    "mathematics":            MathematicsAgent,
     # ---- Phase 1 Enhancement Agents ----
     "neural_interface":       NeuralInterfaceAgent,
     "holographic_display":    HolographicDisplayController,

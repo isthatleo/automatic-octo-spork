@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useSWR from 'swr'
-import type { KnowledgeCategory, NewsItem } from '@/lib/nancy/types'
+import type { EconomicEvent, KnowledgeCategory, NewsItem } from '@/lib/nancy/types'
+import { getEconomicCalendarEvents } from '@/lib/nancy/economic-calendar-client'
 import { CornerTicks } from './hud-bits'
 import { StoryDialog } from './story-dialog'
 import {
@@ -19,6 +20,7 @@ import {
   Newspaper,
   Orbit,
   PlayCircle,
+  Radio,
   Rocket,
   Search,
   Stethoscope,
@@ -26,6 +28,123 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react'
+
+// ---------------------------------------------------------------------------
+// Economic Calendar strip -- real NFP/CPI/FOMC tracking (see backend's
+// economic_calendar.py + /economic-calendar/events), shown regardless of
+// which news category tab is active. Countdown ticks client-side; the
+// underlying data itself refreshes from the backend's cache every 20s.
+// ---------------------------------------------------------------------------
+
+/** Data provider's "YYYY-MM-DD HH:MM:SS" is US-Eastern release time (BLS/Fed
+ *  convention, e.g. 08:30/14:00 ET) -- not necessarily the viewer's local
+ *  timezone. Verify against your own first live fetch if this looks off by
+ *  a few hours for your location. */
+function parseEventDate(date: string): Date {
+  return new Date(date.replace(' ', 'T'))
+}
+
+function formatCountdown(target: Date, now: Date): string {
+  const ms = target.getTime() - now.getTime()
+  if (ms <= 0) return 'releasing now'
+  const totalSeconds = Math.floor(ms / 1000)
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (days > 0) return `in ${days}d ${hours}h`
+  if (hours > 0) return `in ${hours}h ${minutes}m`
+  if (minutes > 0) return `in ${minutes}m ${seconds}s`
+  return `in ${seconds}s`
+}
+
+function EconomicCalendarStrip() {
+  const [now, setNow] = useState(() => new Date())
+  const { data } = useSWR('economic-calendar-events', () => getEconomicCalendarEvents(), {
+    refreshInterval: 20000,
+    revalidateOnFocus: false,
+  })
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  const events = data?.events ?? []
+  const upcoming = useMemo(
+    () =>
+      events
+        .filter((e) => e.actual === null)
+        .sort((a, b) => parseEventDate(a.date).getTime() - parseEventDate(b.date).getTime())
+        .slice(0, 3),
+    [events],
+  )
+  const recent = useMemo(
+    () =>
+      events
+        .filter((e) => e.actual !== null)
+        .sort((a, b) => parseEventDate(b.date).getTime() - parseEventDate(a.date).getTime())
+        .slice(0, 3),
+    [events],
+  )
+
+  if (data && !data.configured) {
+    return (
+      <div className="flex items-center gap-2 border-b border-border/60 bg-secondary/10 px-3 py-2 text-[0.55rem] text-muted-foreground">
+        <Radio className="h-3 w-3" />
+        Economic calendar disabled — set FMP_API_KEY in the backend .env to track live NFP/CPI/FOMC releases.
+      </div>
+    )
+  }
+
+  if (upcoming.length === 0 && recent.length === 0) return null
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 overflow-x-auto border-b border-border/60 bg-secondary/10 px-3 py-2">
+      <span className="flex shrink-0 items-center gap-1 text-[0.5rem] tracking-[0.2em] text-primary">
+        <Radio className="h-3 w-3 animate-pulse" /> LIVE CALENDAR
+      </span>
+      {recent.map((e) => {
+        const delta = e.actual !== null && e.estimate !== null ? e.actual - e.estimate : null
+        return (
+          <div
+            key={`recent-${e.event_name}-${e.date}`}
+            className="flex shrink-0 items-center gap-1.5 rounded border border-border bg-background/60 px-2 py-1 text-[0.55rem]"
+          >
+            <span className="text-foreground">{e.event_name}</span>
+            <span className="text-muted-foreground">
+              {e.actual}
+              {e.unit} vs {e.estimate}
+              {e.unit} est.
+            </span>
+            {delta !== null && (
+              <span className={delta > 0 ? 'text-emerald-400' : delta < 0 ? 'text-rose-400' : 'text-muted-foreground'}>
+                {delta > 0 ? '▲' : delta < 0 ? '▼' : '='}
+                {Math.abs(delta)}
+                {e.unit}
+              </span>
+            )}
+          </div>
+        )
+      })}
+      {upcoming.map((e) => (
+        <div
+          key={`upcoming-${e.event_name}-${e.date}`}
+          className="flex shrink-0 items-center gap-1.5 rounded border border-primary/30 bg-primary/5 px-2 py-1 text-[0.55rem]"
+        >
+          <span className="text-primary">{e.event_name}</span>
+          <span className="text-muted-foreground">{formatCountdown(parseEventDate(e.date), now)}</span>
+          {e.estimate !== null && (
+            <span className="text-muted-foreground">
+              (est. {e.estimate}
+              {e.unit})
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
 
 type Media = 'articles' | 'videos'
 type ViewMode = 'list' | 'galaxy' | 'timeline'
@@ -215,6 +334,8 @@ export function KnowledgePanel({
           </button>
         </div>
       </div>
+
+      <EconomicCalendarStrip />
 
       {/* domain rail */}
       <div className="flex items-center gap-1.5 overflow-x-auto border-b border-border/60 p-2">
