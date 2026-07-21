@@ -204,6 +204,42 @@ export const AGENT_TASK_PRESETS: Record<string, TaskPreset[]> = {
     { label: 'Scaffold Agent', task_type: 'scaffold', payload: { key: 'weather_forecaster', class_name: 'WeatherForecasterAgent', domain: 'weather-forecasting', description: 'Forecasts weather conditions' }, description: 'Generate a valid new agent module (does not write to disk)' },
     { label: 'Deploy Agent', task_type: 'deploy', payload: { key: 'weather_forecaster', class_name: 'WeatherForecasterAgent', domain: 'weather-forecasting', description: 'Forecasts weather conditions' }, description: 'Validate and write a new agent file to agents/specialized/dynamic/' },
   ],
+  weather_climate: [
+    { label: 'Current Weather', task_type: 'current-weather', payload: { location: 'London' }, description: 'Real current conditions for a location (Open-Meteo)' },
+    { label: '5-Day Forecast', task_type: 'forecast', payload: { location: 'Tokyo', days: 5 }, description: 'Real multi-day forecast' },
+    { label: 'Climate Trend', task_type: 'climate-stats', payload: { location: 'Berlin', start_date: '2015-01-01', end_date: '2024-12-31' }, description: 'Real historical daily-temperature trend analysis' },
+    { label: 'Heat Index', task_type: 'heat-index', payload: { temperature_c: 32, relative_humidity_pct: 70 }, description: 'NWS heat index formula' },
+  ],
+  economics: [
+    { label: 'GDP Lookup', task_type: 'indicator-lookup', payload: { country: 'US', indicator: 'gdp_per_capita_usd' }, description: 'Real World Bank indicator series' },
+    { label: 'Growth Analysis', task_type: 'growth-analysis', payload: { country: 'IN', indicator: 'gdp_per_capita_usd' }, description: 'Real CAGR, doubling time, and trend' },
+    { label: 'Inflation Adjust', task_type: 'inflation-adjust', payload: { country: 'US', amount: 100, from_year: '2000', to_year: '2023' }, description: 'Real CPI-based amount adjustment' },
+    { label: 'List Indicators', task_type: 'list-indicators', payload: {}, description: 'See all supported macro indicators' },
+  ],
+  materials_science: [
+    { label: 'Material Lookup', task_type: 'material-lookup', payload: { material: 'titanium_ti6al4v' }, description: 'Real handbook material properties' },
+    { label: 'Stress-Strain', task_type: 'stress-strain', payload: { material: 'aluminum_6061', applied_stress_mpa: 150, original_length_m: 1 }, description: "Hooke's law elongation + factor of safety" },
+    { label: 'Thermal Expansion', task_type: 'thermal-expansion', payload: { material: 'steel_1020', length_m: 10, delta_temperature_c: 50 }, description: 'Real linear thermal expansion' },
+    { label: 'Material Selection', task_type: 'material-selection', payload: { candidates: ['aluminum_6061', 'titanium_ti6al4v', 'stainless_304'] }, description: 'Weighted multi-criteria ranking' },
+  ],
+  personal_finance: [
+    { label: 'Savings Projection', task_type: 'savings-projection', payload: { current_savings: 5000, monthly_contribution: 300, annual_rate_pct: 6, years: 10 }, description: 'Compound-interest future value' },
+    { label: 'Retirement Projection', task_type: 'retirement-projection', payload: { current_age: 30, retirement_age: 65, current_savings: 20000, monthly_contribution: 500 }, description: 'Nominal + inflation-adjusted retirement balance' },
+    { label: 'Debt Payoff', task_type: 'debt-payoff', payload: { debts: [{ name: 'Card A', balance: 5000, apr: 22, min_payment: 100 }, { name: 'Card B', balance: 2000, apr: 15, min_payment: 50 }], extra_monthly_payment: 200 }, description: 'Real avalanche vs. snowball simulation' },
+    { label: 'Net Worth', task_type: 'net-worth', payload: { assets: { savings: 10000, home: 250000 }, liabilities: { mortgage: 180000 } }, description: 'Assets minus liabilities' },
+  ],
+  energy_grid: [
+    { label: 'Solar Output', task_type: 'solar-output', payload: { location: 'Phoenix', panel_area_m2: 20 }, description: 'Real irradiance-grounded PV output estimate' },
+    { label: 'Wind Output', task_type: 'wind-output', payload: { location: 'Amsterdam', rotor_diameter_m: 100 }, description: 'Real wind-speed-grounded turbine output estimate' },
+    { label: 'LCOE', task_type: 'lcoe', payload: { capex_usd: 1000000, opex_annual_usd: 20000, annual_output_kwh: 2000000 }, description: 'Levelized Cost of Energy' },
+    { label: 'Carbon Intensity', task_type: 'carbon-intensity', payload: { generation_mix_pct: { coal: 20, gas: 30, wind: 25, solar_pv: 15, nuclear: 10 } }, description: 'Weighted grid carbon intensity' },
+  ],
+  mathematics: [
+    { label: 'Factorize', task_type: 'number-theory', payload: { operation: 'factorize', n: 360 }, description: 'Real prime factorization' },
+    { label: 'Combinations', task_type: 'combinatorics', payload: { operation: 'combinations', n: 10, r: 3 }, description: 'nCr calculation' },
+    { label: 'Polynomial Roots', task_type: 'polynomial-roots', payload: { coefficients: [1, -3, 2] }, description: 'Exact roots via numpy' },
+    { label: 'Linear Algebra', task_type: 'linear-algebra', payload: { operation: 'determinant', matrix: [[1, 2], [3, 4]] }, description: 'Determinant/inverse/eigenvalues/solve' },
+  ],
   // Generic presets for remaining agents
   data_science: [
     { label: 'Status', task_type: 'status', payload: {}, description: 'Agent status' },
