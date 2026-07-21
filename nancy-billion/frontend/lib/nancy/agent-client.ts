@@ -181,6 +181,29 @@ export const AGENT_TASK_PRESETS: Record<string, TaskPreset[]> = {
     { label: 'Delete File', task_type: 'delete', payload: { path: '', confirm: true }, description: 'Permanently delete a real file (irreversible)' },
     { label: 'Organize Plan', task_type: 'organization', payload: { directory: '~', rule: 'by_type' }, description: 'Analyse a directory and propose an organization plan' },
   ],
+  science_research: [
+    { label: 'Physical Constant', task_type: 'constant-lookup', payload: { name: 'speed_of_light' }, description: 'Look up a real CODATA physical constant' },
+    { label: 'Unit Conversion', task_type: 'unit-conversion', payload: { value: 100, from_unit: 'km', to_unit: 'mile' }, description: 'Exact SI/derived-unit conversion' },
+    { label: 'Sample Size', task_type: 'sample-size', payload: { effect_size: 0.5, alpha: 0.05, power: 0.8 }, description: 'Statistical power analysis for experiment design' },
+    { label: 'Literature Synthesis', task_type: 'literature-synthesis', payload: { topic: 'CRISPR gene editing' }, description: 'Real Wikipedia-sourced science topic synthesis' },
+  ],
+  general_research: [
+    { label: 'Research Brief', task_type: 'brief', payload: { topic: 'renewable energy storage' }, description: 'Source-grounded overview, key terms, related topics' },
+    { label: 'Compare Topics', task_type: 'compare', payload: { topic_a: 'solar power', topic_b: 'wind power' }, description: 'Side-by-side comparison with similarity score' },
+    { label: 'Related Topics', task_type: 'related-topics', payload: { topic: 'artificial intelligence' }, description: 'Discover related topics from a real source' },
+  ],
+  nuclear_research: [
+    { label: 'Decay Calculation', task_type: 'decay-calculation', payload: { isotope: 'co-60', elapsed_seconds: 157788000 }, description: 'Real radioactive decay law for a common isotope' },
+    { label: 'Binding Energy', task_type: 'binding-energy', payload: { mass_number: 56, atomic_number: 26 }, description: 'Semi-empirical mass formula (iron-56)' },
+    { label: 'Dose Estimate', task_type: 'dose-estimate', payload: { isotope: 'cs-137', activity_mbq: 100, distance_m: 1 }, description: 'Point-source gamma dose-rate approximation' },
+    { label: 'Fuel Cycle Overview', task_type: 'fuel-cycle-overview', payload: {}, description: 'Civilian fuel cycle and IAEA non-proliferation safeguards' },
+    { label: 'Fusion Overview', task_type: 'fusion-overview', payload: {}, description: 'Lawson criterion and leading fusion energy approaches' },
+  ],
+  agent_creator: [
+    { label: 'List Registry', task_type: 'list_registry', payload: {}, description: 'List curated and dynamically-created agents' },
+    { label: 'Scaffold Agent', task_type: 'scaffold', payload: { key: 'weather_forecaster', class_name: 'WeatherForecasterAgent', domain: 'weather-forecasting', description: 'Forecasts weather conditions' }, description: 'Generate a valid new agent module (does not write to disk)' },
+    { label: 'Deploy Agent', task_type: 'deploy', payload: { key: 'weather_forecaster', class_name: 'WeatherForecasterAgent', domain: 'weather-forecasting', description: 'Forecasts weather conditions' }, description: 'Validate and write a new agent file to agents/specialized/dynamic/' },
+  ],
   // Generic presets for remaining agents
   data_science: [
     { label: 'Status', task_type: 'status', payload: {}, description: 'Agent status' },
