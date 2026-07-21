@@ -21,6 +21,9 @@ from .quantum_computing_agent import QuantumComputingAgent
 from .nanotechnology_agent import NanotechnologyAgent
 from .bioinformatics_agent import BioinformaticsAgent
 from .research_agent import ResearchAgent
+from .science_research_agent import ScienceResearchAgent
+from .general_research_agent import GeneralResearchAgent
+from .nuclear_research_agent import NuclearResearchAgent
 # Phase 1 Enhancement Agents
 from .neural_interface_agent import NeuralInterfaceAgent
 from .holographic_display_controller import HolographicDisplayController
@@ -40,6 +43,8 @@ from .dispatcher_agent import DispatcherAgent
 from .explore_agent import ExploreAgent
 from .llm_utility_agents import GeneralPurposeAgent, ClaudeAgent, ClaudeCodeGuideAgent
 from .statusline_setup_agent import StatuslineSetupAgent
+# Meta-agent: creates and deploys new specialized agents (writes to agents/specialized/dynamic/)
+from .agent_creator_agent import AgentCreatorAgent
 
 # Registry of all available specialized agents
 SPECIALIZED_AGENTS = {
@@ -63,6 +68,9 @@ SPECIALIZED_AGENTS = {
     "nanotechnology":         NanotechnologyAgent,
     "bioinformatics":         BioinformaticsAgent,
     "research":               ResearchAgent,
+    "science_research":       ScienceResearchAgent,
+    "general_research":       GeneralResearchAgent,
+    "nuclear_research":       NuclearResearchAgent,
     # ---- Phase 1 Enhancement Agents ----
     "neural_interface":       NeuralInterfaceAgent,
     "holographic_display":    HolographicDisplayController,
@@ -84,6 +92,8 @@ SPECIALIZED_AGENTS = {
     "claude":                   ClaudeAgent,
     "claude_code_guide":        ClaudeCodeGuideAgent,
     "statusline_setup":         StatuslineSetupAgent,
+    # ---- Meta-agent: creates and deploys new specialized agents ----
+    "agent_creator":            AgentCreatorAgent,
 }
 
 def get_available_agents():
