@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import useSWR from 'swr'
 import type { EconomicEvent, KnowledgeCategory, NewsItem } from '@/lib/nancy/types'
 import { getEconomicCalendarEvents } from '@/lib/nancy/economic-calendar-client'
+import { timeAgo } from '@/lib/nancy/time'
 import { CornerTicks } from './hud-bits'
 import { StoryDialog } from './story-dialog'
 import {
@@ -173,17 +174,6 @@ const fetcher = (url: string) =>
     return r.json() as Promise<{ items: NewsItem[] }>
   })
 
-function timeAgo(iso?: string): string {
-  if (!iso) return ''
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return ''
-  const m = Math.round((Date.now() - t) / 60000)
-  if (m < 1) return 'just now'
-  if (m < 60) return `${m}m ago`
-  const h = Math.round(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.round(h / 24)}d ago`
-}
 
 export function KnowledgePanel({
   category,
