@@ -14,6 +14,8 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from event_bus import event_bus
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -132,9 +134,11 @@ class AgentService:
             await agent.initialize()
             self._agents[key] = agent
             logger.debug("  [OK] %s (%s)", key, cls.__name__)
+            await event_bus.publish("AGENT_ONLINE", {"agent_key": key})
         except Exception as exc:
             self._init_errors[key] = str(exc)
             logger.warning("  [FAIL] %s: %s", key, exc)
+            await event_bus.publish("AGENT_OFFLINE", {"agent_key": key, "error": str(exc)})
 
     async def shutdown(self) -> None:
         """Shutdown all agents gracefully."""
@@ -174,7 +178,9 @@ class AgentService:
             logger.error(err)
             return {"success": False, "error": err, "agent_key": agent_key}
 
+        task_type = str(task_data.get("type", "unknown"))
         start = time.time()
+        await event_bus.publish("AGENT_TASK_STARTED", {"agent_key": agent_key, "task_type": task_type})
         try:
             result = await asyncio.wait_for(
                 agent.run_task(task_data),
@@ -182,22 +188,37 @@ class AgentService:
             )
             result.setdefault("agent_key", agent_key)
             result.setdefault("latency_ms", round((time.time() - start) * 1000, 2))
+            await event_bus.publish("AGENT_TASK_FINISHED", {
+                "agent_key": agent_key, "task_type": task_type,
+                "success": bool(result.get("success", True)),
+                "latency_ms": result.get("latency_ms"),
+            })
             return result
         except asyncio.TimeoutError:
-            return {
+            result = {
                 "success":   False,
                 "error":     f"Agent '{agent_key}' timed out after {timeout}s",
                 "agent_key": agent_key,
                 "latency_ms": round((time.time() - start) * 1000, 2),
             }
+            await event_bus.publish("AGENT_TASK_FINISHED", {
+                "agent_key": agent_key, "task_type": task_type,
+                "success": False, "latency_ms": result["latency_ms"], "error": result["error"],
+            })
+            return result
         except Exception as exc:
             logger.exception("AgentService.run error [%s]: %s", agent_key, exc)
-            return {
+            result = {
                 "success":   False,
                 "error":     str(exc),
                 "agent_key": agent_key,
                 "latency_ms": round((time.time() - start) * 1000, 2),
             }
+            await event_bus.publish("AGENT_TASK_FINISHED", {
+                "agent_key": agent_key, "task_type": task_type,
+                "success": False, "latency_ms": result["latency_ms"], "error": result["error"],
+            })
+            return result
 
     async def auto_run(
         self,

@@ -20,7 +20,10 @@ export interface AgentInfo {
   role?: string
   description?: string
   load: number
-  status: 'online' | 'idle' | 'offline' | 'training' | 'error'
+  status: 'online' | 'idle' | 'offline' | 'training' | 'error' | 'executing'
+  /** Real task_type currently in flight (see base_specialized_agent.py's
+   * run_task) -- only non-null while status === 'executing'. */
+  current_task_type?: string | null
   confidence: number
   specializations: string[]
   total_tasks: number
@@ -134,4 +137,72 @@ export interface MarketAnalysis {
   recommendation: 'buy' | 'sell' | 'hold'
   confidence: number
   timestamp: number
+}
+
+/* ── Missions (AI Workflow Orchestrator) — mirrors backend/missions_store.py.
+   Backend timestamps are Unix seconds (Python time.time()), NOT the
+   milliseconds the rest of this frontend uses (Date.now()) -- callers must
+   multiply by 1000 before handing one to timeAgo()/Date. ── */
+export type MissionStage =
+  | 'mission_created' | 'planning' | 'reasoning' | 'dependency_resolution' | 'agent_assignment'
+  | 'execution' | 'validation' | 'human_approval' | 'deployment' | 'archive'
+
+export interface MissionSubtask {
+  id: string
+  text: string
+  done: boolean
+}
+
+export interface MissionResult {
+  success: boolean
+  text: string
+  at: number
+  savedFile?: string | null
+}
+
+export interface MissionHistoryEntry {
+  stage: MissionStage
+  at: number
+}
+
+export interface Mission {
+  id: string
+  title: string
+  description: string
+  stage: MissionStage
+  assigned_agent: string | null
+  owner: string
+  priority: 'low' | 'medium' | 'high' | 'critical'
+  risk: 'low' | 'medium' | 'high'
+  estimated_cost: number | null
+  due_date: string | null
+  tags: string[]
+  dependencies: string[]
+  subtasks: MissionSubtask[]
+  order: number
+  created_at: number
+  updated_at: number
+  dispatched_at: number | null
+  result: MissionResult | null
+  cancelled: boolean
+  history: MissionHistoryEntry[]
+}
+
+/** The real domain events published over the /ws socket (see
+ * backend/event_bus.py + main_new.py's _broadcast_domain_event). */
+export type DomainEventType =
+  | 'MISSION_CREATED' | 'MISSION_UPDATED' | 'MISSION_ASSIGNED' | 'MISSION_STARTED'
+  | 'MISSION_COMPLETED' | 'MISSION_CANCELLED' | 'MISSION_DELETED'
+  | 'AGENT_ONLINE' | 'AGENT_OFFLINE' | 'AGENT_TASK_STARTED' | 'AGENT_TASK_FINISHED'
+
+export interface DomainEvent {
+  type: DomainEventType
+  at: number
+  mission?: Mission
+  mission_id?: string
+  agent_key?: string
+  task_type?: string
+  success?: boolean
+  error?: string
+  [key: string]: unknown
 }

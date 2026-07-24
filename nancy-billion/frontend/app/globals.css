@@ -372,3 +372,98 @@
   display: flex;
   flex-direction: column;
 }
+
+/* ───────────────────────────────────────────────────────────────────────
+   Mission Control / Kanban premium layer -- additive only, same ember/
+   graphite tokens as the rest of the app. A glass-surface card idiom,
+   a dot-grid backdrop, and a couple of connector/border motions used by
+   the agent roster's hub-and-spoke groups and the kanban board.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.hud-dot-grid {
+  background-image: radial-gradient(circle, oklch(1 0 0 / 55%) 1px, transparent 1px);
+  background-size: 28px 28px;
+  animation: dot-grid-drift 60s linear infinite;
+}
+@keyframes dot-grid-drift {
+  from { background-position: 0 0; }
+  to { background-position: 280px 280px; }
+}
+
+/* Layered glass surface used by agent cards, kanban cards, columns and the
+   inspector drawer -- a soft gradient over the existing surface tokens plus
+   a hairline border, no backdrop-blur by default (this app avoids fog). */
+.glass-surface {
+  background: linear-gradient(160deg, var(--surface-2) 0%, var(--surface-1) 100%);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 1px oklch(0 0 0 / 25%), 0 12px 32px oklch(0 0 0 / 22%), inset 0 1px 0 oklch(1 0 0 / 4%);
+}
+
+@keyframes card-border-breathe {
+  0%, 100% { border-color: var(--border); }
+  50% { border-color: oklch(0.72 0.15 42 / 28%); }
+}
+.animate-card-border-breathe { animation: card-border-breathe 3.6s ease-in-out infinite; }
+
+/* SVG connector dash-flow -- used for the hub-and-spoke category lines in
+   Mission Control. A grouping affordance, not a claim of live data flow. */
+@keyframes flow-dash {
+  to { stroke-dashoffset: -24; }
+}
+.animate-flow-dash { animation: flow-dash 1.4s linear infinite; }
+
+@keyframes flow-dash-vertical {
+  to { background-position-y: -16px; }
+}
+.animate-flow-dash-vertical { animation: flow-dash-vertical 0.8s linear infinite; }
+
+/* Kanban drop-position indicator between cards while dragging. */
+@keyframes drop-indicator-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+.animate-drop-indicator { animation: drop-indicator-pulse 0.9s ease-in-out infinite; }
+
+/* ───────────────────────────────────────────────────────────────────────
+   Snake border -- required, state-driven "active AI card" signature (see
+   components/nancy/snake-border.tsx). Same conic-gradient + mask technique
+   already used by .glow-ring above, parametrized via custom properties so
+   one implementation covers every real status instead of one CSS block
+   per color. Speed/color/opacity are set inline per-instance from real
+   backend state (agent.status, mission.stage) -- this file only defines
+   the mechanics, never a fixed decorative value.
+   ─────────────────────────────────────────────────────────────────────── */
+.snake-border {
+  position: relative;
+  isolation: isolate;
+}
+.snake-border::before,
+.snake-border::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1.5px;
+  pointer-events: none;
+  background: conic-gradient(from 0deg, var(--snake-c1, var(--hud)), var(--snake-c2, var(--gold)), transparent 45%, var(--snake-c1, var(--hud)));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  opacity: var(--snake-opacity, 0.85);
+  animation: snake-spin var(--snake-duration, 6s) linear infinite;
+  animation-play-state: var(--snake-play, running);
+  will-change: transform;
+}
+.snake-border::after {
+  z-index: -1;
+  filter: blur(7px);
+  opacity: calc(var(--snake-opacity, 0.85) * 0.55);
+}
+@keyframes snake-spin {
+  to { transform: rotate(360deg); }
+}
+.snake-border--offline::before,
+.snake-border--offline::after {
+  animation: none;
+}

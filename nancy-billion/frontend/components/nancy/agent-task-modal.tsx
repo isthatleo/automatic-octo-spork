@@ -9,6 +9,10 @@ import { cn } from '@/lib/utils'
 interface AgentTaskModalProps {
   agent: AgentInfo
   onClose: () => void
+  /** Fired with every real result this modal produces — lets a host screen
+   * (e.g. Mission Control's inspector) keep an honest session-local history
+   * without duplicating the run logic here. */
+  onResult?: (result: AgentResult) => void
 }
 
 function JsonView({ data }: { data: unknown }) {
@@ -127,7 +131,7 @@ function ResultView({ result }: { result: AgentResult }) {
   )
 }
 
-export function AgentTaskModal({ agent, onClose }: AgentTaskModalProps) {
+export function AgentTaskModal({ agent, onClose, onResult }: AgentTaskModalProps) {
   const presets = getTaskPresets(agent.key)
   const [selectedPreset, setSelectedPreset] = useState<TaskPreset>(presets[0])
   const [customPayload, setCustomPayload] = useState(JSON.stringify(presets[0].payload, null, 2))
@@ -166,10 +170,11 @@ export function AgentTaskModal({ agent, onClose }: AgentTaskModalProps) {
       const res = await runAgent(agent.key, selectedPreset.task_type, payload)
       setElapsed(Date.now() - start)
       setResult(res)
+      onResult?.(res)
     } finally {
       setRunning(false)
     }
-  }, [agent.key, selectedPreset.task_type, validatePayload])
+  }, [agent.key, selectedPreset.task_type, validatePayload, onResult])
 
   const statusColor = agent.status === 'online'
     ? 'text-primary' : agent.status === 'offline'

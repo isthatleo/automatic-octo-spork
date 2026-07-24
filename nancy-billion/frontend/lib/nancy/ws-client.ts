@@ -4,6 +4,14 @@
 // backend/main_new.py) — real request/response over one connection, no HTTP
 // round trip per message and no artificial word-by-word chunking.
 
+import type { DomainEvent, DomainEventType } from './types'
+
+const DOMAIN_EVENT_TYPES = new Set<DomainEventType>([
+  'MISSION_CREATED', 'MISSION_UPDATED', 'MISSION_ASSIGNED', 'MISSION_STARTED',
+  'MISSION_COMPLETED', 'MISSION_CANCELLED', 'MISSION_DELETED',
+  'AGENT_ONLINE', 'AGENT_OFFLINE', 'AGENT_TASK_STARTED', 'AGENT_TASK_FINISHED',
+])
+
 const WS_URL =
   process.env.NEXT_PUBLIC_BACKEND_WS_URL ??
   `${(process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000').replace(/^http/, 'ws')}/ws`
@@ -32,6 +40,7 @@ let pending: Pending | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
 const economicAlertListeners = new Set<(payload: EconomicAlertPayload) => void>()
+const domainEventListeners = new Set<(event: DomainEvent) => void>()
 
 function connect(): Promise<WebSocket> {
   if (socket && socket.readyState === WebSocket.OPEN) return Promise.resolve(socket)
@@ -57,6 +66,14 @@ function connect(): Promise<WebSocket> {
       // Proactive server pushes fire regardless of whether a request is pending.
       if (msg.type === 'economic_alert') {
         for (const cb of economicAlertListeners) cb(msg as unknown as EconomicAlertPayload)
+        return
+      }
+
+      // Real domain events (agent lifecycle, mission stage transitions --
+      // see backend/event_bus.py) -- the UI is a live projection of these,
+      // not something that polls to find out what already happened.
+      if (typeof msg.type === 'string' && DOMAIN_EVENT_TYPES.has(msg.type as DomainEventType)) {
+        for (const cb of domainEventListeners) cb(msg as unknown as DomainEvent)
         return
       }
 
@@ -90,7 +107,7 @@ function connect(): Promise<WebSocket> {
       // Auto-reconnect only while something actually needs the proactive
       // push channel (a trader watching for a live NFP/CPI alert shouldn't
       // lose the connection silently if it drops mid-session).
-      if (economicAlertListeners.size > 0 && !reconnectTimer) {
+      if ((economicAlertListeners.size > 0 || domainEventListeners.size > 0) && !reconnectTimer) {
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null
           connect().catch(() => {
@@ -114,6 +131,19 @@ export function onEconomicAlert(callback: (payload: EconomicAlertPayload) => voi
   connect().catch((err) => console.warn('[ws-client] economic-alert subscription connect failed:', err))
   return () => {
     economicAlertListeners.delete(callback)
+  }
+}
+
+/**
+ * Subscribe to real backend domain events (agent lifecycle + mission stage
+ * transitions). Eagerly opens the same persistent WebSocket the chat and
+ * economic-alert channels share. Returns an unsubscribe function.
+ */
+export function onDomainEvent(callback: (event: DomainEvent) => void): () => void {
+  domainEventListeners.add(callback)
+  connect().catch((err) => console.warn('[ws-client] domain-event subscription connect failed:', err))
+  return () => {
+    domainEventListeners.delete(callback)
   }
 }
 

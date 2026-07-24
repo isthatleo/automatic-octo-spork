@@ -65,6 +65,8 @@ from clap_detection import clap_detector
 from telegram_bot import telegram_notifier
 import telegram_pairing
 from agents.agent_service import agent_service
+from event_bus import event_bus
+from missions_store import mission_store, MissionError
 from context_manager import NancyContextualBrain, IntentType
 from memory import MemoryManager, MemoryType
 from cron_store import cron_store
@@ -270,6 +272,16 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+async def _broadcast_domain_event(event_type: str, envelope: Dict[str, Any]) -> None:
+    """Real-time projection of a real domain event to every connected
+    browser tab -- see event_bus.py. This is the ONLY place a domain event
+    turns into a WebSocket frame; publishers (AgentService, MissionStore
+    callers below) never touch WebSockets directly."""
+    await manager.broadcast(json.dumps(envelope))
+
+event_bus.subscribe(_broadcast_domain_event)
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +751,38 @@ class KeyUpsertRequest(BaseModel):
 class SaveFileRequest(BaseModel):
     filename: str
     content: str
+
+class MissionCreateRequest(BaseModel):
+    title: str
+    description: str = ""
+    owner: str = ""
+    priority: str = "medium"
+    risk: str = "low"
+    estimated_cost: float | None = None
+    due_date: str | None = None
+    tags: list[str] = []
+    dependencies: list[str] = []
+    subtasks: list[Dict[str, Any]] = []
+    assigned_agent: str | None = None
+
+class MissionUpdateRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    owner: str | None = None
+    priority: str | None = None
+    risk: str | None = None
+    estimated_cost: float | None = None
+    due_date: str | None = None
+    tags: list[str] | None = None
+    dependencies: list[str] | None = None
+    subtasks: list[Dict[str, Any]] | None = None
+    order: float | None = None
+
+class MissionAssignRequest(BaseModel):
+    agent_key: str | None = None
+
+class MissionTransitionRequest(BaseModel):
+    stage: str
 
 
 # ---------------------------------------------------------------------------
@@ -1724,6 +1768,133 @@ async def save_to_desktop(req: SaveFileRequest):
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to write file: {exc}")
     return {"success": True, "path": str(path), "filename": path.name}
+
+
+# ---------------------------------------------------------------------------
+# REST routes — Missions (AI Workflow Orchestrator)
+#
+# A mission is a real, persisted entity (data/missions.json — see
+# missions_store.py) that moves through the real pipeline: planning ->
+# reasoning -> dependency_resolution -> agent_assignment -> execution ->
+# validation -> human_approval -> deployment -> completed. Every stage
+# transition publishes a real event over event_bus, which the WebSocket
+# subscriber above (_broadcast_domain_event) pushes to every connected
+# browser tab live — the frontend's board is a projection of this state,
+# not an independent localStorage-backed app.
+# ---------------------------------------------------------------------------
+
+def _summarize_agent_result(result: Dict[str, Any]) -> str:
+    """Same rules as the frontend's summarizeResult() (lib/nancy/agent-client.ts)
+    -- kept in sync deliberately so a mission dispatched server-side reads the
+    same way a manually-run agent result does."""
+    if not result.get("success"):
+        return str(result.get("error") or "Task failed — no further detail returned")
+    for key in ("response", "result", "summary", "message"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "Completed — see full details"
+
+
+async def _dispatch_mission(mission_id: str) -> None:
+    """Real server-side execution of a mission that just entered the
+    Execution stage with an agent assigned — mirrors the honest
+    auto-dispatch behaviour the Kanban board used to do client-side, now
+    server-driven so every connected tab (not just the one that dragged the
+    card) sees it live via MISSION_STARTED/MISSION_COMPLETED events."""
+    mission = mission_store.get(mission_id)
+    if mission is None or not mission.assigned_agent:
+        return
+    mission_store.set_dispatched(mission_id)
+    started_snapshot = mission_store.get(mission_id)
+    await event_bus.publish("MISSION_STARTED", {"mission": started_snapshot.to_public_dict()})
+
+    query = mission.description or mission.title
+    result = await agent_service.run(mission.assigned_agent, {"type": "query", "query": query})
+    success = bool(result.get("success"))
+    text = _summarize_agent_result(result)
+    mission_store.record_result(mission_id, success=success, text=text)
+
+    next_stage = "validation" if success else "agent_assignment"
+    try:
+        updated = mission_store.transition(mission_id, next_stage)
+    except MissionError:
+        updated = mission_store.get(mission_id)
+    await event_bus.publish(
+        "MISSION_COMPLETED" if success else "MISSION_UPDATED",
+        {"mission": updated.to_public_dict(), "result": result},
+    )
+
+
+@app.get("/missions")
+async def list_missions():
+    return {"success": True, "missions": [m.to_public_dict() for m in mission_store.list()]}
+
+
+@app.post("/missions", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_mission(req: MissionCreateRequest):
+    try:
+        mission = mission_store.create(
+            req.title, description=req.description, owner=req.owner, priority=req.priority,
+            risk=req.risk, estimated_cost=req.estimated_cost, due_date=req.due_date,
+            tags=req.tags, dependencies=req.dependencies, subtasks=req.subtasks,
+            assigned_agent=req.assigned_agent,
+        )
+    except MissionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await event_bus.publish("MISSION_CREATED", {"mission": mission.to_public_dict()})
+    return {"success": True, "mission": mission.to_public_dict()}
+
+
+@app.patch("/missions/{mission_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def update_mission(mission_id: str, req: MissionUpdateRequest):
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    try:
+        mission = mission_store.update(mission_id, **fields)
+    except MissionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if mission is None:
+        raise HTTPException(status_code=404, detail="mission not found")
+    await event_bus.publish("MISSION_UPDATED", {"mission": mission.to_public_dict()})
+    return {"success": True, "mission": mission.to_public_dict()}
+
+
+@app.post("/missions/{mission_id}/assign", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def assign_mission_route(mission_id: str, req: MissionAssignRequest):
+    mission = mission_store.assign(mission_id, req.agent_key)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="mission not found")
+    await event_bus.publish("MISSION_ASSIGNED", {"mission": mission.to_public_dict()})
+    return {"success": True, "mission": mission.to_public_dict()}
+
+
+@app.post("/missions/{mission_id}/transition", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def transition_mission_route(mission_id: str, req: MissionTransitionRequest):
+    try:
+        mission = mission_store.transition(mission_id, req.stage)
+    except MissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    await event_bus.publish("MISSION_UPDATED", {"mission": mission.to_public_dict()})
+    if req.stage == "execution" and mission.assigned_agent:
+        asyncio.create_task(_dispatch_mission(mission_id))
+    return {"success": True, "mission": mission.to_public_dict()}
+
+
+@app.post("/missions/{mission_id}/cancel", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def cancel_mission_route(mission_id: str):
+    mission = mission_store.cancel(mission_id)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="mission not found")
+    await event_bus.publish("MISSION_CANCELLED", {"mission": mission.to_public_dict()})
+    return {"success": True, "mission": mission.to_public_dict()}
+
+
+@app.delete("/missions/{mission_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def delete_mission_route(mission_id: str):
+    if not mission_store.delete(mission_id):
+        raise HTTPException(status_code=404, detail="mission not found")
+    await event_bus.publish("MISSION_DELETED", {"mission_id": mission_id})
+    return {"success": True}
 
 
 # Legacy HTTP agent runner (Fury-based)

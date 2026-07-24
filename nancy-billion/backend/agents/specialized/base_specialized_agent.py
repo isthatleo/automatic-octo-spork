@@ -43,6 +43,7 @@ class SpecializedAgent(BaseAgent):
         }
         self.task_queue: Deque[Dict[str, Any]] = deque()
         self.is_processing: bool = False
+        self._current_task_type: Optional[str] = None
         self._task_history: Deque[Dict[str, Any]] = deque(maxlen=200)
         self._total_tasks:  int  = 0
         self._failed_tasks: int  = 0
@@ -143,9 +144,21 @@ class SpecializedAgent(BaseAgent):
         return task_id
 
     async def run_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Run a task immediately (bypasses queue) and return result."""
+        """Run a task immediately (bypasses queue) and return result.
+
+        `is_processing` used to only be set by the queue path
+        (`_process_queue`), so a task run directly through this method --
+        which is what /agents/run and /agents/auto actually use -- left
+        `get_info()`'s `status`/`load` reporting "idle" the entire time a
+        real task was executing. Setting it here too means the fleet roster
+        genuinely reflects live execution regardless of which path a task
+        came in through, instead of only being honest for the queue path
+        nothing currently calls from the REST API.
+        """
         start = time.time()
         self._total_tasks += 1
+        self.is_processing = True
+        self._current_task_type = str(task_data.get("type", "unknown"))
         try:
             result = await self.process_task(task_data)
             latency = time.time() - start
@@ -160,6 +173,9 @@ class SpecializedAgent(BaseAgent):
             self._failed_tasks += 1
             self.logger.exception("run_task error in %s: %s", self.agent_name, exc)
             return {"success": False, "error": str(exc), "timestamp": time.time()}
+        finally:
+            self.is_processing = False
+            self._current_task_type = None
 
     async def _process_queue(self) -> None:
         """Drain the task queue sequentially."""
@@ -173,6 +189,7 @@ class SpecializedAgent(BaseAgent):
                 task["status"] = "running"
                 start = time.time()
                 self._total_tasks += 1
+                self._current_task_type = str(task["data"].get("type", "unknown"))
 
                 try:
                     result = await self.process_task(task["data"])
@@ -204,6 +221,7 @@ class SpecializedAgent(BaseAgent):
                 })
         finally:
             self.is_processing = False
+            self._current_task_type = None
 
     # ------------------------------------------------------------------
     # Abstract interface -- subclasses must implement this
@@ -230,7 +248,8 @@ class SpecializedAgent(BaseAgent):
         )
         return {
             **self.capabilities,
-            "status":        "online" if self._running or self._initialized else "idle",
+            "status":        "executing" if self.is_processing else ("online" if self._running or self._initialized else "idle"),
+            "current_task_type": self._current_task_type,
             "queue_length":  len(self.task_queue),
             "is_processing": self.is_processing,
             "total_tasks":   self._total_tasks,
@@ -241,7 +260,10 @@ class SpecializedAgent(BaseAgent):
         }
 
     def get_info(self) -> Dict[str, Any]:
-        """Lightweight info for the frontend agent list."""
+        """Lightweight info for the frontend agent list. `status` is
+        "executing" for the real duration of an in-flight task (see
+        run_task/_process_queue), not a decorative value -- the frontend's
+        snake-border animation speed is driven directly by this field."""
         return {
             "key":             self.domain.replace("-", "_"),
             "name":            self.agent_name,
@@ -249,7 +271,8 @@ class SpecializedAgent(BaseAgent):
             "description":     self.capabilities.get("description", ""),
             "confidence":      self.capabilities.get("confidence", 0.8),
             "specializations": self.capabilities.get("specializations", []),
-            "status":          "online" if self._initialized else "idle",
+            "status":          "executing" if self.is_processing else ("online" if self._initialized else "idle"),
+            "current_task_type": self._current_task_type,
             "load":            min(100, len(self.task_queue) * 10 + (10 if self.is_processing else 0)),
             "total_tasks":     self._total_tasks,
             # Honesty flags (default real/production for most agents; agents

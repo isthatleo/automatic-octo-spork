@@ -21,6 +21,27 @@ services:
       - ./backend/data:/app/data
       - ./backend/voice_ref:/app/voice_ref
     restart: unless-stopped
+    # `docker compose watch` -- run alongside `docker compose up` to keep
+    # this container in step with source edits automatically. main_new.py
+    # is a plain `python main_new.py` (no uvicorn --reload), so a normal
+    # code edit is synced in and the process restarted; a dependency change
+    # (requirements.txt) or an edit to the real fury-main package this
+    # image pip-installs from at build time (../fury-main -- see
+    # Dockerfile's top comment) needs a full image rebuild instead, since
+    # those are baked into the image rather than just copied in.
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./backend
+          target: /app
+          ignore:
+            - ./backend/data
+            - ./backend/voice_ref
+            - "**/__pycache__"
+        - action: rebuild
+          path: ./backend/requirements.txt
+        - action: rebuild
+          path: ../fury-main
 
   frontend:
     build:
@@ -35,6 +56,18 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    # This image runs a production build (`next build` then `next start`),
+    # not a dev server, so there's no live process to sync source into --
+    # every real change needs the image rebuilt and the container recreated
+    # rather than a lighter sync+restart.
+    develop:
+      watch:
+        - action: rebuild
+          path: ./frontend
+          ignore:
+            - ./frontend/node_modules
+            - ./frontend/.next
+            - ./frontend/dev.log
 
   # Local offline LLM fallback -- opt-in only (`docker compose --profile
   # ollama up`), since get_llm_backends() already prioritizes the cloud

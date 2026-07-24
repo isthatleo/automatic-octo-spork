@@ -5,15 +5,15 @@ import { BootSequence } from '@/components/nancy/boot-sequence'
 import { MapPanel } from '@/components/nancy/map-panel'
 import { KnowledgePanel } from '@/components/nancy/knowledge-panel'
 import {
-  AgentsPanel,
   CorePanel,
   OverviewPanel,
   SystemPanel,
 } from '@/components/nancy/panels'
+import { MissionControlPanel } from '@/components/nancy/mission-control'
 import { ConsoleBar } from '@/components/nancy/console-bar'
 import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
 import { LyricsTranscript } from '@/components/nancy/lyrics-transcript'
-import { KanbanPanel } from '@/components/nancy/kanban-panel'
+import { WorkflowOrchestratorPanel } from '@/components/nancy/workflow-orchestrator'
 import {
   SessionsPanel, ChannelsPanel, InstancesPanel, CronPanel, SkillsPanel, ModelsPanel,
   KeysPanel, ConfigPanel, UsagePanel, PairingPanel, ProfilesPanel, PluginsPanel,
@@ -756,9 +756,9 @@ function WorkspaceLayout({
   const TITLE: Partial<Record<PanelKey, string>> = {
     overview: 'Command Overview',
     core: 'Neural Core',
-    agents: 'Autonomous Agents',
+    agents: 'Mission Control',
     system: 'Command Layer',
-    kanban: 'Task Board',
+    kanban: 'Workflow Orchestration',
     map: place ? `Recon · ${place.name}` : 'Global Recon',
     news: newsTopic ? `Newsfeed · ${newsTopic}` : 'Newsfeed',
     channels: 'Channels',
@@ -882,9 +882,9 @@ function WorkspaceLayout({
             <div className="absolute inset-0 overflow-y-auto px-4 py-4 pb-10 md:px-8 md:py-6">
               {panel === 'overview' && <OverviewPanel />}
               {panel === 'core' && <CorePanel />}
-              {panel === 'agents' && <AgentsPanel />}
+              {panel === 'agents' && <MissionControlPanel />}
               {panel === 'system' && <SystemPanel onLaunch={onLaunch} launched={launched} />}
-              {panel === 'kanban' && <KanbanPanel />}
+              {panel === 'kanban' && <WorkflowOrchestratorPanel />}
               {panel === 'sessions' && <SessionsPanel logs={logs} />}
               {panel === 'channels' && <ChannelsPanel />}
               {panel === 'instances' && <InstancesPanel />}
