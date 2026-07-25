@@ -34,6 +34,8 @@ import {
   FileClock, Sparkles, Cpu, Key, Settings2, BarChart3, Link2, User, PlugZap, Wrench, Webhook, BookOpen,
 } from 'lucide-react'
 
+import { DocsHelpPanel } from '@/components/nancy/docs-panel'
+
 /** Grouped exactly like OpenClaw/Hermes's sidebar (Control/Agent/Settings/
  * Resources), mapped onto Nancy's real pages -- a top-level "Voice" entry
  * stands in for their "Chat" group. */
@@ -909,7 +911,7 @@ function WorkspaceLayout({
               {panel === 'plugins' && <PluginsPanel onNavigate={() => onNav('agents')} />}
               {panel === 'mcp' && <McpPanel onNavigate={() => onNav('core')} />}
               {panel === 'webhooks' && <WebhooksPanel />}
-              {panel === 'docs' && <DocsPanel />}
+              {panel === 'docs' && <DocsHelpPanel />}
             </div>
           )}
         </div>
