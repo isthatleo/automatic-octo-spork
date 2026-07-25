@@ -45,6 +45,22 @@ const PANEL_WORDS: Record<string, PanelKey> = {
   system: 'system',
   terminal: 'system',
   console: 'system',
+  kanban: 'kanban',
+  channels: 'channels',
+  instances: 'instances',
+  sessions: 'sessions',
+  cron: 'cron',
+  skills: 'skills',
+  models: 'models',
+  config: 'config',
+  keys: 'keys',
+  usage: 'usage',
+  profiles: 'profiles',
+  pairing: 'pairing',
+  plugins: 'plugins',
+  mcp: 'mcp',
+  webhooks: 'webhooks',
+  docs: 'docs',
 }
 
 const LAUNCH_TARGETS = [
@@ -76,7 +92,7 @@ const CONVERSATIONAL_TOPICS: { pattern: RegExp; reply: string }[] = [
   {
     pattern: /\b(who are you|your name|what are you|about yourself)\b/,
     reply:
-      "I'm Nancy — Stark-class assistant, voice-first, quietly British, at your service, Sir. Say 'open the map', 'show agents', or ask me to locate a city.",
+      "I'm Nancy — Stark-class assistant, voice-first, quietly British, at your service, Sir. Try slash commands like /status, /memory, or /skills.",
   },
   {
     pattern: /\b(thank(s| you)|cheers|appreciate)\b/,
@@ -90,6 +106,33 @@ export function parseCommand(rawInput: string): CommandResult {
 
   if (/\b(hello|hi|hey|good (morning|evening|afternoon))\b/.test(input)) {
     return { type: 'greet', reply: 'Online and listening, Sir. What can I do for you?' }
+  }
+
+  if (/^\/(status|system)\b/.test(input)) {
+    return {
+      type: 'status',
+      reply:
+        "Systems healthy and modules linked, Sir. You can inspect live telemetry directly in Command Layer, or run any slash command.",
+    }
+  }
+  if (/^\/(skills|abilities)\b/.test(input)) {
+    return { type: 'navigate', panel: 'skills', reply: "Opening your active skills and attached agents, Sir." }
+  }
+  if (/^\/(memory|remember|recall)\b/.test(input)) {
+    return { type: 'navigate', panel: 'sessions', reply: "Opening memory, session history, and recall tools, Sir." }
+  }
+  if (/^\/(agents|subagents|orb|boot)\b/.test(input)) {
+    return { type: 'navigate', panel: 'agents', reply: "Opening agent command and specialist roster, Sir." }
+  }
+  if (/^\/(terminal|console|command layer)\b/.test(input)) {
+    return { type: 'navigate', panel: 'system', reply: "Opening Command Layer terminal and runtime control, Sir." }
+  }
+  if (/^\/?help$/.test(input)) {
+    return {
+      type: 'status',
+      reply:
+        "Try slash commands like /status, /skills, /memory, /agents, /terminal, /new, and any panel word. For action chains, ask me in chat and I'll route through available agents.",
+    }
   }
 
   if (/\b(status|report|systems?|diagnostic)\b/.test(input)) {
@@ -159,7 +202,7 @@ export function parseCommand(rawInput: string): CommandResult {
     return {
       type: 'status',
       reply:
-        "That's outside my current toolkit, Sir. Try 'locate Tokyo', 'open the dashboard', 'system status', or slash commands like '/status', '/agents', '/help'.",
+        "That's outside my current toolkit, Sir. Try '/agents', '/skills', '/memory', or '/status'.",
     }
   }
 
@@ -173,6 +216,6 @@ export function parseCommand(rawInput: string): CommandResult {
   return {
     type: 'unknown',
     reply:
-      "I didn't catch a recognised command, Sir. Try 'locate Tokyo', 'open agents', or slash commands like '/status', '/agents', '/help'.",
+      "I didn't catch a recognised command, Sir. Try '/agents', '/skills', '/memory', or open a panel by name.",
   }
 }

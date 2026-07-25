@@ -30,7 +30,7 @@ class _KeywordRetriever:
             return []
         results: List[_MemorySearchResult] = []
         seen: set[str] = set()
-        tokens = [t for t in [tok.lower() for tok in q.split()] if len(tok) > 2]
+        tokens = [t for t in [tok.lower() for tok in q.split()] if len(t) > 2]
 
         nodes = list(getattr(self.graph, "nodes", {}).values())
         for node in nodes:
