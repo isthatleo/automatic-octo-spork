@@ -217,27 +217,27 @@ Always address the user as "Sir" (always capitalized, even mid-sentence) -- natu
 # ---------------------------------------------------------------------------
 # Fury agent (optional)
 # ---------------------------------------------------------------------------
-if _FURY_AVAILABLE:
-    try:
-        agent = Agent(
-            model=os.getenv("LLM_MODEL_PATH", "llamafactory/Llama-3-8B-Instruct-GGUF"),
-            system_prompt=BASE_SYSTEM_PROMPT,
-            tools=get_tools(),
-        )
-        history_root = os.getenv("HISTORY_ROOT", "./data/fury_history")
-        history_manager = HistoryManager(
-            history_root=history_root,
-            persist_to_disk=True,
-            agent=agent,
-            session_id=os.getenv("HISTORY_SESSION_ID", "nancybillion"),
-        )
-    except Exception as e:
-        logger.warning("Fury agent init failed (non-fatal): %s", e)
-        agent = None
-        history_manager = None
-else:
-    agent = None
-    history_manager = None
+# if _FURY_AVAILABLE:
+#     try:
+#         agent = Agent(
+#             model=os.getenv("LLM_MODEL_PATH", "llamafactory/Llama-3-8B-Instruct-GGUF"),
+#             system_prompt=BASE_SYSTEM_PROMPT,
+#             tools=get_tools(),
+#         )
+#         history_root = os.getenv("HISTORY_ROOT", "./data/fury_history")
+#         history_manager = HistoryManager(
+#             history_root=history_root,
+#             persist_to_disk=True,
+#             agent=agent,
+#             session_id=os.getenv("HISTORY_SESSION_ID", "nancybillion"),
+#         )
+#     except Exception as e:
+#         logger.warning("Fury agent init failed (non-fatal): %s", e)
+#         agent = None
+#         history_manager = None
+# else:
+#     agent = None
+#     history_manager = None
 
 
 # ---------------------------------------------------------------------------
@@ -822,61 +822,60 @@ async def memory_search_endpoint(q: str = "", top_k: int = 10):
     return {"success": True, "query": q, "results": hits}
 
 
-@app.get("/startup")
-async def startup_sequence():
-    """Get Nancy's startup sequence"""
-    sequence = startup_coordinator.start_up()
-    return {
-        "success": True,
-        **sequence
-    }
+# @app.get("/startup")
+# async def startup_sequence():
+    # Get Nancy startup sequence
+#     sequence = startup_coordinator.start_up()
+#     return {
+#         "success": True,
+#         **sequence
+#     }
+# 
 
+# @app.get("/greeting")
+# async def get_greeting():
+#     """Get current greeting from Nancy"""
+#     greeting = startup_coordinator.greeting
+#     return {
+#         "success": True,
+#         "persona": startup_coordinator.persona,
+#         "boot_message": greeting.get_boot_message(),
+#         "ready_message": greeting.get_ready_message(),
+#         "context_aware_greeting": greeting.get_context_aware_greeting()
+#     }
+# 
 
-@app.get("/greeting")
-async def get_greeting():
-    """Get current greeting from Nancy"""
-    greeting = startup_coordinator.greeting
-    return {
-        "success": True,
-        "persona": startup_coordinator.persona,
-        "boot_message": greeting.get_boot_message(),
-        "ready_message": greeting.get_ready_message(),
-        "context_aware_greeting": greeting.get_context_aware_greeting()
-    }
-
-
-@app.post("/persona/{persona_name}")
-async def set_persona(persona_name: str):
-    """Change Nancy's persona"""
-    valid_personas = ["nancy", "billion", "jarvis"]
-
-    if persona_name.lower() not in valid_personas:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid persona. Choose from: {', '.join(valid_personas)}"
-        )
-
-    startup_coordinator.set_persona(persona_name)
-
-    greeting = startup_coordinator.greeting
-    logger.info(f"Persona changed to: {persona_name}")
-
-    return {
-        "success": True,
-        "persona": startup_coordinator.persona,
-        "greeting": greeting.get_ready_message()
-    }
-
-
+# @app.post("/persona/{persona_name}")
+# async def set_persona(persona_name: str):
+    # Change Nancy persona
+#     valid_personas = ["nancy", "billion", "jarvis"]
+# 
+#     if persona_name.lower() not in valid_personas:
+#         raise HTTPException(
+#             status_code=400,
+#             detail=f"Invalid persona. Choose from: {', '.join(valid_personas)}"
+#         )
+# 
+#     startup_coordinator.set_persona(persona_name)
+# 
+#     greeting = startup_coordinator.greeting
+#     logger.info(f"Persona changed to: {persona_name}")
+# 
+#     return {
+#         "success": True,
+#         "persona": startup_coordinator.persona,
+#         "greeting": greeting.get_ready_message()
+#     }
+# 
+# 
 async def _build_real_personal_context() -> "PersonalContext":
-    """Populate PersonalContext from Nancy's actual data sources instead of
-    the hardcoded demo data in intelligent_greeting.py's own __main__ block
-    (that demo is exactly the "Docker build"/"Roxan deployment" example
-    text -- illustrative of the tone, not real data). No calendar/meetings
-    integration exists, so meetings_today is intentionally always empty
-    rather than fabricated. Every other field is best-effort: any source
-    that errors or has nothing to report is just omitted, not faked.
-    """
+    # Populate PersonalContext from Nancy actual data sources instead of
+    # the hardcoded demo data in intelligent_greeting.py's own __main__ block
+    # (that demo is exactly the "Docker build"/"Roxan deployment" example
+    # text -- illustrative of the tone, not real data). No calendar/meetings
+    # integration exists, so meetings_today is intentionally always empty
+    # rather than fabricated. Every other field is best-effort: any source
+    # that errors has nothing to report is just omitted, not faked.
     market_alerts: list = []
     for pair in ("EUR/USD", "GBP/USD"):
         try:
