@@ -48,7 +48,7 @@ export function DocsHelpPanel() {
   }, [])
 
   const grouped = useMemo(() => {
-    const map = new Map<string | null, typeof commands>((null, []) as any)
+    const map = new Map<string, typeof commands>()
     for (const c of commands) {
       const key = c.category || 'other'
       const group = map.get(key) || []
