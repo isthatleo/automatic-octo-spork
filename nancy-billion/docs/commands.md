@@ -7,7 +7,7 @@ Slash commands can be typed in chat or invoked by voice when supported.
 - `/memory` — Open memory, session history, and recalled facts.
 - `/agents` — Open agent command and specialist roster.
 - `/terminal` — Open Command Layer terminal and runtime control.
-- `/new` — Start a fresh session or chat.
+- `/new` — Start a fresh session, clear local chat context, and reset the workspace view.
 - `/help` — Show this command reference.
 
 Navigation shortcuts work in most panels:

@@ -336,6 +336,13 @@ export default function Page() {
         case 'greet':
           nancySay(result.reply)
           break
+        case 'session':
+          sfx.whooshOut()
+          setLogs([])
+          setPanel('overview')
+          setThinking(false)
+          nancySay(result.reply)
+          break
         case 'unknown':
           // Hermes-like slash commands are handled by the backend /chat endpoint,
           // so local command parser only intercepts obvious local actions first.

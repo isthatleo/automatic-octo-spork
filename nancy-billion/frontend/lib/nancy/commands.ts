@@ -7,6 +7,7 @@ export type CommandResult =
   | { type: 'scan'; reply: string }
   | { type: 'time'; reply: string }
   | { type: 'status'; reply: string }
+  | { type: 'session'; reply: string }
   | { type: 'greet'; reply: string }
   | {
       type: 'news'
@@ -131,7 +132,13 @@ export function parseCommand(rawInput: string): CommandResult {
     return {
       type: 'status',
       reply:
-        "Try slash commands like /status, /skills, /memory, /agents, /terminal, /new, and any panel word. For action chains, ask me in chat and I'll route through available agents.",
+        "Try slash commands like /status, /skills, /memory, /agents, /terminal, /new, and any panel word. For action chains, ask in chat and I'll route through available agents.",
+    }
+  }
+  if (/^\/new$/.test(input)) {
+    return {
+      type: 'status',
+      reply: "Starting a fresh session, Sir. Context cleared and workspace reset.",
     }
   }
 
