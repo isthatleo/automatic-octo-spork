@@ -335,16 +335,26 @@ export default function Page() {
           nancySay(result.reply)
           break
         case 'unknown':
-          setThinking(true)
-          askNancy(input)
-            .then((reply) => {
-              nancySay(reply || result.reply)
-            })
-            .catch(() => {
-              sfx.error()
-              nancySay(result.reply)
-            })
-            .finally(() => setThinking(false))
+          // Hermes-like slash commands are handled by the backend /chat endpoint,
+          // so local command parser only intercepts obvious local actions first.
+          if (/^\s*\//.test(input)) {
+            const slashResult = await askNancy(input, history, null)
+            nancySay(slashResult.reply || 'Slash command sent, Sir.')
+            setThinking(false)
+            break
+          } else {
+            setThinking(true)
+            askNancy(input)
+              .then((reply) => {
+                nancySay(reply || result.reply)
+              })
+              .catch(() => {
+                sfx.error()
+                nancySay(result.reply)
+              })
+              .finally(() => setThinking(false))
+            break
+          }
           break
       }
     },

@@ -17,9 +17,6 @@ export type CommandResult =
     }
   | { type: 'unknown'; reply: string }
 
-// Category keyword → real KnowledgeCategory (drives /api/news's `category`
-// param, see knowledge-panel.tsx's CATS list). `null` means the general/
-// top-stories feed.
 const NEWS_CATEGORY_WORDS: [RegExp, KnowledgeCategory | null][] = [
   [/\b(finance|stock|market|crypto|bitcoin|economy|nasdaq|dow)\b/, 'finance'],
   [/\b(medicine|medical|health|disease|clinical)\b/, 'medicine'],
@@ -65,8 +62,6 @@ function clean(s: string) {
   return s.replace(/[.?!,]/g, '').replace(/\s+/g, ' ').trim()
 }
 
-// Questions Nancy can't answer with live data yet — reply gracefully instead of
-// pretending it's a locate request.
 const CONVERSATIONAL_TOPICS: { pattern: RegExp; reply: string }[] = [
   {
     pattern: /\b(weather|forecast|rain|snow|temperature|humidity|wind|storm|sunny|cloudy)\b/,
@@ -85,20 +80,13 @@ const CONVERSATIONAL_TOPICS: { pattern: RegExp; reply: string }[] = [
   },
   {
     pattern: /\b(thank(s| you)|cheers|appreciate)\b/,
-    reply: "Always a pleasure, Sir. Standing by.",
+    reply: 'Always a pleasure, Sir. Standing by.',
   },
-  // Deliberately NOT here: "how are you" / "how's it going" style small talk.
-  // Unlike weather/news/jokes (topics with no real data feed wired in), these
-  // have no reason to be a fixed canned line — they fall through to the
-  // 'unknown' branch below, which asks the real backend LLM for a genuine,
-  // context-aware reply instead of the same static sentence every time.
 ]
 
 export function parseCommand(rawInput: string): CommandResult {
   const input = clean(rawInput.toLowerCase())
   if (!input) return { type: 'unknown', reply: 'Standing by.' }
-
-  // Close intents handled upstream — skip here.
 
   if (/\b(hello|hi|hey|good (morning|evening|afternoon))\b/.test(input)) {
     return { type: 'greet', reply: 'Online and listening, Sir. What can I do for you?' }
@@ -119,9 +107,6 @@ export function parseCommand(rawInput: string): CommandResult {
     return { type: 'time', reply: 'Pulling local chronometer data, Sir.' }
   }
 
-  // News/briefing — real feed (see knowledge-panel.tsx → /api/news), checked
-  // before the conversational fallbacks below so it doesn't get swallowed by
-  // the generic "not connected" style replies.
   if (/\b(news|headlines|briefing)\b/.test(input)) {
     const media: 'articles' | 'videos' = /\b(video|videos|watch|documentary|documentaries)\b/.test(input)
       ? 'videos'
@@ -139,13 +124,10 @@ export function parseCommand(rawInput: string): CommandResult {
     }
   }
 
-  // Conversational fallbacks BEFORE locate — so "weather in Tokyo" doesn't try
-  // to render a map for the word "weather".
   for (const { pattern, reply } of CONVERSATIONAL_TOPICS) {
     if (pattern.test(input)) return { type: 'status', reply }
   }
 
-  // Launch / open application
   const launchMatch = input.match(/\b(open|launch|run|start|execute)\s+(?:the\s+)?(\w+)/)
   if (launchMatch) {
     const word = launchMatch[2]
@@ -156,7 +138,6 @@ export function parseCommand(rawInput: string): CommandResult {
     return { type: 'launch', target, reply: `Launching ${target}, Sir.` }
   }
 
-  // Locate / show place on map — requires an EXPLICIT locate verb.
   const locateMatch = input.match(
     /\b(?:locate|find|show me|show|go to|fly to|navigate to|take me to|where is|zoom (?:in )?(?:on|to))\s+(.+)/,
   )
@@ -167,7 +148,6 @@ export function parseCommand(rawInput: string): CommandResult {
     }
   }
 
-  // Panel navigation
   for (const [word, panel] of Object.entries(PANEL_WORDS)) {
     const re = new RegExp(`\\b${word}\\b`)
     if (re.test(input)) {
@@ -175,20 +155,24 @@ export function parseCommand(rawInput: string): CommandResult {
     }
   }
 
-  // If it's a question we don't understand locally, DON'T guess a locate —
-  // the caller sends it to the real backend for an AI-generated answer and
-  // only falls back to this reply if that call fails.
   if (/^(what|why|how|when|who|is|are|do|does|can|could|should|will|would)\b/.test(input)) {
     return {
-      type: 'unknown',
+      type: 'status',
       reply:
-        "That's outside my current toolkit, Sir. Try 'locate Tokyo', 'open the dashboard', or 'system status'.",
+        "That's outside my current toolkit, Sir. Try 'locate Tokyo', 'open the dashboard', 'system status', or slash commands like '/status', '/agents', '/help'.",
+    }
+  }
+
+  if (/^\s*\//.test(input)) {
+    return {
+      type: 'status',
+      reply: "Slash commands are not handled locally, Sir. They will be sent to the backend.",
     }
   }
 
   return {
     type: 'unknown',
     reply:
-      "I didn't catch a recognised command, Sir. Try 'locate Tokyo', 'open agents', or 'system status'.",
+      "I didn't catch a recognised command, Sir. Try 'locate Tokyo', 'open agents', or slash commands like '/status', '/agents', '/help'.",
   }
 }

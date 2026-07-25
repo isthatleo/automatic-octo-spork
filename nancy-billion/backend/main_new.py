@@ -94,7 +94,7 @@ except Exception:
 
 app = FastAPI(title="Nancy/Billion Backend", version="2.0.0")
 
-# CORS — explicit origins only. The previous config included "*" alongside
+# CORS - explicit origins only. The previous config included "*" alongside
 # named origins, which (a) makes the named origins meaningless and (b) is
 # invalid per the CORS spec when combined with allow_credentials=True (browsers
 # reject it). Configure NANCY_ALLOWED_ORIGINS as a comma-separated list for
@@ -167,7 +167,7 @@ _rate_limiter = _RateLimiter(
 async def rate_limit(request: Request) -> None:
     client_ip = request.client.host if request.client else "unknown"
     if not _rate_limiter.check(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded — slow down")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded - slow down")
 
 # Global loop reference for thread-safe async calls
 main_loop = None
@@ -194,7 +194,7 @@ trading_manager = TradingManager(user_id="user")
 
 # Log Nancy's startup
 logger.info("=" * 70)
-logger.info("🎉 NANCY/BILLION AI OPERATING SYSTEM STARTING")
+logger.info("[done] NANCY/BILLION AI OPERATING SYSTEM STARTING")
 logger.info("=" * 70)
 logger.info(f"Version: 2.0.0 - Production Ready")
 logger.info(f"Persona: {startup_coordinator.persona.upper()}")
@@ -402,37 +402,43 @@ def _live_system_context() -> str:
     prompt so meta-questions ('how many agents are running?') get grounded
     answers instead of the LLM guessing from the system prompt alone -- which
     is why 'how many agents are running' previously got 'none': nothing in
-    the prompt ever told the model any agents existed at all."""
-    if not agent_service.is_ready():
-        return "Live system status: the specialized agent service is still initialising."
-    stats = agent_service.get_service_stats()
-    domains = ", ".join(a.get("domain", a.get("key", "?")) for a in agent_service.list_agents())
-    return (
-        f"Live system status: {stats['agents_online']} specialized agents online, "
-        f"{stats['agents_offline']} offline, {stats['total_tasks']} tasks completed so far "
-        f"({stats['success_rate'] * 100:.1f}% success rate). "
-        f"Available agent domains: {domains}."
-    )
+    def _live_system_context() -> str:
+        if not agent_service.is_ready():
+            return "Live system status: the specialized agent service is still initialising."
+        parts = [
+            "Live system status:",
+            f"agents={len(agent_service._agents)}",
+            f"skills={len(list(skills_store.list()))}",
+            f"memory={len(getattr(memory_manager.graph, 'nodes', {}))}",
+        ]
+        try:
+            summary = memory_manager.get_memory_summary()
+            if isinstance(summary, dict):
+                parts.append("memory_summary=" + ",".join(
+                    f"{k}={summary.get(k, 0)}" for k in ("total_memories", "projects", "trades", "recent_conversations")
+                ))
+        except Exception:
+            pass
+        try:
+            stats = agent_service.get_service_stats()
+            parts.append(f"tasks_done={stats.get('total_tasks')}")
+            parts.append(f"success_rate={stats.get('success_rate')}")
+        except Exception:
+            pass
+        return " ".join(parts)
 
 
-def _live_context_bridge_context() -> str:
-    context = get_live_context_snapshot()
-    if not context:
-        return ""
-    parts = ["Live UI context:"]
-    def _fmt(v):
-        if isinstance(v, dict):
-            return ", ".join(f"{k}={_fmt(vv)}" for k, vv in v.items())
-        if isinstance(v, list):
-            return ", ".join(_fmt(x) for x in v)
-        return str(v)
-    for key in ("active_panel", "panel", "active_suggestions", "channel", "source"):
-        if key in context:
-            parts.append(f"{key}={_fmt(context[key])}")
-    if context.get("environmental"):
-        env = context["environmental"]
-        parts.append("environmental=" + _fmt(env))
-    return " | ".join(parts)
+    def _live_context_bridge_context() -> str:
+        context = get_live_context_snapshot()
+        if not context:
+            return ""
+        parts = ["Live UI context:"]
+        for key in ("active_panel", "panel", "active_suggestions", "channel", "source"):
+            if key in context:
+                parts.append(f"{key}={context[key]}")
+        if context.get("environmental"):
+            parts.append(f"environmental={context['environmental']}")
+        return " | ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -628,11 +634,11 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
 
     The previous implementation imported `orchestration.integration.run_nancy_hierarchy`,
     whose relative imports fail at runtime (`from ..llm import ...` outside package
-    context) — every call silently hit the except branch below and fell back to a
+    context) - every call silently hit the except branch below and fell back to a
     bare LLM call, so the "hierarchy" never actually ran. This now uses
     `agent_service`, the genuinely working 29-agent runtime (already exercised via
     the `/agents/run` and `/agents/auto` endpoints), with the same keyword-routing
-    table `auto_run` uses — but only delegates on an actual keyword match, so plain
+    table `auto_run` uses - but only delegates on an actual keyword match, so plain
     conversational text isn't forced onto the "research" agent as `auto_run`'s own
     fallback does.
     """
@@ -786,12 +792,12 @@ class MissionTransitionRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# REST routes — Core
+# REST routes - Core
 # ---------------------------------------------------------------------------
 
 @app.get("/")
 async def root():
-    return HTMLResponse("<h1>Nancy/Billion Backend v2 — online</h1>")
+    return HTMLResponse("<h1>Nancy/Billion Backend v2 - online</h1>")
 
 @app.get("/test")
 async def test():
@@ -801,6 +807,20 @@ async def test():
 # ---------------------------------------------------------------------------
 # Startup & Greeting endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/skills")
+async def list_skills():
+    return {"success": True, "skills": [asdict(s) for s in skills_store.list()]}
+
+
+@app.get("/memory/search")
+async def memory_search_endpoint(q: str = "", top_k: int = 10):
+    try:
+        hits = memory_manager.search_memories(q or "", top_k=top_k)
+    except Exception:
+        hits = []
+    return {"success": True, "query": q, "results": hits}
+
 
 @app.get("/startup")
 async def startup_sequence():
@@ -975,7 +995,7 @@ async def analyze_context(payload: ChatRequest):
 
 
 # ---------------------------------------------------------------------------
-# Context bridge — shared UI/brain state
+# Context bridge - shared UI/brain state
 # ---------------------------------------------------------------------------
 
 class _ContextBridge:
@@ -1246,10 +1266,10 @@ async def chat_endpoint(payload: ChatRequest):
     - Maintain conversation context
 
     Supports task_hint to route to specialized LLMs:
-    - "coding" → Claude (Anthropic)
-    - "fast_response" → Groq (speed optimized)
-    - "multimodal" → Gemini
-    - None / "general" → Uses full fallback chain (Ollama → Anthropic → Groq → OpenAI → etc.)
+    - "coding" -> Claude (Anthropic)
+    - "fast_response" -> Groq (speed optimized)
+    - "multimodal" -> Gemini
+    - None / "general" -> Uses full fallback chain (Ollama -> Anthropic -> Groq -> OpenAI -> etc.)
     """
     text = payload.text
     if not text:
@@ -1292,7 +1312,7 @@ async def chat_endpoint(payload: ChatRequest):
         logger.info(f"Chat endpoint using LLM: {selected_llm.__class__.__name__} (intent: {brain_decision['intent']}, task_hint: {task_hint})")
 
         # Coding/self-improvement tasks get Claude with adaptive-thinking effort
-        # cranked up — select_llm_for_task() already routes "coding" hints to
+        # cranked up - select_llm_for_task() already routes "coding" hints to
         # AnthropicLLM; this adds the effort param that class actually knows how
         # to use (other backends don't accept it, hence the isinstance guard).
         from llm import AnthropicLLM
@@ -1327,7 +1347,7 @@ async def chat_endpoint(payload: ChatRequest):
 
 
 # ---------------------------------------------------------------------------
-# REST routes — Specialized Agents
+# REST routes - Specialized Agents
 # ---------------------------------------------------------------------------
 
 @app.get("/agents/list")
@@ -1360,7 +1380,7 @@ async def system_health():
     """Real psutil-backed system health (CPU/memory/disk/network/temperature).
 
     SystemMonitor already existed (system_monitor.py) but was never wired to any
-    route — the frontend's Overview/System panels showed Math.random()-jittered
+    route - the frontend's Overview/System panels showed Math.random()-jittered
     fake CPU/memory numbers instead. cpu_percent(interval=1) blocks for ~1s, so
     it's run in a thread to avoid blocking the event loop.
     """
@@ -1373,7 +1393,7 @@ async def system_health():
 async def clap_status():
     """Whether the clap-detection model (satellite repo ../../clap-detection-main)
     is loaded and ready. That repo ships no pretrained weights, so this is False
-    on a fresh checkout until CLAP_MODEL_PATH is pointed at a real .pth file —
+    on a fresh checkout until CLAP_MODEL_PATH is pointed at a real .pth file -
     see clap_detection.py for the honest error this reports until then.
     """
     loop = asyncio.get_event_loop()
@@ -1640,7 +1660,7 @@ async def upsert_key(req: KeyUpsertRequest):
 @app.get("/tts/status")
 async def tts_status():
     """Whether TTS is using the real neural voice (NeuTTS-nano) and which
-    reference clip it cloned from ("user" vs "synthetic-placeholder") — see
+    reference clip it cloned from ("user" vs "synthetic-placeholder") - see
     neu_tts.py. Falls back to a generic status if TTS_BACKEND=pyttsx3.
     """
     if not isinstance(tts_backend, NeuTTSBackend):
@@ -1655,7 +1675,7 @@ async def tts_status():
 
 @app.get("/telegram/status")
 async def telegram_status():
-    """Whether Telegram is configured and the reply-polling loop is running —
+    """Whether Telegram is configured and the reply-polling loop is running -
     see telegram_bot.py. TelegramNotifier's status is a plain attribute (not
     a property doing I/O), so no executor offload is needed here."""
     return {"success": True, **telegram_notifier.status}
@@ -1738,7 +1758,7 @@ _UNSAFE_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 def _safe_desktop_path(filename: str) -> Path:
     """Resolve a user-supplied filename to a real, collision-free path under
-    the real Desktop folder — strips directory components and Windows-illegal
+    the real Desktop folder - strips directory components and Windows-illegal
     characters so this can't be used to write outside Desktop or clobber an
     existing file the user didn't ask to overwrite."""
     name = os.path.basename(filename).strip() or "output.txt"
@@ -1757,11 +1777,11 @@ def _safe_desktop_path(filename: str) -> Path:
 
 @app.post("/files/save-desktop", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def save_to_desktop(req: SaveFileRequest):
-    """Write real content to a real file on the user's actual Desktop —
+    """Write real content to a real file on the user's actual Desktop -
     used by the Kanban board (and anywhere else) when a task's output is
     meant to be a deliverable file rather than just an on-screen result."""
     if not req.content.strip():
-        raise HTTPException(status_code=400, detail="content is empty — nothing to save")
+        raise HTTPException(status_code=400, detail="content is empty - nothing to save")
     path = _safe_desktop_path(req.filename)
     try:
         path.write_text(req.content, encoding="utf-8")
@@ -1771,15 +1791,15 @@ async def save_to_desktop(req: SaveFileRequest):
 
 
 # ---------------------------------------------------------------------------
-# REST routes — Missions (AI Workflow Orchestrator)
+# REST routes - Missions (AI Workflow Orchestrator)
 #
-# A mission is a real, persisted entity (data/missions.json — see
+# A mission is a real, persisted entity (data/missions.json - see
 # missions_store.py) that moves through the real pipeline: planning ->
 # reasoning -> dependency_resolution -> agent_assignment -> execution ->
 # validation -> human_approval -> deployment -> completed. Every stage
 # transition publishes a real event over event_bus, which the WebSocket
 # subscriber above (_broadcast_domain_event) pushes to every connected
-# browser tab live — the frontend's board is a projection of this state,
+# browser tab live - the frontend's board is a projection of this state,
 # not an independent localStorage-backed app.
 # ---------------------------------------------------------------------------
 
@@ -1788,17 +1808,17 @@ def _summarize_agent_result(result: Dict[str, Any]) -> str:
     -- kept in sync deliberately so a mission dispatched server-side reads the
     same way a manually-run agent result does."""
     if not result.get("success"):
-        return str(result.get("error") or "Task failed — no further detail returned")
+        return str(result.get("error") or "Task failed - no further detail returned")
     for key in ("response", "result", "summary", "message"):
         value = result.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return "Completed — see full details"
+    return "Completed - see full details"
 
 
 async def _dispatch_mission(mission_id: str) -> None:
     """Real server-side execution of a mission that just entered the
-    Execution stage with an agent assigned — mirrors the honest
+    Execution stage with an agent assigned - mirrors the honest
     auto-dispatch behaviour the Kanban board used to do client-side, now
     server-driven so every connected tab (not just the one that dragged the
     card) sees it live via MISSION_STARTED/MISSION_COMPLETED events."""
@@ -2176,7 +2196,7 @@ async def _telegram_chat_handler(text: str) -> str:
 async def startup_event():
     global main_loop
     main_loop = asyncio.get_running_loop()
-    logger.info("Nancy/Billion backend starting up…")
+    logger.info("Nancy/Billion backend starting up...")
     # Initialise all 29 specialized agents in background so startup is fast
     asyncio.create_task(_init_agents())
     telegram_notifier.set_chat_handler(_telegram_chat_handler)
@@ -2260,21 +2280,17 @@ async def _cron_execution_loop() -> None:
 
 
 async def _economic_calendar_loop() -> None:
-    """Tracks NFP/CPI/FOMC releases (see economic_calendar.py) and fires a
-    real alert the moment a tracked release's actual value appears: a
-    Telegram push (reaches the user anywhere) plus a WebSocket broadcast of
-    type 'economic_alert' (the connected dashboard's ws-client.ts triggers a
-    real voice readout from this). Polls FRED every 15 min normally, every
-    10s inside a live release window (see next_poll_interval_s()) -- so a
-    NFP/CPI print gets caught within ~10s of actually posting, not 15 minutes
-    late. No-ops safely if FRED_API_KEY isn't configured, same as every other
-    optional integration in this file."""
+    """Track NFP/CPI/FOMC releases and fire a real alert the moment a tracked
+    release's actual value appears: Telegram push plus WebSocket broadcast.
+    Polls FRED every 15 min normally, every 10s inside a live release window
+    so a NFP/CPI print gets caught within ~10s of actually posting, not 15
+    minutes late. No-ops safely if FRED_API_KEY isn't configured."""
     while True:
         try:
             newly_alerted = await economic_calendar.poll_once()
             for event in newly_alerted:
                 text = economic_calendar.compose_alert_text(event)
-                await telegram_notifier.send(f"📊 {text}")
+                await telegram_notifier.send(f"[alert] {text}")
                 await manager.broadcast(json.dumps({"type": "economic_alert", "text": text, **event}))
                 logger.info("Economic calendar alert fired: %s", text)
         except Exception:
