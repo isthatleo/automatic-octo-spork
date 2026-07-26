@@ -402,43 +402,43 @@ def _live_system_context() -> str:
     prompt so meta-questions ('how many agents are running?') get grounded
     answers instead of the LLM guessing from the system prompt alone -- which
     is why 'how many agents are running' previously got 'none': nothing in
-    def _live_system_context() -> str:
-        if not agent_service.is_ready():
-            return "Live system status: the specialized agent service is still initialising."
-        parts = [
-            "Live system status:",
-            f"agents={len(agent_service._agents)}",
-            f"skills={len(list(skills_store.list()))}",
-            f"memory={len(getattr(memory_manager.graph, 'nodes', {}))}",
-        ]
-        try:
-            summary = memory_manager.get_memory_summary()
-            if isinstance(summary, dict):
-                parts.append("memory_summary=" + ",".join(
-                    f"{k}={summary.get(k, 0)}" for k in ("total_memories", "projects", "trades", "recent_conversations")
-                ))
-        except Exception:
-            pass
-        try:
-            stats = agent_service.get_service_stats()
-            parts.append(f"tasks_done={stats.get('total_tasks')}")
-            parts.append(f"success_rate={stats.get('success_rate')}")
-        except Exception:
-            pass
-        return " ".join(parts)
+    the prompt ever told the model any agents existed at all."""
+    if not agent_service.is_ready():
+        return "Live system status: the specialized agent service is still initialising."
+    parts = [
+        "Live system status:",
+        f"agents={len(agent_service._agents)}",
+        f"skills={len(list(skills_store.list()))}",
+        f"memory={len(getattr(memory_manager.graph, 'nodes', {}))}",
+    ]
+    try:
+        summary = memory_manager.get_memory_summary()
+        if isinstance(summary, dict):
+            parts.append("memory_summary=" + ",".join(
+                f"{k}={summary.get(k, 0)}" for k in ("total_memories", "projects", "trades", "recent_conversations")
+            ))
+    except Exception:
+        pass
+    try:
+        stats = agent_service.get_service_stats()
+        parts.append(f"tasks_done={stats.get('total_tasks')}")
+        parts.append(f"success_rate={stats.get('success_rate')}")
+    except Exception:
+        pass
+    return " ".join(parts)
 
 
-    def _live_context_bridge_context() -> str:
-        context = get_live_context_snapshot()
-        if not context:
-            return ""
-        parts = ["Live UI context:"]
-        for key in ("active_panel", "panel", "active_suggestions", "channel", "source"):
-            if key in context:
-                parts.append(f"{key}={context[key]}")
-        if context.get("environmental"):
-            parts.append(f"environmental={context['environmental']}")
-        return " | ".join(parts)
+def _live_context_bridge_context() -> str:
+    context = get_live_context_snapshot()
+    if not context:
+        return ""
+    parts = ["Live UI context:"]
+    for key in ("active_panel", "panel", "active_suggestions", "channel", "source"):
+        if key in context:
+            parts.append(f"{key}={context[key]}")
+    if context.get("environmental"):
+        parts.append(f"environmental={context['environmental']}")
+    return " | ".join(parts)
 
 
 # ---------------------------------------------------------------------------
