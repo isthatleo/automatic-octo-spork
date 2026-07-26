@@ -193,6 +193,12 @@ analysis_engine = TechnicalAnalysisEngine()
 strategy_advisor = StrategyAdvisor()
 risk_monitor = RiskMonitor(account_balance=100000)
 trading_manager = TradingManager(user_id="user")
+if not trading_manager.watched_pairs and not trading_manager.trades:
+    # One-time seed of what the user actually told Nancy they trade --
+    # after this, /trading/watched-pairs (or telling Nancy directly) is the
+    # real way to change it; this only fires on a genuinely fresh install
+    # (no watched pairs AND no trade history saved yet).
+    trading_manager.set_watched_pairs(["XAU/USD", "GBP/USD", "XAG/USD"])
 
 # Log Nancy's startup
 logger.info("=" * 70)
@@ -214,6 +220,12 @@ CRITICAL: Do NOT assume that a user's query is a map location, address, or city 
 You have access to a variety of tools for system control, coding, web search, media generation, and more. You speak in a clear, confident, and helpful tone. You can spawn specialized agents to handle complex tasks. Always aim to assist the user efficiently and safely.
 
 Always address the user as "Sir" (always capitalized, even mid-sentence) -- naturally, the way a butler-style assistant (JARVIS) would, not stiffly or in every single sentence. Never use their name or any other title.
+
+Calibrate the length and depth of every response to what was actually asked -- this matters doubly here since your replies are spoken aloud, and a long answer means a long wait before the user hears anything useful:
+- A quick factual question ("what's the price of X", "what time is it", "is Y online") gets a direct answer in one or two sentences -- no preamble, no unrequested context, no restating the question.
+- Casual conversation (greetings, small talk, a quick check-in) gets a short, natural, conversational reply -- not a report.
+- A request for a definition or "what is X" gets a brief, precise explanation -- a paragraph at most, not an essay, unless asked to go deeper.
+- Only give a longer, structured, multi-part answer when the user's request actually calls for it: they asked for a deep dive, a thorough explanation, a comparison, a plan, or explicitly asked for detail/an essay/"tell me everything about". If genuinely unsure whether they want brief or thorough, default to brief and offer to expand -- don't pre-emptively over-explain.
 """
 
 # ---------------------------------------------------------------------------
@@ -1097,8 +1109,12 @@ async def _build_real_personal_context() -> "PersonalContext":
     # integration exists, so meetings_today is intentionally always empty
     # rather than fabricated. Every other field is best-effort: any source
     # that errors has nothing to report is just omitted, not faked.
+    # Real pairs the user actually trades/watches -- trading_manager.watched_pairs
+    # (explicit) unioned with whatever pairs appear in real trade history, never
+    # a hardcoded pair list. Confirmed live: this used to always report EUR/USD
+    # and GBP/USD regardless of what the user actually trades.
     market_alerts: list = []
-    for pair in ("EUR/USD", "GBP/USD"):
+    for pair in trading_manager.get_relevant_pairs():
         try:
             snapshot = await forex_aggregator.get_price(pair)
             if snapshot:
@@ -1462,6 +1478,30 @@ async def get_trading_history(pair: str = None, limit: int = 50):
         ],
         "count": len(trades)
     }
+
+
+@app.get("/trading/watched-pairs")
+async def get_watched_pairs():
+    """Pairs Nancy actually reports on in the greeting/market alerts --
+    explicit watch list plus whatever real trade history contains. See
+    trading_manager.get_relevant_pairs()."""
+    return {
+        "success": True,
+        "watched_pairs": trading_manager.watched_pairs,
+        "relevant_pairs": trading_manager.get_relevant_pairs(),
+    }
+
+
+class WatchedPairsRequest(BaseModel):
+    pairs: List[str]
+
+
+@app.post("/trading/watched-pairs", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def set_watched_pairs(req: WatchedPairsRequest):
+    """Replace the explicit watch list, e.g. after telling Nancy "I mostly
+    trade XAUUSD, GBPUSD and XAGUSD" -- accepts "XAUUSD" or "XAU/USD" form."""
+    trading_manager.set_watched_pairs(req.pairs)
+    return {"success": True, "watched_pairs": trading_manager.watched_pairs}
 
 
 @app.get("/trading/report")

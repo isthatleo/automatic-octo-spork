@@ -4,11 +4,8 @@ export type CommandResult =
   | { type: 'navigate'; panel: PanelKey; reply: string }
   | { type: 'locate'; query: string; reply: string }
   | { type: 'launch'; target: string; reply: string }
-  | { type: 'scan'; reply: string }
   | { type: 'time'; reply: string }
-  | { type: 'status'; reply: string }
   | { type: 'session'; reply: string }
-  | { type: 'greet'; reply: string }
   | {
       type: 'news'
       category: KnowledgeCategory | null
@@ -79,43 +76,23 @@ function clean(s: string) {
   return s.replace(/[.?!,]/g, '').replace(/\s+/g, ' ').trim()
 }
 
-const CONVERSATIONAL_TOPICS: { pattern: RegExp; reply: string }[] = [
-  {
-    pattern: /\b(weather|forecast|rain|snow|temperature|humidity|wind|storm|sunny|cloudy)\b/,
-    reply:
-      "I don't have a live meteorological feed wired in yet, Sir. I can pull satellite imagery, run system diagnostics, or take you to any city on the map — say the word.",
-  },
-  {
-    pattern: /\b(joke|funny|entertain|sing|song|music|movie)\b/,
-    reply:
-      "Sarcasm is my default setting, Sir, but I'll spare you. Would you rather look at a city or check the neural core?",
-  },
-  {
-    pattern: /\b(who are you|your name|what are you|about yourself)\b/,
-    reply:
-      "I'm Nancy — Stark-class assistant, voice-first, quietly British, at your service, Sir. Try slash commands like /status, /memory, or /skills.",
-  },
-  {
-    pattern: /\b(thank(s| you)|cheers|appreciate)\b/,
-    reply: 'Always a pleasure, Sir. Standing by.',
-  },
-]
-
+// Deliberately narrow: only genuine, deterministic LOCAL UI actions belong
+// here (open this real panel, fly to this real place on the map, load this
+// real news topic, reset the session). Everything else -- greetings, status
+// questions, "who are you", small talk, anything starting with a question
+// word -- used to be intercepted here with static canned text that never
+// reached the backend at all, regardless of how fast or capable it was.
+// Confirmed live as the actual cause of "responses feel hardcoded": e.g.
+// "what agents do you have" contained the bare word "agent" and silently
+// got hijacked into opening the agents panel instead of being answered.
+// Anything not matched below falls through to type: 'unknown', which
+// app/page.tsx routes to the real, streaming backend.
 export function parseCommand(rawInput: string): CommandResult {
   const input = clean(rawInput.toLowerCase())
   if (!input) return { type: 'unknown', reply: 'Standing by.' }
 
-  if (/\b(hello|hi|hey|good (morning|evening|afternoon))\b/.test(input)) {
-    return { type: 'greet', reply: 'Online and listening, Sir. What can I do for you?' }
-  }
-
-  if (/^\/(status|system)\b/.test(input)) {
-    return {
-      type: 'status',
-      reply:
-        "Systems healthy and modules linked, Sir. You can inspect live telemetry directly in Command Layer, or run any slash command.",
-    }
-  }
+  // Explicit slash-navigation only -- these open a real panel and nothing
+  // more, so an instant local response is legitimate.
   if (/^\/(skills|abilities)\b/.test(input)) {
     return { type: 'navigate', panel: 'skills', reply: "Opening your active skills and attached agents, Sir." }
   }
@@ -128,35 +105,21 @@ export function parseCommand(rawInput: string): CommandResult {
   if (/^\/(terminal|console|command layer)\b/.test(input)) {
     return { type: 'navigate', panel: 'system', reply: "Opening Command Layer terminal and runtime control, Sir." }
   }
-  if (/^\/?help$/.test(input)) {
-    return {
-      type: 'status',
-      reply:
-        "Try slash commands like /status, /skills, /memory, /agents, /terminal, /new, and any panel word. For action chains, ask in chat and I'll route through available agents.",
-    }
-  }
   if (/^\/new$/.test(input)) {
     return {
-      type: 'status',
+      type: 'session',
       reply: "Starting a fresh session, Sir. Context cleared and workspace reset.",
     }
   }
 
-  if (/\b(status|report|systems?|diagnostic)\b/.test(input)) {
-    return {
-      type: 'status',
-      reply: 'All systems nominal, Sir. Reactor at full output, agents synchronized.',
-    }
-  }
-
-  if (/\b(scan|analyse|analyze|sweep|perimeter)\b/.test(input)) {
-    return { type: 'scan', reply: 'Initiating deep scan, Sir. Compiling telemetry now.' }
-  }
-
+  // Real current time -- no backend round trip needed for this one, and
+  // page.tsx speaks the actual Date() value, not this placeholder reply.
   if (/\b(time|clock)\b/.test(input) && !/\b(weather|forecast)\b/.test(input)) {
     return { type: 'time', reply: 'Pulling local chronometer data, Sir.' }
   }
 
+  // Real news panel with real category/topic parsing -- the reply is just
+  // the transitional phrase while real content loads.
   if (/\b(news|headlines|briefing)\b/.test(input)) {
     const media: 'articles' | 'videos' = /\b(video|videos|watch|documentary|documentaries)\b/.test(input)
       ? 'videos'
@@ -174,10 +137,9 @@ export function parseCommand(rawInput: string): CommandResult {
     }
   }
 
-  for (const { pattern, reply } of CONVERSATIONAL_TOPICS) {
-    if (pattern.test(input)) return { type: 'status', reply }
-  }
-
+  // "open/launch/run X" -- either a real panel (navigate) or a cosmetic
+  // desktop-app launch animation (launch); both require an explicit verb,
+  // so this can't accidentally hijack a real question.
   const launchMatch = input.match(/\b(open|launch|run|start|execute)\s+(?:the\s+)?(\w+)/)
   if (launchMatch) {
     const word = launchMatch[2]
@@ -188,6 +150,7 @@ export function parseCommand(rawInput: string): CommandResult {
     return { type: 'launch', target, reply: `Launching ${target}, Sir.` }
   }
 
+  // Real geocoding + map fly-to.
   const locateMatch = input.match(
     /\b(?:locate|find|show me|show|go to|fly to|navigate to|take me to|where is|zoom (?:in )?(?:on|to))\s+(.+)/,
   )
@@ -198,31 +161,8 @@ export function parseCommand(rawInput: string): CommandResult {
     }
   }
 
-  for (const [word, panel] of Object.entries(PANEL_WORDS)) {
-    const re = new RegExp(`\\b${word}\\b`)
-    if (re.test(input)) {
-      return { type: 'navigate', panel, reply: `Opening the ${panel} interface, Sir.` }
-    }
-  }
-
-  if (/^(what|why|how|when|who|is|are|do|does|can|could|should|will|would)\b/.test(input)) {
-    return {
-      type: 'status',
-      reply:
-        "That's outside my current toolkit, Sir. Try '/agents', '/skills', '/memory', or '/status'.",
-    }
-  }
-
-  if (/^\s*\//.test(input)) {
-    return {
-      type: 'status',
-      reply: "Slash commands are not handled locally, Sir. They will be sent to the backend.",
-    }
-  }
-
-  return {
-    type: 'unknown',
-    reply:
-      "I didn't catch a recognised command, Sir. Try '/agents', '/skills', '/memory', or open a panel by name.",
-  }
+  // Everything else -- greetings, "/status", "who are you", small talk,
+  // questions, unrecognized slash commands -- goes to the real backend,
+  // which now has live system context, real skills, and real tools.
+  return { type: 'unknown', reply: '' }
 }

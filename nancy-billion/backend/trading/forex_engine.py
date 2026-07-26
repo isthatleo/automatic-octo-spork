@@ -109,12 +109,20 @@ class ForexDataAggregator:
             raise ValueError(f"Invalid pair format: {pair!r}, expected e.g. 'EUR/USD'")
         return base, quote
 
+    # Frankfurter is ECB reference rates -- fiat currencies only, no metals.
+    # XAU/XAG (gold/silver, what a lot of retail traders actually watch)
+    # route to Yahoo Finance's COMEX futures data instead -- also real,
+    # free, keyless, and close enough to spot to be honest rather than a
+    # fabricated number for pairs Frankfurter simply can't serve.
+    _METAL_YAHOO_SYMBOLS = {"XAU": "GC=F", "XAG": "SI=F"}
+
     async def get_price(self, pair: str) -> Optional[MarketSnapshot]:
         """
-        Get current mid-market rate for a forex pair from Frankfurter (real ECB data).
+        Get current market rate for a forex pair (Frankfurter/ECB) or metal
+        (Yahoo Finance COMEX futures, for XAU/XAG).
 
         Args:
-            pair: e.g., "EUR/USD", "GBP/JPY"
+            pair: e.g., "EUR/USD", "GBP/JPY", "XAU/USD"
 
         Returns:
             MarketSnapshot with real rate data, or None if the pair/network call fails.
@@ -123,9 +131,60 @@ class ForexDataAggregator:
         if cached and datetime.now() - self.last_update.get(pair, datetime.min) < self._cache_ttl:
             return cached
 
+        base, quote = self._split_pair(pair)
+        if base in self._METAL_YAHOO_SYMBOLS and quote == "USD":
+            snapshot = await self._get_metal_price(pair, base)
+        else:
+            snapshot = await self._get_forex_price(pair, base, quote)
+        if snapshot:
+            self.cache[pair] = snapshot
+            self.last_update[pair] = datetime.now()
+        return snapshot
+
+    async def _get_metal_price(self, pair: str, base: str) -> Optional[MarketSnapshot]:
         import aiohttp
 
-        base, quote = self._split_pair(pair)
+        symbol = self._METAL_YAHOO_SYMBOLS[base]
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Yahoo Finance error for {pair} ({symbol}): HTTP {resp.status}")
+                        return None
+                    data = await resp.json()
+
+            result = (data.get("chart") or {}).get("result")
+            if not result:
+                logger.error(f"Yahoo Finance response missing data for {pair} ({symbol}): {data}")
+                return None
+            meta = result[0].get("meta", {})
+            price = meta.get("regularMarketPrice")
+            prev_close = meta.get("previousClose") or meta.get("chartPreviousClose")
+            if price is None:
+                return None
+            change_24h = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
+            spread = price * (self._SYNTHETIC_SPREAD_BPS / 10000)
+            return MarketSnapshot(
+                pair=pair,
+                price=price,
+                bid=round(price - spread, 4),
+                ask=round(price + spread, 4),
+                change_24h=round(change_24h, 4),
+                high_24h=meta.get("regularMarketDayHigh", price),
+                low_24h=meta.get("regularMarketDayLow", price),
+                volume=float(meta.get("regularMarketVolume") or 0.0),
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch real metal price for {pair}: {e}")
+            return None
+
+    async def _get_forex_price(self, pair: str, base: str, quote: str) -> Optional[MarketSnapshot]:
+        import aiohttp
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(

@@ -8,12 +8,16 @@ Handles:
 - Integration with memory system
 """
 
+import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 
 logger = logging.getLogger(__name__)
+
+STORE_PATH = Path(__file__).parent.parent / "data" / "trading_state.json"
 
 
 @dataclass
@@ -57,12 +61,78 @@ class TradingManager:
     - Performance metrics
     - Trading statistics
     - Integration with memory
+
+    Persisted to disk (data/trading_state.json) -- this used to be pure
+    in-memory state, wiped on every backend restart, which meant Nancy could
+    never actually "remember" what pairs someone trades: every /greeting
+    saw an empty self.trades regardless of real history. Same JSON-file
+    pattern as cron_store.CronStore/skills_store.
     """
 
-    def __init__(self, user_id: str = "default"):
+    def __init__(self, user_id: str = "default", path: Path = STORE_PATH):
         self.user_id = user_id
+        self.path = path
         self.trades: List[Trade] = []
         self.equity = 100000.0  # Starting equity
+        # Pairs the user explicitly said to track, independent of trade
+        # history -- e.g. a pair they're watching but haven't entered yet.
+        # _build_real_personal_context() (main_new.py) unions this with the
+        # pairs that actually appear in self.trades for the greeting/market
+        # alerts, instead of a fixed hardcoded pair list.
+        self.watched_pairs: List[str] = []
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            self.trades = [Trade(**t) for t in raw.get("trades", [])]
+            self.equity = raw.get("equity", self.equity)
+            self.watched_pairs = raw.get("watched_pairs", [])
+        except Exception:
+            logger.exception("Failed to load trading_state.json -- starting empty")
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "trades": [asdict(t) for t in self.trades],
+            "equity": self.equity,
+            "watched_pairs": self.watched_pairs,
+        }
+        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def set_watched_pairs(self, pairs: List[str]) -> None:
+        """Replace the explicit watch list (e.g. "I mostly trade XAUUSD,
+        GBPUSD and XAGUSD") -- normalized to BASE/QUOTE form."""
+        self.watched_pairs = [self._normalize_pair(p) for p in pairs]
+        self._save()
+
+    def add_watched_pair(self, pair: str) -> None:
+        normalized = self._normalize_pair(pair)
+        if normalized not in self.watched_pairs:
+            self.watched_pairs.append(normalized)
+            self._save()
+
+    @staticmethod
+    def _normalize_pair(pair: str) -> str:
+        """Accepts "XAUUSD", "xau/usd", "XAU-USD" etc. -- always returns
+        "XAU/USD" form, what forex_engine.ForexDataAggregator expects."""
+        p = pair.strip().upper().replace("-", "").replace("/", "").replace(" ", "")
+        if len(p) == 6:
+            return f"{p[:3]}/{p[3:]}"
+        return pair.strip().upper()
+
+    def get_relevant_pairs(self, limit: int = 5) -> List[str]:
+        """Real pairs to report on: explicit watch list first, then whatever
+        actually appears in trade history (most recent first), deduplicated.
+        Never a hardcoded default -- if neither exists yet, returns []."""
+        from_trades = []
+        for t in reversed(self.trades):
+            if t.pair not in from_trades:
+                from_trades.append(t.pair)
+        ordered = list(self.watched_pairs) + [p for p in from_trades if p not in self.watched_pairs]
+        return ordered[:limit]
 
     def record_trade(
         self,
@@ -94,6 +164,7 @@ class TradingManager:
         )
 
         self.trades.append(trade)
+        self._save()
         logger.info(f"Recorded trade: {pair} {direction} @ {entry_price}")
 
         return trade
@@ -107,6 +178,7 @@ class TradingManager:
 
             # Update equity
             self.equity += trade.profit_loss
+            self._save()
 
             logger.info(f"Closed trade: {trade.pair} P&L: {trade.profit_loss}")
             return trade

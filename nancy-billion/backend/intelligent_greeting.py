@@ -13,6 +13,7 @@ Example:
    Roxan's latest deployment completed without errors."
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Dict, Optional, List
@@ -57,29 +58,63 @@ class ContextualGreetingEngine:
 
     async def generate_personalized_greeting(self, context: PersonalContext) -> str:
         """
-        Generate intelligent, personalized greeting.
+        Generate intelligent, personalized greeting -- composed fresh by a
+        real LLM call from the real facts below, not a fixed template.
 
-        Returns greeting like:
-        "Morning. You have two meetings today, your overnight Docker build finished
-         successfully, EUR/USD is approaching the level you've been watching, and
-         Roxan's latest deployment completed without errors."
+        The facts (system status, real market prices for pairs the user
+        actually trades, real trades/tasks) come entirely from
+        _extract_context_items(), unchanged -- only the *phrasing* is now
+        LLM-generated, specifically so it varies turn to turn and doesn't
+        read as scripted (confirmed live complaint: the deterministic
+        template produced the literal same sentence structure every time).
+        Falls back to the deterministic template only if the LLM call
+        itself fails, so a greeting is never lost to a backend hiccup.
         """
-
-        greeting_parts = []
-
-        # Time of day greeting
         time_greeting = self._get_time_greeting()
-
-        # Extract priority context items
         context_items = self._extract_context_items(context)
 
-        # Build natural greeting
         if not context_items:
-            # Fallback if no context (e.g. agent service still initialising)
+            # No real data yet (e.g. agent service still initialising) --
+            # nothing to compose from, so don't invent facts.
             return f"{time_greeting}. Systems are still coming online -- give me just a moment."
 
-        # Combine greeting naturally
-        return self._combine_greeting(time_greeting, context_items)
+        try:
+            return await self._compose_via_llm(time_greeting, context_items)
+        except Exception as e:
+            logger.warning("LLM greeting composition failed, using templated fallback: %s", e)
+            return self._combine_greeting(time_greeting, context_items)
+
+    async def _compose_via_llm(self, time_greeting: str, facts: List[str]) -> str:
+        from llm import llm_backend
+
+        facts_block = "\n".join(f"- {f}" for f in facts)
+        prompt = (
+            "You are Nancy, a JARVIS-style British AI assistant. Compose ONE short, "
+            "warm, natural-sounding greeting for your user using ONLY the real facts "
+            "below -- never invent or add anything not listed. Always address the user "
+            "as \"Sir\" (capitalized). Vary your sentence structure and word choice "
+            "each time you're asked -- do not fall into a fixed template or recite the "
+            "facts as a flat list; weave them into 2-4 conversational sentences the way "
+            "a real person would. The time-appropriate opening tone is: "
+            f"\"{time_greeting}\" -- use it or a natural variant of it as your opening. "
+            "ALWAYS end on a short closing line that invites the user to engage (e.g. "
+            "an offer to help, a question about what to focus on first, or a simple "
+            "'ready when you are') -- the greeting should feel complete and rounded "
+            "off, never trail off after the last fact with no sign-off.\n\n"
+            f"Real facts to weave in:\n{facts_block}\n\n"
+            "Write only the greeting itself -- no preamble, no quotation marks, no "
+            "explanation of what you're doing."
+        )
+        # Generous headroom above what a 2-4 sentence greeting + closing line
+        # actually needs -- confirmed live that a tighter cap could truncate
+        # the response mid-sentence right before its closing line, which is
+        # exactly what made a genuinely good greeting feel like it stopped
+        # abruptly instead of winding down naturally.
+        text = await asyncio.wait_for(
+            llm_backend.generate(prompt, max_tokens=350, temperature=0.9),
+            timeout=15.0,
+        )
+        return text.strip()
 
     def _get_time_greeting(self) -> str:
         """Get a full time-appropriate opening address, always as 'sir' --
@@ -87,7 +122,10 @@ class ContextualGreetingEngine:
         hour = datetime.now().hour
 
         if hour < 5:
-            greeting = "Good evening, Sir — burning the midnight oil, I see"
+            # 00:00-04:59 is the small hours of a *new* day, not "evening" --
+            # confirmed live: this used to say "Good evening" at 4am, which
+            # reads as flatly wrong rather than just informal.
+            greeting = "Still up, Sir — burning the midnight oil, I see"
         elif hour < 12:
             greeting = "Good morning, Sir"
         elif hour < 17:

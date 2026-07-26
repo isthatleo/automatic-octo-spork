@@ -389,20 +389,11 @@ export default function Page() {
           setPanel('news')
           nancySay(result.reply)
           break
-        case 'scan':
-          sfx.whooshIn()
-          nancySay(result.reply)
-          setPanel('overview')
-          break
         case 'time': {
           const now = new Date().toLocaleTimeString()
           nancySay(`The local system time is ${now}, Sir.`)
           break
         }
-        case 'status':
-        case 'greet':
-          nancySay(result.reply)
-          break
         case 'session':
           sfx.whooshOut()
           setLogs([])
@@ -421,7 +412,7 @@ export default function Page() {
           const turnId = askNancyStreaming(input, {
             onAudioChunk: enqueueAudioChunk,
             onText: (text) => {
-              const finalText = text || result.reply
+              const finalText = text || "I'm not sure how to respond to that, Sir."
               log('nancy', finalText)
               setCurrentUtterance(finalText)
             },
@@ -429,7 +420,7 @@ export default function Page() {
             onError: () => {
               sfx.error()
               setThinking(false)
-              nancySay(result.reply)
+              nancySay("I'm having trouble reaching my backend right now, Sir.")
             },
           })
           beginStreamedTurn(turnId)
@@ -467,6 +458,26 @@ export default function Page() {
     },
     onWake: () => { sfx.wake(); log('info', 'Wake word detected — awaiting command') },
   })
+
+  // Pause the mic while Nancy is actively speaking and resume it the instant
+  // she stops -- without this, the Web Speech API mic stays hot through
+  // speaker output with no echo cancellation, so it can pick up her own
+  // voice and misfire a false wake/command. micWasOnRef remembers whether
+  // *the user* had the mic on before we paused it, so we only auto-resume
+  // for someone who actually wanted to be heard, not someone who'd
+  // deliberately muted it.
+  const micWasOnRef = useRef(false)
+  useEffect(() => {
+    if (speaking) {
+      if (state.listening) {
+        micWasOnRef.current = true
+        stop()
+      }
+    } else if (micWasOnRef.current) {
+      micWasOnRef.current = false
+      start()
+    }
+  }, [speaking, state.listening, start, stop])
 
   useEffect(() => {
     const t = setInterval(

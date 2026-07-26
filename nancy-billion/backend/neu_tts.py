@@ -40,12 +40,34 @@ SYNTHETIC_REF_TEXT = "Hello, I'm Nancy, your personal assistant."
 
 NEUTTS_SAMPLE_RATE = 24_000
 _CACHE_MAX_ENTRIES = 200
-# Real neural synthesis on CPU-only hardware scales with text length and can
-# run well past a minute for a long greeting -- bound it and fall back to the
-# instant (if more metallic) SAPI voice rather than leaving the user waiting
-# on an open-ended generation, same tradeoff already made for the LLM chain
-# in llm.py's FallbackLLM.
-NEUTTS_TIMEOUT_S = float(os.getenv("NEUTTS_TIMEOUT_S", "8"))
+# Real neural synthesis on CPU-only hardware scales with text length. A
+# single fixed timeout was the actual cause of every personalized-greeting
+# readout silently falling back to the robotic Pyttsx3 voice: confirmed
+# live, an 8s ceiling reliably killed a ~300-character greeting that was
+# still making real progress, never a genuine hang. The base timeout now
+# covers a short sentence (the unit chat streaming actually synthesizes);
+# longer text scales the budget instead of being cut off at the same ceiling
+# regardless of length. NEUTTS_TIMEOUT_S alone still exists for callers that
+# want to override the base explicitly (e.g. tests).
+NEUTTS_TIMEOUT_S = float(os.getenv("NEUTTS_TIMEOUT_S", "20"))
+NEUTTS_TIMEOUT_S_PER_CHAR = float(os.getenv("NEUTTS_TIMEOUT_S_PER_CHAR", "0.2"))
+# How long a caller will queue for the model lock while someone else's
+# (possibly long) text is still generating -- deliberately generous and
+# decoupled from this caller's own text length, since a short sentence might
+# still need to wait out a long greeting that's genuinely still in progress.
+NEUTTS_LOCK_WAIT_S = float(os.getenv("NEUTTS_LOCK_WAIT_S", "90"))
+# Confirmed live: the model's first-ever load (GGUF backbone + ONNX codec)
+# can take several minutes on this hardware, seemingly I/O-bound rather than
+# CPU-bound (disk/AV-scan territory, not a hang -- CPU time barely advances
+# while it's happening). Any caller before NeuTTSBackend._warm becomes True
+# gets this much patience instead of the normal per-text-length timeout,
+# since giving up early there was falling back to Pyttsx3 for a model that
+# was still genuinely (if slowly) loading, not stuck.
+NEUTTS_COLD_START_TIMEOUT_S = float(os.getenv("NEUTTS_COLD_START_TIMEOUT_S", "300"))
+
+
+def _timeout_for(text: str) -> float:
+    return max(NEUTTS_TIMEOUT_S, len(text) * NEUTTS_TIMEOUT_S_PER_CHAR)
 
 
 class NeuTTSBackend(TTSBackend):
@@ -58,6 +80,14 @@ class NeuTTSBackend(TTSBackend):
         self._fallback = Pyttsx3TTS()
         self._cache: dict[str, bytes] = {}
         self._cache_order: list[str] = []
+        # True only after a real synthesis has actually completed once --
+        # the model's first-ever load can take minutes on this hardware
+        # (confirmed live), unrelated to the text being synthesized. Any
+        # caller arriving before that finishes needs a much longer leash
+        # than the normal per-text-length timeout, or it gives up on a
+        # model that's still genuinely loading (not stuck) and falls back
+        # to Pyttsx3 for no real reason.
+        self._warm = False
         # Guards model construction and self._tts.speak() calls, which run on
         # ThreadPoolExecutor worker threads (not the event loop) and are not
         # safe to enter concurrently -- llama.cpp-backed contexts aren't
@@ -112,7 +142,15 @@ class NeuTTSBackend(TTSBackend):
     async def _ensure_reference_ready(self) -> None:
         """Bootstraps a synthetic placeholder reference clip if neither it nor
         a user-supplied one exists yet. Runs on the event loop (not a worker
-        thread) since it needs to await the async Pyttsx3 fallback."""
+        thread) since it needs to await the async Pyttsx3 fallback.
+
+        Also covers the "just drop a recording in" flow: if a user_reference.wav
+        exists without a matching .txt, auto-transcribe it with the STT backend
+        already in this codebase (faster-whisper) instead of requiring the user
+        to hand-type the transcript -- checked on every call, so dropping the
+        file in is genuinely all that's needed, no restart required."""
+        if USER_REF_WAV.exists() and not USER_REF_TXT.exists():
+            await self._transcribe_user_reference()
         if (USER_REF_WAV.exists() and USER_REF_TXT.exists()) or (
             SYNTHETIC_REF_WAV.exists() and SYNTHETIC_REF_TXT.exists()
         ):
@@ -122,6 +160,37 @@ class NeuTTSBackend(TTSBackend):
         wav_bytes = await self._fallback.synthesize(SYNTHETIC_REF_TEXT)
         SYNTHETIC_REF_WAV.write_bytes(wav_bytes)
         SYNTHETIC_REF_TXT.write_text(SYNTHETIC_REF_TEXT, encoding="utf-8")
+
+    async def _transcribe_user_reference(self) -> None:
+        try:
+            from stt import stt_backend
+
+            logger.info("Auto-transcribing dropped-in voice clip %s...", USER_REF_WAV)
+            # Dedicated higher-accuracy pass, not stt_backend.transcribe_chunk's
+            # beam_size=1 (tuned for live-chat latency) -- this only ever runs
+            # once per dropped-in clip, and a wrong transcript here silently
+            # degrades cloning quality for every future synthesis, so
+            # correctness matters far more than speed for this one call.
+            loop = asyncio.get_event_loop()
+
+            def _transcribe():
+                model = stt_backend._load_model()
+                segments, _info = model.transcribe(str(USER_REF_WAV), beam_size=5, vad_filter=True)
+                return "".join(segment.text for segment in segments)
+
+            transcript = await loop.run_in_executor(None, _transcribe)
+            transcript = transcript.strip()
+            if not transcript:
+                logger.warning(
+                    "Auto-transcription of %s produced no text -- leaving it unpaired; "
+                    "add user_reference.txt by hand if this keeps happening.",
+                    USER_REF_WAV,
+                )
+                return
+            USER_REF_TXT.write_text(transcript, encoding="utf-8")
+            logger.info("Voice clone reference ready: %r", transcript)
+        except Exception as e:
+            logger.warning("Could not auto-transcribe %s: %s", USER_REF_WAV, e)
 
     def _resolve_reference(self) -> Tuple[str, str, str]:
         """Sync lookup -- call only after _ensure_reference_ready has run."""
@@ -157,7 +226,7 @@ class NeuTTSBackend(TTSBackend):
         # had its own timeout. A bounded acquire means a request that can't
         # get the lock in time fails fast into the Pyttsx3 fallback instead
         # of joining a queue with no end.
-        if not self._model_lock.acquire(timeout=NEUTTS_TIMEOUT_S):
+        if not self._model_lock.acquire(timeout=NEUTTS_LOCK_WAIT_S):
             raise RuntimeError("NeuTTS busy with a prior request past the timeout window")
         try:
             chunks = self._tts.speak(text=text, ref_text=ref_text, ref_audio_path=ref_path)
@@ -178,21 +247,23 @@ class NeuTTSBackend(TTSBackend):
             return await self._fallback.synthesize(text)
 
         loop = asyncio.get_event_loop()
+        timeout = _timeout_for(text) if self._warm else NEUTTS_COLD_START_TIMEOUT_S
         try:
             wav_bytes = await asyncio.wait_for(
                 loop.run_in_executor(None, self._synthesize_sync, text),
-                timeout=NEUTTS_TIMEOUT_S,
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "NeuTTS synthesis exceeded %.0fs for %d chars, falling back to Pyttsx3",
-                NEUTTS_TIMEOUT_S, len(text),
+                "NeuTTS synthesis exceeded %.0fs (%s) for %d chars, falling back to Pyttsx3",
+                timeout, "cold-start budget" if not self._warm else "scaled timeout", len(text),
             )
             return await self._fallback.synthesize(text)
         except Exception as e:
             logger.error("NeuTTS synthesis failed, falling back to Pyttsx3: %s", e)
             return await self._fallback.synthesize(text)
 
+        self._warm = True
         self._cache_put(text, wav_bytes)
         return wav_bytes
 
