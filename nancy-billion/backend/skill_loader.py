@@ -14,16 +14,25 @@ model actually follows the procedure when it's relevant.
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import yaml
 
 logger = logging.getLogger(__name__)
 
 SKILLS_DIR = Path(__file__).parent / "skills"
+# Archived skills live one level deeper (skills/_archived/<name>/SKILL.md),
+# which load_skills()'s *single-level* `skills_dir.glob("*/SKILL.md")` scan
+# never reaches -- moving a skill's folder here is enough to stop it being
+# matched/loaded, no separate exclusion list to keep in sync.
+ARCHIVE_DIR = SKILLS_DIR / "_archived"
+USAGE_STORE_PATH = Path(__file__).parent / "data" / "skill_usage.json"
 
 
 @dataclass
@@ -90,8 +99,95 @@ def load_skills(skills_dir: Path = SKILLS_DIR) -> Dict[str, Skill]:
 _SKILLS = load_skills()
 
 
+# ---------------------------------------------------------------------------
+# Usage tracking + lifecycle (archive/restore) -- real telemetry on which
+# skills actually get matched into a live prompt, and a manual curation tool
+# for retiring ones that never do, instead of a skill library that only ever
+# grows with no visibility into what's actually being used. Deliberately
+# manual, not auto-archiving on a timer: silently hiding a skill the user
+# still wants available just because it's rarely triggered would be a worse
+# surprise than a stale-but-present one, so this surfaces the data and lets
+# a human (or an explicit agent action) decide.
+# ---------------------------------------------------------------------------
+def _load_usage() -> Dict[str, Dict[str, object]]:
+    if not USAGE_STORE_PATH.exists():
+        return {}
+    try:
+        return json.loads(USAGE_STORE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Failed to load skill_usage.json — starting empty")
+        return {}
+
+
+def _save_usage(usage: Dict[str, Dict[str, object]]) -> None:
+    USAGE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    USAGE_STORE_PATH.write_text(json.dumps(usage, indent=2), encoding="utf-8")
+
+
+_USAGE = _load_usage()
+
+
+def record_skill_match(name: str) -> None:
+    entry = _USAGE.setdefault(name, {"match_count": 0, "last_matched_at": None})
+    entry["match_count"] = int(entry.get("match_count", 0)) + 1
+    entry["last_matched_at"] = time.time()
+    _save_usage(_USAGE)
+
+
 def list_skills() -> List[Skill]:
     return list(_SKILLS.values())
+
+
+def list_skills_with_stats() -> List[Dict[str, object]]:
+    out = []
+    for skill in _SKILLS.values():
+        usage = _USAGE.get(skill.name, {})
+        out.append({
+            "name": skill.name,
+            "description": skill.description,
+            "trigger_keywords": skill.trigger_keywords,
+            "match_count": usage.get("match_count", 0),
+            "last_matched_at": usage.get("last_matched_at"),
+        })
+    return out
+
+
+def list_archived_skills() -> List[str]:
+    if not ARCHIVE_DIR.exists():
+        return []
+    return sorted(p.parent.name for p in ARCHIVE_DIR.glob("*/SKILL.md"))
+
+
+def archive_skill(name: str) -> bool:
+    """Moves a skill's real folder to skills/_archived/ -- it stops being
+    loaded/matched immediately (in-memory dict + on-disk both updated), but
+    nothing is deleted, so restore_skill() can bring it straight back."""
+    skill = _SKILLS.get(name)
+    if skill is None:
+        return False
+    src_dir = skill.path.parent
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    dst_dir = ARCHIVE_DIR / src_dir.name
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir)
+    shutil.move(str(src_dir), str(dst_dir))
+    del _SKILLS[name]
+    return True
+
+
+def restore_skill(name: str) -> bool:
+    src_dir = ARCHIVE_DIR / name
+    skill_md = src_dir / "SKILL.md"
+    if not skill_md.exists():
+        return False
+    dst_dir = SKILLS_DIR / name
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir)
+    shutil.move(str(src_dir), str(dst_dir))
+    restored = _parse_skill_md(dst_dir / "SKILL.md")
+    if restored:
+        _SKILLS[restored.name] = restored
+    return True
 
 
 def get_skill(name: str) -> Skill | None:
@@ -109,7 +205,10 @@ def match_skills(user_text: str, limit: int = 2) -> List[Skill]:
         if hits:
             scored.append((hits, skill))
     scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [skill for _, skill in scored[:limit]]
+    matched = [skill for _, skill in scored[:limit]]
+    for skill in matched:
+        record_skill_match(skill.name)
+    return matched
 
 
 def build_skill_prompt_block(user_text: str) -> str:

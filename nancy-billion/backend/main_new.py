@@ -25,6 +25,8 @@ import asyncio
 import base64
 import json
 import re
+import hmac
+import hashlib
 import threading
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -59,6 +61,8 @@ import subagent_factory
 import terminal_tool
 import skill_loader
 from mcp_client import mcp_manager, plugin_store
+from moa import run_moa
+from inbound_webhooks_store import inbound_webhook_store
 from tts import tts_backend
 from neu_tts import NeuTTSBackend, USER_REF_WAV, USER_REF_TXT
 from tools import get_tools
@@ -569,6 +573,19 @@ _WANTS_TOOLS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Explicit opt-in only -- Mixture-of-Agents costs real latency (several
+# parallel model calls plus a synthesis call) that would fight the Phase 1
+# "under 3-4 seconds" responsiveness goal if triggered silently on ordinary
+# messages, so it only fires on a deliberate ask for cross-model validation.
+_WANTS_MOA_RE = re.compile(
+    r"\b(second opinion|cross[- ]check (this|that|it)?.*(model|ai)|"
+    r"ask (multiple|several|a few) (ai|model)s|"
+    r"mixture of agents|\bmoa\b|"
+    r"compare (answers|responses) from (multiple|several|different) (ai|model)s|"
+    r"get (multiple|several) (ai )?opinions)\b",
+    re.IGNORECASE,
+)
+
 # ---------------------------------------------------------------------------
 # Subagent creation (Claude tool-use only, same as file access -- see
 # subagent_factory.py for why this is a materially higher risk tier than
@@ -821,6 +838,18 @@ async def _generate_response_stream(user_text: str):
     chunking downstream either way."""
     history_text = _history_to_text()
 
+    if _WANTS_MOA_RE.search(user_text):
+        result = await run_moa(llm_backend, user_text)
+        if result.get("success"):
+            refs = [r["backend"] for r in result.get("references", [])]
+            prefix = f"(Cross-checked against {', '.join(refs)}.) " if result.get("aggregated") else ""
+            yield {"kind": "delta", "text": prefix + result["response"]}
+            yield {"kind": "meta", "debug": {"moa": True, "references": refs, "aggregated": result.get("aggregated")}}
+        else:
+            yield {"kind": "delta", "text": f"I couldn't get a cross-checked answer just now, Sir: {result.get('error')}"}
+            yield {"kind": "meta", "debug": {"moa": True, "error": result.get("error")}}
+        return
+
     if agent_service.is_ready():
         try:
             from agents.agent_service import _auto_route
@@ -978,6 +1007,11 @@ class CronJobCreateRequest(BaseModel):
 class WebhookCreateRequest(BaseModel):
     url: str
     event: str
+
+class InboundWebhookCreateRequest(BaseModel):
+    name: str
+    action_type: str  # "telegram_message" | "agent_task" | "run_skill" | "terminal_command"
+    action_payload: Dict[str, Any] = {}
 
 class SkillCreateRequest(BaseModel):
     name: str
@@ -1786,6 +1820,111 @@ async def delete_cron_job(job_id: str):
     return {"success": True}
 
 
+@app.get("/webhooks/inbound", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_inbound_webhooks():
+    """Real, persisted inbound webhook endpoints -- each one's real trigger
+    count/last-result comes from data/inbound_webhooks.json, and each one
+    genuinely runs its configured action when its /webhooks/inbound/{id}
+    URL actually receives a POST, not just recorded for display."""
+    return {"success": True, "webhooks": [h.to_public_dict() for h in inbound_webhook_store.list()]}
+
+
+@app.post("/webhooks/inbound", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_inbound_webhook(req: InboundWebhookCreateRequest):
+    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command"):
+        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, or terminal_command")
+    if req.action_type == "telegram_message" and not req.action_payload.get("text"):
+        raise HTTPException(status_code=400, detail="telegram_message hooks need action_payload.text")
+    if req.action_type == "agent_task" and not req.action_payload.get("agent_key"):
+        raise HTTPException(status_code=400, detail="agent_task hooks need action_payload.agent_key")
+    if req.action_type == "run_skill" and not req.action_payload.get("skill_name"):
+        raise HTTPException(status_code=400, detail="run_skill hooks need action_payload.skill_name")
+    if req.action_type == "terminal_command" and not req.action_payload.get("command"):
+        raise HTTPException(status_code=400, detail="terminal_command hooks need action_payload.command")
+    hook = inbound_webhook_store.create(req.name, req.action_type, req.action_payload)
+    # The raw secret is only ever revealed here, at creation -- every other
+    # read (list, this same hook fetched again later) only exposes
+    # has_secret, matching how API keys/tokens are handled everywhere else
+    # in this app (see /config/keys never echoing a stored value back).
+    return {"success": True, "webhook": {**hook.to_public_dict(), "secret": hook.secret}}
+
+
+@app.patch("/webhooks/inbound/{hook_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def toggle_inbound_webhook(hook_id: str, enabled: bool):
+    hook = inbound_webhook_store.set_enabled(hook_id, enabled)
+    if not hook:
+        raise HTTPException(status_code=404, detail="webhook not found")
+    return {"success": True, "webhook": hook.to_public_dict()}
+
+
+@app.delete("/webhooks/inbound/{hook_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def delete_inbound_webhook(hook_id: str):
+    if not inbound_webhook_store.delete(hook_id):
+        raise HTTPException(status_code=404, detail="webhook not found")
+    return {"success": True}
+
+
+@app.post("/webhooks/inbound/{hook_id}")
+async def receive_inbound_webhook(hook_id: str, request: Request):
+    """The real receiving end -- an external service (GitHub, a CI
+    pipeline, any HTTP client) POSTs here and it genuinely triggers the
+    hook's configured action. Deliberately NOT behind require_auth: external
+    callers won't have Nancy's own API key, so authentication here is the
+    hook's own HMAC secret instead (same model as GitHub/Stripe webhooks).
+    """
+    hook = inbound_webhook_store.get(hook_id)
+    if hook is None:
+        raise HTTPException(status_code=404, detail="webhook not found")
+    if not hook.enabled:
+        raise HTTPException(status_code=403, detail="webhook is disabled")
+
+    raw_body = await request.body()
+    if hook.secret:
+        signature = request.headers.get("X-Nancy-Signature", "")
+        expected = "sha256=" + hmac.new(hook.secret.encode(), raw_body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise HTTPException(status_code=401, detail="invalid or missing X-Nancy-Signature")
+
+    try:
+        body_json = json.loads(raw_body) if raw_body else {}
+    except Exception:
+        body_json = {}
+
+    trigger_name = f'inbound webhook "{hook.name}"'
+    try:
+        if hook.action_type == "telegram_message":
+            await telegram_notifier.send(hook.action_payload.get("text", ""))
+            summary = "sent telegram message"
+        elif hook.action_type == "agent_task":
+            agent_key = hook.action_payload.get("agent_key")
+            task_type = hook.action_payload.get("task_type", "query")
+            payload = hook.action_payload.get("payload", {})
+            if not agent_service.is_ready() or not agent_key:
+                summary = "skipped: agent service not ready"
+            else:
+                result = await agent_service.run(agent_key, {"type": task_type, **payload}, timeout=60.0)
+                summary = json.dumps(result)[:300]
+        elif hook.action_type == "run_skill":
+            payload = dict(hook.action_payload)
+            # The external caller's real payload becomes extra context for
+            # the skill -- e.g. a GitHub PR-opened event's real details --
+            # but the external caller never controls WHICH skill/command
+            # runs, only that this specific pre-configured hook fired.
+            extra = (payload.get("context", "") + f"\n\nWebhook payload: {json.dumps(body_json)[:1000]}").strip()
+            payload["context"] = extra
+            summary = await _run_cron_skill(payload, trigger_name)
+        elif hook.action_type == "terminal_command":
+            summary = await _run_cron_terminal_command(hook.action_payload, trigger_name)
+        else:
+            summary = f"Unknown action_type: {hook.action_type}"
+    except Exception as e:
+        logger.exception("Inbound webhook %s failed: %s", hook.name, e)
+        summary = f"error: {e}"
+
+    inbound_webhook_store.mark_triggered(hook_id, summary)
+    return {"success": True, "result": summary}
+
+
 @app.get("/economic-calendar/events")
 async def list_economic_calendar_events():
     """Real NFP/CPI/FOMC releases in the tracked window (see
@@ -1883,6 +2022,36 @@ async def update_custom_skill(skill_id: str, req: SkillUpdateRequest):
 async def delete_custom_skill(skill_id: str):
     if not skills_store.delete(skill_id):
         raise HTTPException(status_code=404, detail="skill not found")
+    return {"success": True}
+
+
+@app.get("/skills/library")
+async def list_skill_library():
+    """The real, invokable procedure skills (skill_loader.py's SKILL.md
+    files) with real usage stats -- how many times each one has actually
+    been matched into a live prompt, not just whether it exists on disk.
+    Distinct from /skills (skills_store.py's user-facing labels)."""
+    return {
+        "success": True,
+        "skills": skill_loader.list_skills_with_stats(),
+        "archived": skill_loader.list_archived_skills(),
+    }
+
+
+@app.post("/skills/library/{name}/archive", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def archive_skill_route(name: str):
+    """Manual curation, not an automatic timer -- moves the skill's real
+    folder to skills/_archived/ so it stops being matched, without deleting
+    it (restore_skill brings it straight back)."""
+    if not skill_loader.archive_skill(name):
+        raise HTTPException(status_code=404, detail="skill not found")
+    return {"success": True}
+
+
+@app.post("/skills/library/{name}/restore", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def restore_skill_route(name: str):
+    if not skill_loader.restore_skill(name):
+        raise HTTPException(status_code=404, detail="archived skill not found")
     return {"success": True}
 
 
@@ -2067,6 +2236,23 @@ async def telegram_pair_start():
 async def telegram_pair_status():
     result = await telegram_pairing.check_pairing()
     return result
+
+
+class MoaRequest(BaseModel):
+    prompt: str
+    reference_count: int = 3
+
+@app.post("/llm/moa", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def llm_moa(req: MoaRequest):
+    """Real Mixture-of-Agents: calls up to `reference_count` distinct
+    configured LLM backends on the same prompt in parallel, then has the
+    top-priority backend critically synthesize their answers."""
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is required")
+    result = await run_moa(llm_backend, req.prompt.strip(), reference_count=req.reference_count)
+    if not result.get("success"):
+        raise HTTPException(status_code=502, detail=result.get("error", "MoA failed"))
+    return {"success": True, **result}
 
 
 @app.post("/tts/synthesize")
@@ -2733,13 +2919,13 @@ async def _cron_execution_loop() -> None:
                         else:
                             cron_store.mark_run(job.id, "skipped: agent service not ready")
                     elif job.action_type == "run_skill":
-                        summary = await _run_cron_skill(job)
+                        summary = await _run_cron_skill(job.action_payload, f"scheduled job \"{job.name}\"")
                         cron_store.mark_run(job.id, summary)
                         if telegram_notifier.status["available"]:
                             await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
                         await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
                     elif job.action_type == "terminal_command":
-                        summary = await _run_cron_terminal_command(job)
+                        summary = await _run_cron_terminal_command(job.action_payload, f"Scheduled job \"{job.name}\"")
                         cron_store.mark_run(job.id, summary)
                         if telegram_notifier.status["available"]:
                             await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
@@ -2751,13 +2937,16 @@ async def _cron_execution_loop() -> None:
             logger.exception("Cron execution loop tick failed")
 
 
-async def _run_cron_skill(job: "cron_store.CronJob") -> str:
-    """Runs a skill's real instructions on a schedule -- e.g. a nightly
-    "check git status and report" job using the git-and-github skill.
-    Goes through Claude's real tool-use loop (file/terminal tools) so the
-    skill can actually act, not just narrate what it would do."""
-    skill_name = job.action_payload.get("skill_name", "")
-    extra_context = job.action_payload.get("context", "")
+async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "job") -> str:
+    """Runs a skill's real instructions on demand -- e.g. a nightly "check
+    git status and report" cron job, or an inbound webhook, using the
+    git-and-github skill. Goes through Claude's real tool-use loop (file/
+    terminal tools) so the skill can actually act, not just narrate what it
+    would do. Plain (payload, name) params rather than a cron_store.CronJob
+    so both the cron loop and inbound webhooks can share this one real
+    execution path instead of each having their own copy."""
+    skill_name = action_payload.get("skill_name", "")
+    extra_context = action_payload.get("context", "")
     skill = skill_loader.get_skill(skill_name)
     if skill is None:
         return f"Unknown skill: {skill_name!r}"
@@ -2765,7 +2954,7 @@ async def _run_cron_skill(job: "cron_store.CronJob") -> str:
         return "Cannot run skill: ANTHROPIC_API_KEY not configured (tool-use requires Claude)"
 
     prompt = (
-        f"{BASE_SYSTEM_PROMPT}\n\nA scheduled job triggered this skill -- follow its "
+        f"{BASE_SYSTEM_PROMPT}\n\nA {trigger_name} triggered this skill -- follow its "
         f"instructions and actually do the work, don't just describe it.\n\n"
         f"### Skill: {skill.name}\n{skill.instructions}\n\n"
         f"Additional context for this run: {extra_context or '(none)'}"
@@ -2780,16 +2969,17 @@ async def _run_cron_skill(job: "cron_store.CronJob") -> str:
     return _enforce_sir(resp)[:800]
 
 
-async def _run_cron_terminal_command(job: "cron_store.CronJob") -> str:
-    """Runs a real shell command on a schedule, through the exact same
-    safe-command-allowlist-or-approval gate every other terminal_tool caller
-    goes through -- a scheduled job doesn't get to skip approval for a
-    destructive command just because a human isn't watching in real time."""
-    command = job.action_payload.get("command", "")
-    cwd = job.action_payload.get("cwd")
+async def _run_cron_terminal_command(action_payload: Dict[str, Any], trigger_name: str = "job") -> str:
+    """Runs a real shell command on demand (cron job or inbound webhook),
+    through the exact same safe-command-allowlist-or-approval gate every
+    other terminal_tool caller goes through -- a scheduled/triggered job
+    doesn't get to skip approval for a destructive command just because a
+    human isn't watching in real time."""
+    command = action_payload.get("command", "")
+    cwd = action_payload.get("cwd")
     if not terminal_tool._is_safe_command(command):
         approved = await telegram_notifier.request_approval(
-            f"Scheduled job \"{job.name}\" wants to run a command:\n\n{command}", timeout=120.0
+            f"\"{trigger_name}\" wants to run a command:\n\n{command}", timeout=120.0
         )
         if not approved:
             return "Not approved: command requires explicit approval and none was given in time"
