@@ -29,6 +29,7 @@ export interface MissionCreateInput {
   dependencies?: string[]
   subtasks?: Mission['subtasks']
   assigned_agent?: string | null
+  assigned_agents?: string[]
 }
 
 export type MissionUpdateInput = Partial<MissionCreateInput> & { order?: number }
@@ -75,6 +76,16 @@ export async function updateMission(id: string, patch: MissionUpdateInput): Prom
 export async function assignMission(id: string, agentKey: string | null): Promise<MissionResponse> {
   try {
     return await sendJson<MissionResponse>(`/api/missions/${id}/assign`, 'POST', { agent_key: agentKey })
+  } catch (err) {
+    return { success: false, detail: String(err) }
+  }
+}
+
+/** Explicit multi-agent assignment -- runs every agent in parallel server-side
+ * and synthesizes their outputs, instead of the single assignMission() path. */
+export async function assignMissionMulti(id: string, agentKeys: string[]): Promise<MissionResponse> {
+  try {
+    return await sendJson<MissionResponse>(`/api/missions/${id}/assign`, 'POST', { agent_keys: agentKeys })
   } catch (err) {
     return { success: false, detail: String(err) }
   }

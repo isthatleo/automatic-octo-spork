@@ -58,6 +58,7 @@ import file_access
 import subagent_factory
 import terminal_tool
 import skill_loader
+from mcp_client import mcp_manager, plugin_store
 from tts import tts_backend
 from neu_tts import NeuTTSBackend
 from tools import get_tools
@@ -605,6 +606,9 @@ CREATE_SUBAGENT_TOOL: Dict[str, Any] = {
 
 
 async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    if mcp_manager.is_plugin_tool(name):
+        return await mcp_manager.call_tool(name, tool_input)
+
     if name == "create_subagent":
         return await _execute_create_subagent_tool(tool_input)
 
@@ -757,7 +761,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             resp = await asyncio.wait_for(
                 claude.generate_with_tools(
                     prompt,
-                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL],
+                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL] + mcp_manager.list_plugin_tools(),
                     _execute_file_tool,
                     max_tokens=1024,
                 ),
@@ -987,6 +991,12 @@ class SkillUpdateRequest(BaseModel):
     category: str | None = None
     agent_keys: list[str] | None = None
 
+class PluginServerCreateRequest(BaseModel):
+    name: str
+    command: str
+    args: list[str] = []
+    env: Dict[str, str] = {}
+
 class KeyUpsertRequest(BaseModel):
     name: str
     value: str
@@ -1007,6 +1017,7 @@ class MissionCreateRequest(BaseModel):
     dependencies: list[str] = []
     subtasks: list[Dict[str, Any]] = []
     assigned_agent: str | None = None
+    assigned_agents: list[str] = []
 
 class MissionUpdateRequest(BaseModel):
     title: str | None = None
@@ -1023,6 +1034,10 @@ class MissionUpdateRequest(BaseModel):
 
 class MissionAssignRequest(BaseModel):
     agent_key: str | None = None
+    # Explicit multi-agent assignment -- when non-empty, takes priority over
+    # agent_key (mission_store.assign_multi clears the single-agent field so
+    # there's one unambiguous source of truth for _dispatch_mission).
+    agent_keys: list[str] = []
 
 class MissionTransitionRequest(BaseModel):
     stage: str
@@ -1871,6 +1886,56 @@ async def delete_custom_skill(skill_id: str):
     return {"success": True}
 
 
+@app.get("/plugins")
+async def list_plugins():
+    """Real, persisted MCP plugin server configs (data/mcp_servers.json)
+    plus their live connection status -- connected/error/tool count, not
+    just what's on disk."""
+    return {"success": True, "servers": mcp_manager.list_status()}
+
+
+@app.post("/plugins", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_plugin(req: PluginServerCreateRequest):
+    """Registers a new MCP server and connects it immediately. Gated by the
+    same Telegram-approval pattern as execute_command/terminal_command --
+    `command` + `args` here IS an arbitrary local subprocess launch, the
+    same real capability, just configured once instead of per-call."""
+    if not req.name.strip() or not req.command.strip():
+        raise HTTPException(status_code=400, detail="name and command are required")
+    approved = await telegram_notifier.request_approval(
+        f"Nancy wants to connect a new MCP plugin server \"{req.name}\":\n\n{req.command} {' '.join(req.args)}",
+        timeout=120.0,
+    )
+    if not approved:
+        raise HTTPException(status_code=403, detail="User did not approve this plugin server.")
+    cfg = plugin_store.create(req.name.strip(), req.command.strip(), req.args, req.env)
+    live = await mcp_manager.connect(cfg.id)
+    return {
+        "success": True,
+        "server": {**cfg.to_public_dict(), "connected": live.connected, "error": live.error, "tools": [t.name for t in live.tools]},
+    }
+
+
+@app.patch("/plugins/{server_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def toggle_plugin(server_id: str, enabled: bool):
+    cfg = plugin_store.set_enabled(server_id, enabled)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="plugin server not found")
+    if enabled:
+        await mcp_manager.connect(server_id)
+    else:
+        await mcp_manager.disconnect(server_id)
+    return {"success": True, "server": cfg.to_public_dict()}
+
+
+@app.delete("/plugins/{server_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def delete_plugin(server_id: str):
+    await mcp_manager.disconnect(server_id)
+    if not plugin_store.delete(server_id):
+        raise HTTPException(status_code=404, detail="plugin server not found")
+    return {"success": True}
+
+
 @app.get("/config/public")
 async def config_public():
     """Non-secret backend configuration -- real values, never API keys or tokens."""
@@ -2093,21 +2158,89 @@ def _summarize_agent_result(result: Dict[str, Any]) -> str:
     return "Completed - see full details"
 
 
+_MISSION_SYNTHESIS_PROMPT = """A mission was split across specialist agents chosen by the user. Combine their real results into one clear, coherent answer.
+
+Mission: {goal}
+
+Agent results:
+{results}
+
+Write a concise synthesis (a few sentences to a short paragraph). Do not repeat the raw JSON -- summarize what was actually found/done, and note if any agent failed.
+"""
+
+
+async def _run_mission_agents_parallel(goal: str, agent_keys: List[str]) -> Dict[str, Any]:
+    """Runs every explicitly-assigned agent on the same mission goal in real
+    parallel (asyncio.gather, not sequential), then -- if more than one ran --
+    synthesizes their genuine outputs with one LLM call. Mirrors
+    DispatcherAgent's own run-then-synthesize shape (agents_used/synthesis/
+    sub_results) so _summarize_agent_result and the frontend's result view
+    read it identically either way, but skips DispatcherAgent's own LLM
+    routing step since the user already picked the agents explicitly."""
+    async def _run_one(agent_key: str) -> Dict[str, Any]:
+        result = await agent_service.run(agent_key, {"type": "query", "query": goal}, timeout=60.0)
+        return {"agent_key": agent_key, "result": result}
+
+    sub_results = await asyncio.gather(*[_run_one(k) for k in agent_keys], return_exceptions=True)
+    clean_results = []
+    for r in sub_results:
+        if isinstance(r, Exception):
+            clean_results.append({"agent_key": "unknown", "result": {"success": False, "error": str(r)}})
+        else:
+            clean_results.append(r)
+
+    any_success = any(bool(r["result"].get("success")) for r in clean_results)
+    if len(clean_results) == 1:
+        synthesis = _summarize_agent_result(clean_results[0]["result"])
+    else:
+        results_text = "\n\n".join(
+            f"[{r['agent_key']}] {json.dumps(r['result'], default=str)[:800]}" for r in clean_results
+        )
+        try:
+            synthesis = await asyncio.wait_for(
+                llm_backend.generate(
+                    _MISSION_SYNTHESIS_PROMPT.format(goal=goal, results=results_text),
+                    max_tokens=500, temperature=0.5,
+                ),
+                timeout=25.0,
+            )
+            synthesis = synthesis.strip()
+        except Exception as e:
+            synthesis = f"(Synthesis unavailable: {e}) See individual agent results."
+
+    return {
+        "success": any_success,
+        "agents_used": [r["agent_key"] for r in clean_results],
+        "synthesis": synthesis,
+        "sub_results": clean_results,
+    }
+
+
 async def _dispatch_mission(mission_id: str) -> None:
     """Real server-side execution of a mission that just entered the
     Execution stage with an agent assigned - mirrors the honest
     auto-dispatch behaviour the Kanban board used to do client-side, now
     server-driven so every connected tab (not just the one that dragged the
-    card) sees it live via MISSION_STARTED/MISSION_COMPLETED events."""
+    card) sees it live via MISSION_STARTED/MISSION_COMPLETED events. Two real
+    paths: explicit multi-agent (mission.assigned_agents, run in parallel and
+    synthesized) or single-agent (mission.assigned_agent -- includes the
+    "dispatcher" key, which does its own internal multi-agent routing)."""
     mission = mission_store.get(mission_id)
-    if mission is None or not mission.assigned_agent:
+    if mission is None or not (mission.assigned_agent or mission.assigned_agents):
         return
     mission_store.set_dispatched(mission_id)
     started_snapshot = mission_store.get(mission_id)
     await event_bus.publish("MISSION_STARTED", {"mission": started_snapshot.to_public_dict()})
 
     query = mission.description or mission.title
-    result = await agent_service.run(mission.assigned_agent, {"type": "query", "query": query})
+    if mission.assigned_agents:
+        result = await _run_mission_agents_parallel(query, mission.assigned_agents)
+    else:
+        # 100s, not agent_service.run's normal 60s default -- the "dispatcher"
+        # agent key does its own internal route+run+synthesize sequence
+        # (up to ~90s worst case: 20s routing + 45s sub-agent + 25s synthesis),
+        # which the generic 60s default was silently truncating.
+        result = await agent_service.run(mission.assigned_agent, {"type": "query", "query": query}, timeout=100.0)
     success = bool(result.get("success"))
     text = _summarize_agent_result(result)
     mission_store.record_result(mission_id, success=success, text=text)
@@ -2135,7 +2268,7 @@ async def create_mission(req: MissionCreateRequest):
             req.title, description=req.description, owner=req.owner, priority=req.priority,
             risk=req.risk, estimated_cost=req.estimated_cost, due_date=req.due_date,
             tags=req.tags, dependencies=req.dependencies, subtasks=req.subtasks,
-            assigned_agent=req.assigned_agent,
+            assigned_agent=req.assigned_agent, assigned_agents=req.assigned_agents,
         )
     except MissionError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -2158,7 +2291,10 @@ async def update_mission(mission_id: str, req: MissionUpdateRequest):
 
 @app.post("/missions/{mission_id}/assign", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def assign_mission_route(mission_id: str, req: MissionAssignRequest):
-    mission = mission_store.assign(mission_id, req.agent_key)
+    if req.agent_keys:
+        mission = mission_store.assign_multi(mission_id, req.agent_keys)
+    else:
+        mission = mission_store.assign(mission_id, req.agent_key)
     if mission is None:
         raise HTTPException(status_code=404, detail="mission not found")
     await event_bus.publish("MISSION_ASSIGNED", {"mission": mission.to_public_dict()})
@@ -2172,7 +2308,7 @@ async def transition_mission_route(mission_id: str, req: MissionTransitionReques
     except MissionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     await event_bus.publish("MISSION_UPDATED", {"mission": mission.to_public_dict()})
-    if req.stage == "execution" and mission.assigned_agent:
+    if req.stage == "execution" and (mission.assigned_agent or mission.assigned_agents):
         asyncio.create_task(_dispatch_mission(mission_id))
     return {"success": True, "mission": mission.to_public_dict()}
 
@@ -2464,6 +2600,7 @@ async def startup_event():
     asyncio.create_task(_economic_calendar_loop())
     asyncio.create_task(_prewarm_tts())
     asyncio.create_task(_prewarm_memory_embeddings())
+    asyncio.create_task(mcp_manager.connect_all())
 
 
 async def _prewarm_tts() -> None:
@@ -2604,7 +2741,7 @@ async def _run_cron_skill(job: "cron_store.CronJob") -> str:
     claude = AnthropicLLM()
     resp = await asyncio.wait_for(
         claude.generate_with_tools(
-            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL], _execute_file_tool, max_tokens=1024
+            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL] + mcp_manager.list_plugin_tools(), _execute_file_tool, max_tokens=1024
         ),
         timeout=120.0,
     )
@@ -2665,6 +2802,7 @@ async def _init_agents():
 async def shutdown_event():
     await agent_service.shutdown()
     await telegram_notifier.stop_polling()
+    await mcp_manager.disconnect_all()
     logger.info("Nancy/Billion backend shut down.")
 
 

@@ -171,6 +171,10 @@ export interface Mission {
   description: string
   stage: MissionStage
   assigned_agent: string | null
+  // Explicit multi-agent execution -- when non-empty, the backend runs every
+  // one of these agents in real parallel and synthesizes their outputs,
+  // instead of the single assigned_agent path.
+  assigned_agents: string[]
   owner: string
   priority: 'low' | 'medium' | 'high' | 'critical'
   risk: 'low' | 'medium' | 'high'

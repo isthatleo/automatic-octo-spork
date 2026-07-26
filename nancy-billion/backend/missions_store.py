@@ -52,6 +52,14 @@ class Mission:
     description: str = ""
     stage: str = "mission_created"
     assigned_agent: Optional[str] = None
+    # Explicit multi-agent execution -- when 2+ keys are set here, the
+    # execution stage runs every one of them in real parallel (asyncio.gather)
+    # and synthesizes their genuine outputs into one result, instead of
+    # relying on assigning to the single "dispatcher" agent key (which also
+    # works, but leaves agent selection to an internal LLM routing call
+    # rather than the user's explicit choice). Empty by default -- most
+    # missions still want the simple single-agent path.
+    assigned_agents: List[str] = field(default_factory=list)
     owner: str = ""
     priority: str = "medium"
     risk: str = "low"
@@ -123,6 +131,7 @@ class MissionStore:
         dependencies: Optional[List[str]] = None,
         subtasks: Optional[List[Dict[str, Any]]] = None,
         assigned_agent: Optional[str] = None,
+        assigned_agents: Optional[List[str]] = None,
     ) -> Mission:
         if priority not in VALID_PRIORITIES:
             raise MissionError(f"priority must be one of {sorted(VALID_PRIORITIES)}")
@@ -142,6 +151,7 @@ class MissionStore:
             dependencies=dependencies or [],
             subtasks=subtasks or [],
             assigned_agent=assigned_agent,
+            assigned_agents=assigned_agents or [],
             order=now,
             created_at=now,
             updated_at=now,
@@ -179,6 +189,20 @@ class MissionStore:
         if mission is None:
             return None
         mission.assigned_agent = agent_key
+        mission.assigned_agents = []
+        mission.updated_at = time.time()
+        self._save()
+        return mission
+
+    def assign_multi(self, mission_id: str, agent_keys: List[str]) -> Optional[Mission]:
+        """Explicit multi-agent assignment -- clears the single-agent field
+        so _dispatch_mission's "which path do I take" check has one
+        unambiguous source of truth per mission."""
+        mission = self._missions.get(mission_id)
+        if mission is None:
+            return None
+        mission.assigned_agents = [k for k in agent_keys if k]
+        mission.assigned_agent = None
         mission.updated_at = time.time()
         self._save()
         return mission
@@ -198,8 +222,8 @@ class MissionStore:
                 raise MissionError(
                     f"cannot enter execution — {len(unmet)} unresolved dependenc{'y' if len(unmet) == 1 else 'ies'}: {unmet}"
                 )
-        if stage == "agent_assignment" and not mission.assigned_agent:
-            raise MissionError("cannot enter agent_assignment without an assigned_agent — assign one first")
+        if stage == "agent_assignment" and not mission.assigned_agent and not mission.assigned_agents:
+            raise MissionError("cannot enter agent_assignment without an assigned agent — assign one (or several) first")
         mission.stage = stage
         mission.updated_at = time.time()
         mission.history.append({"stage": stage, "at": mission.updated_at})

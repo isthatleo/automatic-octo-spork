@@ -45,6 +45,12 @@ sentence-transformers>=3.0.0
 # can run e.g. "every 15 minutes" or "9am weekdays", not just once a day.
 croniter>=2.0.0
 
+# Real MCP (Model Context Protocol) client (mcp_client.py) -- lets Nancy
+# connect to actual third-party MCP servers (filesystem, git, search, etc.)
+# and use their genuine tools through Claude's tool-use loop. Official SDK,
+# real JSON-RPC framing/session lifecycle, not a hand-rolled approximation.
+mcp>=1.0.0
+
 faster-whisper>=0.9.0
 pyttsx3>=2.90
 python-socketio>=5.9.0
