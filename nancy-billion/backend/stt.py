@@ -1,3 +1,4 @@
+import asyncio
 import numpy as np
 import logging
 from abc import ABC, abstractmethod
@@ -40,17 +41,27 @@ class FasterWhisperSTT(STTBackend):
         return self.model
 
     async def transcribe_chunk(self, audio_chunk: np.ndarray) -> str:
-        # For streaming, we could use VAD and accumulate; for now just transcribe chunk
-        model = self._load_model()
-        # faster_whisper expects audio as float32 numpy array.
-        # `language` locks transcription to British English when available.
-        segments, info = model.transcribe(
-            audio_chunk,
-            beam_size=5,
-            vad_filter=True,
-            language=self.language,
-        )
-        text = "".join(segment.text for segment in segments)
+        # Both model loading (first call only, downloads/instantiates the
+        # model) and model.transcribe() are blocking, CPU-bound calls --
+        # running either directly on the event loop would freeze every other
+        # concurrent request (chat, TTS, everything) for the whole duration.
+        # Offload both to a thread, same pattern clap_detection's status/
+        # predict calls use. beam_size=1 (greedy) trades marginal accuracy for
+        # real-time latency, which matters far more than beam-search precision
+        # for short commands.
+        loop = asyncio.get_event_loop()
+
+        def _transcribe():
+            model = self._load_model()
+            segments, info = model.transcribe(
+                audio_chunk,
+                beam_size=1,
+                vad_filter=True,
+                language=self.language,
+            )
+            return "".join(segment.text for segment in segments)
+
+        text = await loop.run_in_executor(None, _transcribe)
         return text.strip()
 
     async def transcribe(self, audio: np.ndarray) -> str:

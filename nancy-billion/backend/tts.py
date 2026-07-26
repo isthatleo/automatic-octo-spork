@@ -52,6 +52,21 @@ class Pyttsx3TTS(TTSBackend):
         self._com_ready = threading.local()
         logger.info("Initialized Pyttsx3 TTS (lazy engine, dedicated thread)")
 
+    def _recycle_executor(self) -> None:
+        """A hung call's underlying thread can't be cancelled (Python threads
+        aren't preemptible) and keeps running forever, but leaving it in
+        `self._executor` would mean every future call queues behind it
+        indefinitely since this pool has exactly one worker -- confirmed
+        live: a single stuck synthesis permanently broke every subsequent
+        request until the whole process was restarted. Abandon the poisoned
+        executor/engine and swap in a fresh pair instead, so the next call
+        gets a clean thread rather than queuing behind a dead one."""
+        old_executor = self._executor
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pyttsx3")
+        self._com_ready = threading.local()
+        self.engine = None
+        old_executor.shutdown(wait=False, cancel_futures=True)
+
     def _ensure_engine(self):
         # SAPI5 is COM-based; a worker thread spun up by a plain
         # ThreadPoolExecutor never gets CoInitialize() called on it the way
@@ -155,6 +170,13 @@ class Pyttsx3TTS(TTSBackend):
                     os.unlink(temp_path)
                 except Exception:
                     pass
+                # pyttsx3's SAPI engine is unreliable across repeated
+                # runAndWait() calls on the same instance -- confirmed live:
+                # the very first call on a fresh engine succeeds in well
+                # under a second, but a second call on that same engine hangs
+                # past PYTTSX3_TIMEOUT_S every time. Discard it so the next
+                # call builds a fresh one instead of reusing this one.
+                self.engine = None
 
         try:
             return await asyncio.wait_for(
@@ -162,7 +184,8 @@ class Pyttsx3TTS(TTSBackend):
                 timeout=PYTTSX3_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
-            logger.error("Pyttsx3 synthesis hung past %.0fs -- no further fallback available", PYTTSX3_TIMEOUT_S)
+            logger.error("Pyttsx3 synthesis hung past %.0fs -- recycling executor", PYTTSX3_TIMEOUT_S)
+            self._recycle_executor()
             raise RuntimeError("TTS synthesis timed out on every backend")
 
     async def speak(self, text: str):
@@ -170,8 +193,11 @@ class Pyttsx3TTS(TTSBackend):
 
         def _speak():
             self._ensure_engine()
-            self.engine.say(text)
-            self.engine.runAndWait()
+            try:
+                self.engine.say(text)
+                self.engine.runAndWait()
+            finally:
+                self.engine = None  # see _synthesize's comment on why
 
         try:
             await asyncio.wait_for(
@@ -179,7 +205,8 @@ class Pyttsx3TTS(TTSBackend):
                 timeout=PYTTSX3_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
-            logger.error("Pyttsx3 speak() hung past %.0fs", PYTTSX3_TIMEOUT_S)
+            logger.error("Pyttsx3 speak() hung past %.0fs -- recycling executor", PYTTSX3_TIMEOUT_S)
+            self._recycle_executor()
 
 
 def get_tts_backend():

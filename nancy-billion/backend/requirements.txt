@@ -1,10 +1,30 @@
+# --- Extra package indexes -------------------------------------------------
+# torch: PyPI's default wheel pulls in CUDA libraries even on a CPU-only box
+# (multi-GB of unnecessary bloat); the official CPU-only index avoids that.
+# llama-cpp-python: needs a local C++ toolchain to build from source, which
+# most Windows boxes don't have -- this index carries prebuilt CPU wheels.
+# Both are listed as plain `--extra-index-url` (not `--index-url`), so pip
+# still falls back to PyPI for every other package in this file.
+--extra-index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+--prefer-binary
+--only-binary=llama-cpp-python
+
 # fury-sdk isn't published to PyPI; install from the sibling satellite repo.
-# [tts] pulls in NeuTTS-nano's real deps (torch CPU, llama-cpp-python, neucodec,
-# onnxruntime, phonemizer) used by neu_tts.py — also needs the espeak-ng system
-# library (see the TTS section below) and, for llama-cpp-python on Windows with
-# no local C++ toolchain, a prebuilt wheel:
-#   pip install llama-cpp-python --prefer-binary --only-binary=:all: --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# The base install needs only httpx/numpy/termcolor. [tts] additionally pulls
+# in NeuTTS-nano's real deps (torch, llama-cpp-python, neucodec, onnxruntime,
+# phonemizer) used by neu_tts.py for the actual neural voice -- without them,
+# tts.py silently falls back to the robotic Pyttsx3/SAPI voice with no error,
+# which is exactly the "rugged and metallic voice" regression this file
+# previously shipped by omission. Also needs the espeak-ng system library
+# (not pip-installable -- `winget install eSpeak-NG.eSpeak-NG` on Windows,
+# `apt-get install espeak-ng` on Linux, `brew install espeak` on macOS).
 -e ../../fury-main[tts]
+torch>=2.10.0
+llama-cpp-python>=0.3.0
+neucodec>=0.0.5
+phonemizer>=3.2.0
+soundfile>=0.13.0
 faster-whisper>=0.9.0
 pyttsx3>=2.90
 python-socketio>=5.9.0
@@ -16,10 +36,20 @@ sounddevice>=0.4.6
 fastapi>=0.104.0
 uvicorn>=0.24.0
 aiohttp>=3.9.0
+# Imported directly (main_new.py's economic-calendar/webhook calls) -- was
+# only ever present transitively (via anthropic/fury-sdk), which means a
+# future version of either dropping it would silently break this file.
+httpx>=0.28.0
 psutil>=5.9.0
 scipy>=1.11.0
 scikit-learn>=1.3.0
 nltk>=3.8.0
+
+# Windows COM, for pythoncom (tts.py's Pyttsx3TTS -- SAPI5 is COM-based and
+# needs CoInitialize() per thread). Only ever present transitively via
+# pyttsx3's own Windows dependency; listed explicitly since tts.py imports it
+# directly. No-op / not installable on non-Windows, hence the marker.
+pywin32>=306; sys_platform == "win32"
 
 # PDF extraction for agent registry generation (Phase 1.9)
 pypdf>=4.0.0
@@ -39,9 +69,12 @@ aiosqlite>=0.20.0
 # google-generativeai>=0.3.0
 
 # Clap detection (clap_detection.py, satellite repo ../../clap-detection-main).
-# Heavy (~1-2GB); uncomment once you have pretrained weights (see that repo's
-# README) — without them CLAP_MODEL_PATH won't resolve and the feature reports
-# unavailable regardless of whether these are installed.
-# torch
-# torchaudio
+# torch is already required above. torchaudio is imported directly
+# (clap_detection.py's torchaudio.transforms) and was installed on this box
+# but missing from this file entirely -- listed explicitly now.
+torchaudio>=2.1.0
+# torchvision (clap_detection.py's torchvision.transforms.Resize) is still
+# genuinely not installed here -- until it and pretrained weights are in
+# place, CLAP_MODEL_PATH won't resolve and the feature honestly reports
+# unavailable rather than fabricating a result. Uncomment once both are set up.
 # torchvision

@@ -217,27 +217,27 @@ Always address the user as "Sir" (always capitalized, even mid-sentence) -- natu
 # ---------------------------------------------------------------------------
 # Fury agent (optional)
 # ---------------------------------------------------------------------------
-# if _FURY_AVAILABLE:
-#     try:
-#         agent = Agent(
-#             model=os.getenv("LLM_MODEL_PATH", "llamafactory/Llama-3-8B-Instruct-GGUF"),
-#             system_prompt=BASE_SYSTEM_PROMPT,
-#             tools=get_tools(),
-#         )
-#         history_root = os.getenv("HISTORY_ROOT", "./data/fury_history")
-#         history_manager = HistoryManager(
-#             history_root=history_root,
-#             persist_to_disk=True,
-#             agent=agent,
-#             session_id=os.getenv("HISTORY_SESSION_ID", "nancybillion"),
-#         )
-#     except Exception as e:
-#         logger.warning("Fury agent init failed (non-fatal): %s", e)
-#         agent = None
-#         history_manager = None
-# else:
-#     agent = None
-#     history_manager = None
+if _FURY_AVAILABLE:
+    try:
+        agent = Agent(
+            model=os.getenv("LLM_MODEL_PATH", "llamafactory/Llama-3-8B-Instruct-GGUF"),
+            system_prompt=BASE_SYSTEM_PROMPT,
+            tools=get_tools(),
+        )
+        history_root = os.getenv("HISTORY_ROOT", "./data/fury_history")
+        history_manager = HistoryManager(
+            history_root=history_root,
+            persist_to_disk=True,
+            agent=agent,
+            session_id=os.getenv("HISTORY_SESSION_ID", "nancybillion"),
+        )
+    except Exception as e:
+        logger.warning("Fury agent init failed (non-fatal): %s", e)
+        agent = None
+        history_manager = None
+else:
+    agent = None
+    history_manager = None
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +246,13 @@ Always address the user as "Sir" (always capitalized, even mid-sentence) -- natu
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
+        # One in-flight chat "turn" per connection. A new user_text/final_transcript
+        # cancels whatever turn is still running instead of queuing behind it --
+        # this is real barge-in, and it's what makes a fresh message actually
+        # supersede a slow reply instead of both eventually finishing and racing
+        # each other for TTS playback.
+        self._turn_tasks: Dict[WebSocket, "asyncio.Task"] = {}
+        self._turn_counters: Dict[WebSocket, int] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -255,10 +262,35 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        task = self._turn_tasks.pop(websocket, None)
+        if task and not task.done():
+            task.cancel()
+        self._turn_counters.pop(websocket, None)
         logger.info("WebSocket disconnected. Total: %d", len(self.active_connections))
 
     async def send(self, message: str, websocket: WebSocket):
         await websocket.send_text(message)
+
+    def start_turn(self, websocket: WebSocket, coro_factory, turn_id=None) -> Any:
+        """Cancel any in-flight turn for this connection and start a new one.
+        `coro_factory(turn_id)` must return the coroutine to run. Returns the
+        turn_id used. Fire-and-forget by design -- the caller's receive loop
+        must stay free to read the next message immediately, not block on the
+        LLM/TTS pipeline.
+
+        `turn_id` should normally come from the client (it already knows
+        which turn it's waiting on) so the id survives reconnects and doesn't
+        depend on message-ordering assumptions; falls back to an internal
+        counter if the client didn't send one."""
+        prev = self._turn_tasks.get(websocket)
+        if prev and not prev.done():
+            prev.cancel()
+        if turn_id is None:
+            turn_id = self._turn_counters.get(websocket, 0) + 1
+            self._turn_counters[websocket] = turn_id
+        task = asyncio.create_task(coro_factory(turn_id))
+        self._turn_tasks[websocket] = task
+        return turn_id
 
     async def broadcast(self, message: str):
         dead = []
@@ -627,6 +659,15 @@ def _enforce_sir(text: str) -> str:
     return _SIR_RE.sub("Sir", text)
 
 
+def _build_chat_prompt(user_text: str, history_text: str) -> str:
+    """Shared prompt assembly for both the blocking hierarchy path and the
+    streaming path below -- kept in one place so they can't silently drift."""
+    return (
+        f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n"
+        f"{history_text}\nuser: {user_text}\nassistant:"
+    )
+
+
 async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
     """Route a chat message to a real specialized agent when the text clearly
     matches one of the 29 registered domains; otherwise fall back to the
@@ -671,7 +712,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             except Exception as e:
                 logger.warning("Specialized agent '%s' failed, falling back to LLM: %s", routed_key, e)
 
-    prompt = f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n{history_text}\nuser: {user_text}\nassistant:"
+    prompt = _build_chat_prompt(user_text, history_text)
 
     # File access + subagent-creation only work through Claude's multi-round
     # tool-use loop (generate_with_tools) -- the other backends in the
@@ -703,6 +744,166 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
     except Exception as llm_e:
         resp = f"I'm having trouble processing that right now, Sir. ({llm_e})"
     return resp, {}
+
+
+# ---------------------------------------------------------------------------
+# Streaming chat turn -- real token streaming (Claude) + per-sentence TTS, so
+# Nancy starts speaking sentence 1 while sentence 2+ is still being generated
+# instead of waiting for the entire reply and then the entire audio clip.
+# Agent-routed and tool-use replies aren't incremental at the source, but they
+# still flow through the same per-sentence TTS chunking below so the first
+# chunk of audio is available as soon as the first sentence is, not the whole
+# response.
+# ---------------------------------------------------------------------------
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _extract_ready_sentences(buffer: str) -> tuple[list[str], str]:
+    """Split off sentences that are definitely complete (end in . ! or ? and
+    are followed by whitespace, or -- for the last piece -- just end in one of
+    those, meaning only the trailing whitespace hasn't streamed in yet).
+    Returns (ready_sentences, remainder_still_pending)."""
+    if not buffer:
+        return [], buffer
+    parts = _SENTENCE_SPLIT_RE.split(buffer)
+    complete = [p for p in parts[:-1] if p.strip()]
+    tail = parts[-1]
+    if tail and tail.rstrip()[-1:] in (".", "!", "?"):
+        complete.append(tail)
+        tail = ""
+    return complete, tail
+
+
+async def _generate_response_stream(user_text: str):
+    """Async generator yielding {"kind": "delta", "text": ...} chunks as they
+    become available, followed by exactly one {"kind": "meta", "debug": ...}.
+    Only the plain-chat path (no agent match, no tool-use need) actually
+    streams token-by-token, via AnthropicLLM.generate_stream() -- agent
+    routing and Claude's tool-use loop aren't incremental at the source, so
+    those paths fall back to _generate_response_via_hierarchy and yield its
+    complete result as a single delta. Callers still get per-sentence TTS
+    chunking downstream either way."""
+    history_text = _history_to_text()
+
+    if agent_service.is_ready():
+        try:
+            from agents.agent_service import _auto_route
+            routed_key = _auto_route(user_text)
+        except Exception:
+            routed_key = None
+        if routed_key:
+            text, debug = await _generate_response_via_hierarchy(user_text)
+            yield {"kind": "delta", "text": text}
+            yield {"kind": "meta", "debug": debug}
+            return
+
+    if os.getenv("ANTHROPIC_API_KEY") and _WANTS_TOOLS_RE.search(user_text):
+        text, debug = await _generate_response_via_hierarchy(user_text)
+        yield {"kind": "delta", "text": text}
+        yield {"kind": "meta", "debug": debug}
+        return
+
+    if os.getenv("ANTHROPIC_API_KEY"):
+        prompt = _build_chat_prompt(user_text, history_text)
+        try:
+            claude = AnthropicLLM()
+            got_any = False
+            async for delta in claude.generate_stream(prompt, max_tokens=512, temperature=0.7):
+                got_any = True
+                yield {"kind": "delta", "text": delta}
+            if got_any:
+                yield {"kind": "meta", "debug": {"streamed": True}}
+                return
+        except Exception as e:
+            logger.warning("Streaming Claude call failed, falling back to non-streaming chain: %s", e)
+
+    text, debug = await _generate_response_via_hierarchy(user_text)
+    yield {"kind": "delta", "text": text}
+    yield {"kind": "meta", "debug": debug}
+
+
+async def _synthesize_and_send_chunk(websocket: WebSocket, turn_id: int, seq: int, text: str) -> None:
+    text = text.strip()
+    if not text:
+        return
+    try:
+        audio_wav = await tts_backend.synthesize(text)
+    except Exception as e:
+        logger.error("Streaming TTS chunk error (turn %d, seq %d): %s", turn_id, seq, e)
+        return
+    if not audio_wav:
+        return
+    try:
+        await manager.send(
+            json.dumps({
+                "type": "tts_audio_chunk",
+                "turn_id": turn_id,
+                "seq": seq,
+                "data": base64.b64encode(audio_wav).decode(),
+            }),
+            websocket,
+        )
+    except Exception:
+        pass  # connection likely gone; the outer turn will be cancelled/cleaned up
+
+
+async def _run_chat_turn(websocket: WebSocket, turn_id: int, user_text: str) -> None:
+    """The actual per-message work, run as its own cancellable asyncio.Task
+    (see ConnectionManager.start_turn) so a new message can supersede a slow
+    one in progress instead of queuing behind it."""
+    if history_manager:
+        await history_manager.add({"role": "user", "content": user_text})
+
+    full_text = ""
+    sentence_buffer = ""
+    debug_payload: Dict[str, Any] = {}
+    seq = 0
+
+    try:
+        async for item in _generate_response_stream(user_text):
+            if item["kind"] == "delta":
+                delta = item["text"]
+                full_text += delta
+                sentence_buffer += delta
+                ready, sentence_buffer = _extract_ready_sentences(sentence_buffer)
+                for sentence in ready:
+                    seq += 1
+                    await _synthesize_and_send_chunk(websocket, turn_id, seq, sentence)
+            elif item["kind"] == "meta":
+                debug_payload = item.get("debug", {})
+
+        full_text = _enforce_sir(full_text.strip()) or "I'm not sure how to respond to that, Sir."
+
+        if history_manager:
+            await history_manager.add({"role": "assistant", "content": full_text})
+
+        await manager.send(
+            json.dumps({
+                "type": "agent_response",
+                "data": full_text,
+                "debug": debug_payload,
+                "turn_id": turn_id,
+            }),
+            websocket,
+        )
+
+        if sentence_buffer.strip():
+            seq += 1
+            await _synthesize_and_send_chunk(websocket, turn_id, seq, sentence_buffer)
+
+        await manager.send(json.dumps({"type": "tts_done", "turn_id": turn_id}), websocket)
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("Chat turn error (turn %d): %s", turn_id, e)
+        try:
+            await manager.send(
+                json.dumps({"type": "agent_error", "error": str(e), "turn_id": turn_id}),
+                websocket,
+            )
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -2026,38 +2227,19 @@ async def websocket_endpoint(websocket: WebSocket):
             # ---- Final transcript / user text ----
             elif msg_type in ("final_transcript", "user_text"):
                 text = message.get("data", "")
+                client_turn_id = message.get("turn_id")
                 logger.info("Received %s: %s", msg_type, text[:80])
 
-                if history_manager:
-                    await history_manager.add({"role": "user", "content": text})
-
-                response, debug_payload = await _generate_response_via_hierarchy(text)
-
-                if history_manager:
-                    await history_manager.add({"role": "assistant", "content": response})
-
-                await manager.send(
-                    json.dumps({
-                        "type":  "agent_response",
-                        "data":  response,
-                        "debug": debug_payload,
-                    }),
+                # Fire-and-forget: start_turn cancels any still-running previous
+                # turn and spawns this one as its own task, so the receive loop
+                # stays free to read the next message immediately instead of
+                # blocking on the LLM/TTS pipeline for this one. See
+                # _run_chat_turn for the actual streaming generation + TTS work.
+                manager.start_turn(
                     websocket,
+                    lambda turn_id, _text=text: _run_chat_turn(websocket, turn_id, _text),
+                    turn_id=client_turn_id,
                 )
-
-                # TTS
-                try:
-                    audio_wav = await tts_backend.synthesize(response)
-                    if audio_wav:
-                        await manager.send(
-                            json.dumps({
-                                "type": "tts_audio",
-                                "data": base64.b64encode(audio_wav).decode(),
-                            }),
-                            websocket,
-                        )
-                except Exception as e:
-                    logger.error("TTS error: %s", e)
 
             # ---- Specialized Python agent task (new) ----
             elif msg_type == "run_specialized_task":
@@ -2203,6 +2385,20 @@ async def startup_event():
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_cron_execution_loop())
     asyncio.create_task(_economic_calendar_loop())
+    asyncio.create_task(_prewarm_tts())
+
+
+async def _prewarm_tts() -> None:
+    """NeuTTS's first-ever synthesis call constructs the GGUF backbone +
+    ONNX codec from scratch (cold model load), which can take a long time and
+    holds NeuTTSBackend._model_lock for its entire duration -- confirmed live
+    to exceed even a 60s timeout on this hardware. Paying that cost here,
+    once, at startup means a user's actual first message doesn't have to."""
+    try:
+        await tts_backend.synthesize("Systems online.")
+        logger.info("TTS backend pre-warmed.")
+    except Exception as e:
+        logger.warning("TTS pre-warm failed (non-fatal, will retry on first real request): %s", e)
 
 
 # Local time, 24h format -- override in .env if 07:30 isn't the right moment.

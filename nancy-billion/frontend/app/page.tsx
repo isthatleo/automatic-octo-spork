@@ -21,7 +21,7 @@ import {
 } from '@/components/nancy/admin-panels'
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
-import { askNancy, onEconomicAlert } from '@/lib/nancy/ws-client'
+import { askNancyStreaming, onEconomicAlert } from '@/lib/nancy/ws-client'
 import { synthesizeSpeech } from '@/lib/nancy/tts-client'
 import { geocode } from '@/lib/nancy/geocode'
 import type { KnowledgeCategory, LogEntry, PanelKey, Place } from '@/lib/nancy/types'
@@ -115,10 +115,77 @@ export default function Page() {
   // only set for the real NeuTTS path, stays null for the Web Speech fallback.
   const [speakingAudioEl, setSpeakingAudioEl] = useState<HTMLAudioElement | null>(null)
 
+  // Streaming playback for askNancyStreaming(): NeuTTS synthesizes per
+  // sentence server-side and pushes each chunk as soon as it's ready, so
+  // audio is queued and played gaplessly rather than fetched as one blob
+  // after the whole reply is generated. currentTurnIdRef gates late chunks
+  // from a turn that's since been superseded by a newer one.
+  const audioQueueRef = useRef<HTMLAudioElement[]>([])
+  const isPlayingQueueRef = useRef(false)
+  const currentTurnIdRef = useRef<number | null>(null)
+
   const log = useCallback((level: LogEntry['level'], text: string) => {
     setLogs((prev) =>
       [...prev, { id: `l${logSeq++}`, ts: Date.now(), level, text }].slice(-60),
     )
+  }, [])
+
+  const playNextQueuedAudio = useCallback(() => {
+    if (isPlayingQueueRef.current) return
+    const next = audioQueueRef.current.shift()
+    if (!next) return
+    isPlayingQueueRef.current = true
+    currentAudioRef.current = next
+    setSpeakingAudioEl(next)
+    next.play().catch(() => {
+      isPlayingQueueRef.current = false
+      playNextQueuedAudio()
+    })
+  }, [])
+
+  const enqueueAudioChunk = useCallback((base64: string) => {
+    // No turn-id check needed here: ws-client.ts's askNancyStreaming already
+    // only invokes onAudioChunk for the currently-active turn (it drops any
+    // frame whose turn_id doesn't match before calling out to us at all).
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+    const blob = new Blob([bytes], { type: 'audio/wav' })
+    const url = URL.createObjectURL(blob)
+    const audio = new Audio(url)
+    audio.addEventListener('ended', () => {
+      URL.revokeObjectURL(url)
+      isPlayingQueueRef.current = false
+      if (currentAudioRef.current === audio) currentAudioRef.current = null
+      playNextQueuedAudio()
+    })
+    audio.addEventListener('error', () => {
+      URL.revokeObjectURL(url)
+      isPlayingQueueRef.current = false
+      playNextQueuedAudio()
+    })
+    audioQueueRef.current.push(audio)
+    playNextQueuedAudio()
+  }, [playNextQueuedAudio])
+
+  /** Interrupts whatever's currently speaking/queued and claims playback for
+   *  a new turn -- combined with the backend cancelling the old turn's
+   *  generation, this is the full fix for Nancy finishing an old reply
+   *  instead of switching to the new one. */
+  const beginStreamedTurn = useCallback((turnId: number) => {
+    cancelSpeech()
+    currentAudioRef.current?.pause()
+    currentAudioRef.current = null
+    audioQueueRef.current.forEach((a) => a.pause())
+    audioQueueRef.current = []
+    isPlayingQueueRef.current = false
+    setSpeakingAudioEl(null)
+    if (wordTimerRef.current) {
+      clearInterval(wordTimerRef.current)
+      wordTimerRef.current = null
+    }
+    currentTurnIdRef.current = turnId
+    setSpeaking(true)
+    setWordIndex(-1)
+    sfx.confirm()
   }, [])
 
   const nancySay = useCallback(
@@ -343,31 +410,34 @@ export default function Page() {
           setThinking(false)
           nancySay(result.reply)
           break
-        case 'unknown':
-          // Hermes-like slash commands are handled by the backend /chat endpoint,
-          // so local command parser only intercepts obvious local actions first.
-          if (/^\s*\//.test(input)) {
-            const reply = await askNancy(input)
-            nancySay(reply || 'Slash command sent, Sir.')
-            setThinking(false)
-            break
-          } else {
-            setThinking(true)
-            askNancy(input)
-              .then((reply) => {
-                nancySay(reply || result.reply)
-              })
-              .catch(() => {
-                sfx.error()
-                nancySay(result.reply)
-              })
-              .finally(() => setThinking(false))
-            break
-          }
+        case 'unknown': {
+          // Not a local command (including Hermes-like slash commands) --
+          // send it to the backend and stream the reply: audio for each
+          // sentence plays as soon as that sentence is synthesized instead of
+          // waiting for the whole response, and a fresh command here
+          // immediately supersedes whatever's still speaking (see
+          // askNancyStreaming/beginStreamedTurn).
+          setThinking(true)
+          const turnId = askNancyStreaming(input, {
+            onAudioChunk: enqueueAudioChunk,
+            onText: (text) => {
+              const finalText = text || result.reply
+              log('nancy', finalText)
+              setCurrentUtterance(finalText)
+            },
+            onDone: () => setThinking(false),
+            onError: () => {
+              sfx.error()
+              setThinking(false)
+              nancySay(result.reply)
+            },
+          })
+          beginStreamedTurn(turnId)
           break
+        }
       }
     },
-    [doLaunch, locate, nancySay],
+    [doLaunch, locate, nancySay, log, enqueueAudioChunk, beginStreamedTurn],
   )
 
   const onUserInput = useCallback(

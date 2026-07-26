@@ -551,6 +551,14 @@ class FallbackLLM(LLMBackend):
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
         last_exception = None
         for backend in self.backends:
+            # Cloud backends set self.api_key from an env var and always fail
+            # the same way when it's missing -- skip immediately instead of
+            # burning up to BACKEND_TIMEOUT_S waiting on a call that can never
+            # succeed. Local/no-key backends (Ollama, Fury, llama.cpp, Dummy)
+            # have no api_key attribute at all, so they're never skipped here.
+            if hasattr(backend, "api_key") and not backend.api_key:
+                logger.info(f"Skipping LLM backend {backend.__class__.__name__}: no API key configured")
+                continue
             try:
                 logger.info(f"Trying LLM backend: {backend.__class__.__name__}")
                 result = await asyncio.wait_for(
