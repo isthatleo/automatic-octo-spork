@@ -124,6 +124,32 @@ class ResearchAgent(SpecializedAgent):
                      "above", "below", "up", "down", "out", "off", "than", "then"}
         return [t for t in tokens if t not in stopwords and len(t) > 2]
 
+    def _filter_relevant(self, query: str, abstracts: List[str], titles: List[str]) -> Tuple[List[str], List[str]]:
+        """Per-title keyword-overlap relevance filter. Wikipedia's fuzzy
+        search on a full free-text sentence can return 2-3 completely
+        unrelated pages (confirmed live: "what do research and
+        market_research agents specialize in" returned Jurassic Park
+        characters, the 2008 financial crisis, and Tor). Checking overlap
+        against the *combined* text of all fetched pages was too weak --
+        one shared common word buried in an unrelated page's long extract
+        (e.g. "market" appearing incidentally in a financial-crisis article)
+        was enough to pass everything through, undermining the whole guard.
+        A title is short and specific: requiring the query's own subject
+        words to appear in the title itself is a much stricter, much more
+        reliable signal that a given source is actually on-topic. Titles
+        that don't pass are dropped rather than failing the whole batch --
+        a genuinely relevant hit shouldn't be discarded just because
+        Wikipedia's search bundled it with irrelevant ones."""
+        query_tokens = set(self._tokenize(query))
+        if not query_tokens:
+            return abstracts, titles  # nothing to compare against -- don't block on an empty/trivial query
+        kept_abstracts, kept_titles = [], []
+        for abstract, title in zip(abstracts, titles):
+            if query_tokens & set(self._tokenize(title)):
+                kept_abstracts.append(abstract)
+                kept_titles.append(title)
+        return kept_abstracts, kept_titles
+
     def _extractive_summarize(self, text: str, n_sentences: int = 3) -> str:
         sentences = re.split(r"(?<=[.!?])\s+", text.strip())
         if len(sentences) <= n_sentences:
@@ -487,6 +513,18 @@ class ResearchAgent(SpecializedAgent):
                 "error": "No abstracts were supplied and no real sources could be fetched for this query -- "
                          "not returning fabricated findings.",
             }
+
+        if real_sources:
+            filtered_abstracts, filtered_sources = self._filter_relevant(query, abstracts, real_sources)
+            if not filtered_sources:
+                return {
+                    "success": False,
+                    "task_type": "general-research",
+                    "query": query,
+                    "error": f"Wikipedia search only surfaced tangential results ({', '.join(real_sources)}) for "
+                             "this query -- not presenting them as genuine findings.",
+                }
+            abstracts, real_sources = filtered_abstracts, filtered_sources
 
         combined = " ".join(abstracts)
         tfidf = self._compute_tfidf(abstracts)

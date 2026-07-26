@@ -30,12 +30,12 @@ _ROUTE_PROMPT = """You are routing a task to specialist agents. Here is the real
 
 Task: {goal}
 
-Pick between 1 and {max_agents} agent keys from the roster above that are genuinely relevant to this task. For each, give a short task_type (a single word or hyphenated phrase describing what to ask it) and any payload fields it might need.
+Pick between 1 and {max_agents} agent keys from the roster above that are genuinely relevant to this task. For each, write a specific free-text question to ask that agent, tailored to its specialization and to the overall task -- not just the raw task restated verbatim.
 
 Respond with ONLY a JSON array (no prose, no markdown fences) in exactly this shape:
-[{{"agent_key": "research", "task_type": "query", "payload": {{"query": "..."}}}}]
+[{{"agent_key": "research", "query": "..."}}]
 
-Only use agent_key values that appear in the roster above -- do not invent new ones.
+Only use agent_key values that appear in the roster above -- do not invent new ones. Every agent is dispatched a plain-language query, never a custom task type or payload -- each agent's own "query" handling decides how to answer it (e.g. system_monitoring reports its own real live metrics regardless of exact phrasing, so ask it about the metric you actually want).
 """
 
 _SYNTHESIS_PROMPT = """A task was split across specialist agents. Combine their real results into one clear, coherent answer for the user.
@@ -150,10 +150,16 @@ class DispatcherAgent(SpecializedAgent):
 
         async def _run_one(route: Dict[str, Any]) -> Dict[str, Any]:
             agent_key = route["agent_key"]
-            task_type = route.get("task_type", "query")
-            payload = route.get("payload") if isinstance(route.get("payload"), dict) else {}
-            result = await agent_service.run(agent_key, {"type": task_type, **payload}, timeout=SUBAGENT_TIMEOUT_S)
-            return {"agent_key": agent_key, "task_type": task_type, "result": result}
+            # Always dispatched as a plain query -- letting the routing LLM
+            # invent a bespoke task_type per agent (the old shape) reliably
+            # produced "unknown task type" failures, since the ~46 agents'
+            # supported task_type vocabularies are wildly inconsistent and
+            # none of them were ever going to match a freshly-invented one.
+            # "query" is the one type every agent's own process_task routing
+            # already falls back to meaningfully.
+            query = str(route.get("query") or goal)
+            result = await agent_service.run(agent_key, {"type": "query", "query": query}, timeout=SUBAGENT_TIMEOUT_S)
+            return {"agent_key": agent_key, "query": query, "result": result}
 
         sub_results = await asyncio.gather(*[_run_one(r) for r in route_plan], return_exceptions=True)
         clean_results = []
