@@ -1341,6 +1341,13 @@ export function ProfilesPanel() {
   const [active, setActive] = useState<string>('nancy')
   const [switching, setSwitching] = useState<string | null>(null)
 
+  useEffect(() => {
+    fetch(`${BACKEND}/greeting`)
+      .then((res) => res.json())
+      .then((json) => { if (json.success && json.persona) setActive(json.persona) })
+      .catch(() => { /* keep the default 'nancy' state -- backend may not be reachable yet */ })
+  }, [])
+
   const switchPersona = async (name: string) => {
     setSwitching(name)
     try {

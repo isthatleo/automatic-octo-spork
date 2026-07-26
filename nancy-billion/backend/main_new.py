@@ -1179,52 +1179,42 @@ async def memory_search_endpoint(q: str = "", top_k: int = 10):
     return {"success": True, "query": q, "results": hits}
 
 
-# @app.get("/startup")
-# async def startup_sequence():
-    # Get Nancy startup sequence
-#     sequence = startup_coordinator.start_up()
-#     return {
-#         "success": True,
-#         **sequence
-#     }
-# 
+@app.get("/greeting")
+async def get_greeting():
+    """Current static per-persona greeting strings (see startup.py's
+    NancyGreeting) -- distinct from /greeting/personalized, which builds a
+    real-data-backed greeting via the LLM. Restored: this and /persona/{name}
+    below were commented out, but the Profiles panel's persona switcher
+    (admin-panels.tsx) calls /persona/{name} unconditionally and was 404ing
+    on every click while the UI claimed to be "real, functional"."""
+    greeting = startup_coordinator.greeting
+    return {
+        "success": True,
+        "persona": startup_coordinator.persona,
+        "boot_message": greeting.get_boot_message(),
+        "ready_message": greeting.get_ready_message(),
+        "context_aware_greeting": greeting.get_context_aware_greeting(),
+    }
 
-# @app.get("/greeting")
-# async def get_greeting():
-#     """Get current greeting from Nancy"""
-#     greeting = startup_coordinator.greeting
-#     return {
-#         "success": True,
-#         "persona": startup_coordinator.persona,
-#         "boot_message": greeting.get_boot_message(),
-#         "ready_message": greeting.get_ready_message(),
-#         "context_aware_greeting": greeting.get_context_aware_greeting()
-#     }
-# 
 
-# @app.post("/persona/{persona_name}")
-# async def set_persona(persona_name: str):
-    # Change Nancy persona
-#     valid_personas = ["nancy", "billion", "jarvis"]
-# 
-#     if persona_name.lower() not in valid_personas:
-#         raise HTTPException(
-#             status_code=400,
-#             detail=f"Invalid persona. Choose from: {', '.join(valid_personas)}"
-#         )
-# 
-#     startup_coordinator.set_persona(persona_name)
-# 
-#     greeting = startup_coordinator.greeting
-#     logger.info(f"Persona changed to: {persona_name}")
-# 
-#     return {
-#         "success": True,
-#         "persona": startup_coordinator.persona,
-#         "greeting": greeting.get_ready_message()
-#     }
-# 
-# 
+@app.post("/persona/{persona_name}")
+async def set_persona(persona_name: str):
+    valid_personas = ["nancy", "billion", "jarvis"]
+    if persona_name.lower() not in valid_personas:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid persona. Choose from: {', '.join(valid_personas)}",
+        )
+    startup_coordinator.set_persona(persona_name)
+    greeting = startup_coordinator.greeting
+    logger.info(f"Persona changed to: {persona_name}")
+    return {
+        "success": True,
+        "persona": startup_coordinator.persona,
+        "greeting": greeting.get_ready_message(),
+    }
+
+
 async def _build_real_personal_context() -> "PersonalContext":
     # Populate PersonalContext from Nancy actual data sources instead of
     # the hardcoded demo data in intelligent_greeting.py's own __main__ block
