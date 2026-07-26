@@ -423,24 +423,16 @@ function PipelineView({
 }) {
   return (
     <div className="glass-surface rounded-2xl p-3">
-      {/* flow rail — one continuous animated line spanning every stage */}
-      <div className="mb-2 flex items-center px-1" style={{ minWidth: STAGES.length * 292 }}>
-        {STAGES.map((stage, i) => (
-          <div key={stage.key} className="flex flex-1 items-center">
-            <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-primary/40 bg-primary/10 text-[0.5rem] text-primary">{i + 1}</div>
-            {i < STAGES.length - 1 && (
-              <div className="mx-1 h-px flex-1 overflow-hidden">
-                <div className="animate-flow-dash h-full w-full" style={{ background: 'repeating-linear-gradient(to right, var(--hud) 0 6px, transparent 6px 12px)', opacity: 0.5 }} />
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
+      {/* Step numbers live inside each column's own header (see StageColumn)
+         instead of a separate rail above the grid -- a standalone numbered
+         strip can't stay aligned with columns that wrap onto multiple rows
+         at narrower viewports, so the number has to travel with its card. */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        {STAGES.map((stage) => (
+        {STAGES.map((stage, i) => (
           <StageColumn
             key={stage.key}
             stage={stage}
+            stepNumber={i + 1}
             missions={grouped[stage.key]}
             allMissions={allMissions}
             agentByKey={agentByKey}
@@ -464,10 +456,11 @@ function PipelineView({
 
 /* ─── Stage lane ──────────────────────────────────────────────────────── */
 function StageColumn({
-  stage, missions, allMissions, agentByKey, onlineAgentKeys, dragOverStage, dropIndex,
+  stage, stepNumber, missions, allMissions, agentByKey, onlineAgentKeys, dragOverStage, dropIndex,
   onDragOverStage, onDragLeaveStage, onDrop, onDragStart, onOpen, onAdvance, onCancel, onDelete,
 }: {
   stage: { key: MissionStage; label: string }
+  stepNumber: number
   missions: Mission[]
   allMissions: Mission[]
   agentByKey: Map<string, AgentInfo>
@@ -505,8 +498,11 @@ function StageColumn({
       className={cn('flex min-w-0 flex-col gap-2 rounded-2xl border border-border/30 bg-secondary/5 p-2.5 transition-colors', isOver && 'border-primary/50 bg-primary/5')}
     >
       <div className="sticky top-0 z-10 flex items-center justify-between rounded-xl bg-secondary/20 px-2 py-1.5">
-        <span className="font-heading text-[0.6rem] text-muted-foreground">{stage.label}</span>
-        <span className={cn('rounded-full px-1.5 py-0.5 text-[0.5rem]', nearCapacity ? 'bg-gold/15 text-gold' : 'bg-secondary/50 text-muted-foreground')}>{missions.length}</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-primary/40 bg-primary/10 text-[0.44rem] text-primary">{stepNumber}</span>
+          <span className="truncate font-heading text-[0.6rem] text-muted-foreground">{stage.label}</span>
+        </span>
+        <span className={cn('shrink-0 rounded-full px-1.5 py-0.5 text-[0.5rem]', nearCapacity ? 'bg-gold/15 text-gold' : 'bg-secondary/50 text-muted-foreground')}>{missions.length}</span>
       </div>
       <div className="flex flex-1 flex-col gap-2">
         {missions.length === 0 && dropIndex === 0 && isOver && <DropIndicator />}
