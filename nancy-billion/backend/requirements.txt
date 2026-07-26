@@ -1,3 +1,11 @@
+# Install everything with: pip install -r requirements.txt
+#
+# This file is curated by hand -- one line per genuinely direct dependency,
+# with comments explaining why each is needed. For the exact, complete,
+# currently-working set of versions (direct + transitive), see
+# requirements-lock.txt (auto-generated, regenerate it after installing
+# anything new with `powershell -File sync_requirements_lock.ps1`).
+#
 # --- Extra package indexes -------------------------------------------------
 # torch: PyPI's default wheel pulls in CUDA libraries even on a CPU-only box
 # (multi-GB of unnecessary bloat); the official CPU-only index avoids that.
@@ -50,6 +58,10 @@ nltk>=3.8.0
 # pyttsx3's own Windows dependency; listed explicitly since tts.py imports it
 # directly. No-op / not installable on non-Windows, hence the marker.
 pywin32>=306; sys_platform == "win32"
+
+# skill_loader.py parses SKILL.md YAML frontmatter directly -- only ever
+# present transitively before (via faster-whisper's dependency chain).
+pyyaml>=6.0
 
 # PDF extraction for agent registry generation (Phase 1.9)
 pypdf>=4.0.0

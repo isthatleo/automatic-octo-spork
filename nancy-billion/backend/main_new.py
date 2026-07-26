@@ -56,6 +56,8 @@ from stt import stt_backend
 from llm import llm_backend, select_llm_for_task, AnthropicLLM
 import file_access
 import subagent_factory
+import terminal_tool
+import skill_loader
 from tts import tts_backend
 from neu_tts import NeuTTSBackend
 from tools import get_tools
@@ -546,7 +548,11 @@ _WANTS_TOOLS_RE = re.compile(
     r"\b(file|folder|directory|read .*(file|it)|write .*(file|to)|save (it|this|that|a file)|"
     r"delete|remove .*(file|folder)|move .*(file|folder)|rename|"
     r"create (a |an |another )?(sub)?agent|make (a |an |another )?(sub)?agent|"
-    r"new (sub)?agent|build (a |an |another )?(sub)?agent|spin up.*agent)\b",
+    r"new (sub)?agent|build (a |an |another )?(sub)?agent|spin up.*agent|"
+    r"run (a |the |this )?command|execute|shell|terminal|"
+    r"git (status|log|diff|commit|push|pull|branch|checkout|clone)|"
+    r"(check|list|show) (my )?(repo|repository|processes|packages)|"
+    r"install .*(package|dependency|library))\b",
     re.IGNORECASE,
 )
 
@@ -589,6 +595,16 @@ CREATE_SUBAGENT_TOOL: Dict[str, Any] = {
 async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
     if name == "create_subagent":
         return await _execute_create_subagent_tool(tool_input)
+
+    if name == "execute_command":
+        command = str(tool_input.get("command", ""))
+        if not terminal_tool._is_safe_command(command):
+            approved = await telegram_notifier.request_approval(
+                f"Nancy wants to run a command:\n\n{command}", timeout=120.0
+            )
+            if not approved:
+                return {"success": False, "error": "User did not approve this command."}
+        return await terminal_tool.execute_command(command, cwd=tool_input.get("cwd"))
 
     if name in _FILE_WRITE_TOOLS:
         description = {
@@ -662,9 +678,10 @@ def _enforce_sir(text: str) -> str:
 def _build_chat_prompt(user_text: str, history_text: str) -> str:
     """Shared prompt assembly for both the blocking hierarchy path and the
     streaming path below -- kept in one place so they can't silently drift."""
+    skills_block = skill_loader.build_skill_prompt_block(user_text)
     return (
         f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n"
-        f"{history_text}\nuser: {user_text}\nassistant:"
+        f"{skills_block}\n\n{history_text}\nuser: {user_text}\nassistant:"
     )
 
 
@@ -727,7 +744,10 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             claude = AnthropicLLM()
             resp = await asyncio.wait_for(
                 claude.generate_with_tools(
-                    prompt, FILE_TOOLS + [CREATE_SUBAGENT_TOOL], _execute_file_tool, max_tokens=1024
+                    prompt,
+                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL],
+                    _execute_file_tool,
+                    max_tokens=1024,
                 ),
                 timeout=45.0,
             )
@@ -2009,7 +2029,7 @@ def _summarize_agent_result(result: Dict[str, Any]) -> str:
     same way a manually-run agent result does."""
     if not result.get("success"):
         return str(result.get("error") or "Task failed - no further detail returned")
-    for key in ("response", "result", "summary", "message"):
+    for key in ("response", "result", "synthesis", "summary", "message"):
         value = result.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()

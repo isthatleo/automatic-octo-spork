@@ -3,6 +3,7 @@ DevOps Agent for Nancy Billion Backend
 Handles CI/CD, infrastructure automation, containerization, and deployment
 """
 from .base_specialized_agent import SpecializedAgent
+import asyncio
 import subprocess
 import os
 import socket
@@ -16,7 +17,68 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
+try:
+    from telegram_bot import telegram_notifier
+except Exception:
+    telegram_notifier = None
+
 logger = logging.getLogger(__name__)
+
+# Real git/GitHub operations that only ever read state -- run immediately.
+# Everything else (commit, push, branch creation, PR creation) mutates
+# something and requires the user's explicit approval first, same pattern as
+# main_new.py's file-write tools.
+_GIT_READ_OPS = {"status", "diff", "log", "branch_list", "remote"}
+_GITHUB_READ_OPS = {"repo_view", "issue_list", "pr_list", "pr_view"}
+
+
+def _summarize_devops_result(result: Dict[str, Any]) -> str:
+    """Human-readable summary of a git/github action result, for the chat
+    reply -- agent_service._auto_route callers only ever see result["response"]
+    (or ["result"]), never the raw dict."""
+    if result.get("note"):
+        return str(result["note"])
+    if not result.get("success"):
+        return f"That didn't work, Sir: {result.get('error') or result.get('stderr') or 'unknown error'}"
+
+    op = result.get("operation", "")
+    if op == "commit_and_push":
+        branch = result.get("branch", "the branch")
+        return f"Committed and pushed to {branch}, Sir. {result.get('push_output', '')}".strip()
+    if op == "create_branch":
+        return f"Created and switched to a new branch, Sir."
+    if op == "pr_create":
+        return result.get("stdout") or "Pull request created, Sir."
+    stdout = result.get("stdout")
+    if stdout:
+        return stdout if len(stdout) < 800 else stdout[:800] + "\n... (truncated)"
+    return "Done, Sir -- no output was returned."
+
+
+async def _run_cmd_async(cmd: List[str], cwd: Optional[str] = None, timeout: int = 30) -> Dict[str, Any]:
+    """Non-blocking version of _run_cmd -- the sync one below is only safe to
+    call from a thread; process_task runs on the event loop directly, so a
+    real git/gh operation needs the async subprocess API instead."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return {"stdout": "", "stderr": "command timed out", "returncode": -2, "success": False}
+        return {
+            "stdout": stdout_b.decode(errors="replace").strip(),
+            "stderr": stderr_b.decode(errors="replace").strip(),
+            "returncode": proc.returncode,
+            "success": proc.returncode == 0,
+        }
+    except FileNotFoundError:
+        return {"stdout": "", "stderr": "command not found", "returncode": -1, "success": False}
+    except Exception as e:
+        return {"stdout": "", "stderr": str(e), "returncode": -3, "success": False}
 
 
 def _run_cmd(cmd: List[str], timeout: int = 15) -> Dict[str, Any]:
@@ -174,6 +236,7 @@ class DevOpsAgent(SpecializedAgent):
             "description": "Advanced DevOps agent for CI/CD, infrastructure automation, containerization, and release management",
             "confidence": 0.88,
             "specializations": [
+                "git-and-github",
                 "continuous-integration",
                 "continuous-deployment",
                 "infrastructure-as-code",
@@ -205,8 +268,141 @@ class DevOpsAgent(SpecializedAgent):
             return await self._containerize_application(task_data)
         elif task_type == "monitoring":
             return await self._setup_monitoring(task_data)
+        elif task_type == "git_action":
+            return await self._git_action(task_data)
+        elif task_type == "github_action":
+            return await self._github_action(task_data)
+        elif task_type == "query":
+            # Real routing entry point from agent_service._auto_route -- a
+            # plain-language message like "commit this and push" lands here
+            # with no operation pre-selected, so infer one from the text
+            # instead of falling through to the templated consultation.
+            return await self._route_git_query(task_data)
         else:
             return await self._general_devops_consultation(task_data)
+
+    async def _route_git_query(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = str(params.get("query", "")).lower()
+        if any(kw in query for kw in ("push", "commit")):
+            return await self._git_action({**params, "operation": "commit_and_push", "message": params.get("query")})
+        if "pull request" in query or " pr " in f" {query} " or query.startswith("pr "):
+            return await self._github_action({**params, "operation": "pr_list"})
+        if "status" in query or "diff" in query or "log" in query:
+            op = "diff" if "diff" in query else ("log" if "log" in query else "status")
+            return await self._git_action({**params, "operation": op})
+        if "github" in query or "issue" in query or "repo" in query:
+            return await self._github_action({**params, "operation": "repo_view"})
+        return await self._git_action({**params, "operation": "status"})
+
+    async def _git_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Wraps _git_action_impl to add a "response" string -- the
+        agent_service._auto_route path (_generate_response_via_hierarchy)
+        only surfaces result["response"]/result["result"] as the chat reply;
+        without it, a real git operation would run but Nancy's spoken/typed
+        answer would silently fall back to a plain LLM guess instead."""
+        result = await self._git_action_impl(params)
+        result.setdefault("response", _summarize_devops_result(result))
+        return result
+
+    async def _git_action_impl(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Real git operations. Reads (status/diff/log/branch_list/remote) run
+        immediately; anything that mutates the repo requires the user's
+        explicit approval first (see skills/git-and-github/SKILL.md for the
+        workflow this implements)."""
+        operation = str(params.get("operation", "status"))
+        cwd = params.get("cwd")
+
+        if operation in _GIT_READ_OPS:
+            cmd = {
+                "status": ["git", "status", "--short", "--branch"],
+                "diff": ["git", "diff"],
+                "log": ["git", "log", "--oneline", "-10"],
+                "branch_list": ["git", "branch", "-a"],
+                "remote": ["git", "remote", "-v"],
+            }[operation]
+            result = await _run_cmd_async(cmd, cwd=cwd)
+            return {"success": result["success"], "task_type": "git_action", "operation": operation, **result}
+
+        if operation == "commit_and_push":
+            files = params.get("files")  # None -> all modified/tracked changes
+            message = params.get("message") or "Update via Nancy DevOps agent"
+            status = await _run_cmd_async(["git", "status", "--short"], cwd=cwd)
+            if not status["stdout"]:
+                return {"success": True, "task_type": "git_action", "operation": operation, "note": "Nothing to commit -- working tree clean."}
+
+            description = f"Commit and push:\n\n{status['stdout']}\n\nMessage: {message}"
+            if telegram_notifier is None or not await telegram_notifier.request_approval(description, timeout=180.0):
+                return {"success": False, "task_type": "git_action", "operation": operation, "error": "User did not approve this commit/push."}
+
+            add_cmd = ["git", "add"] + (files if files else ["-u"])  # -u: tracked files only, never sweeps up untracked-by-accident
+            add_result = await _run_cmd_async(add_cmd, cwd=cwd)
+            if not add_result["success"]:
+                return {"success": False, "task_type": "git_action", "operation": operation, "error": add_result["stderr"]}
+
+            commit_result = await _run_cmd_async(["git", "commit", "-m", message], cwd=cwd)
+            if not commit_result["success"]:
+                return {"success": False, "task_type": "git_action", "operation": operation, "error": commit_result["stderr"] or commit_result["stdout"]}
+
+            branch_result = await _run_cmd_async(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
+            branch = branch_result["stdout"] if branch_result["success"] else "HEAD"
+            push_result = await _run_cmd_async(["git", "push", "origin", branch], cwd=cwd)
+            return {
+                "success": push_result["success"],
+                "task_type": "git_action",
+                "operation": operation,
+                "branch": branch,
+                "commit": commit_result["stdout"],
+                "push_output": push_result["stdout"] or push_result["stderr"],
+            }
+
+        if operation == "create_branch":
+            branch_name = params.get("branch_name")
+            if not branch_name:
+                return {"success": False, "task_type": "git_action", "operation": operation, "error": "branch_name is required."}
+            approved = telegram_notifier is not None and await telegram_notifier.request_approval(
+                f"Create and switch to new branch: {branch_name}", timeout=120.0
+            )
+            if not approved:
+                return {"success": False, "task_type": "git_action", "operation": operation, "error": "User did not approve creating this branch."}
+            result = await _run_cmd_async(["git", "checkout", "-b", branch_name], cwd=cwd)
+            return {"success": result["success"], "task_type": "git_action", "operation": operation, **result}
+
+        return {"success": False, "task_type": "git_action", "operation": operation, "error": f"Unknown git operation: {operation}"}
+
+    async def _github_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Wraps _github_action_impl to add a "response" string -- see
+        _git_action's docstring for why this matters."""
+        result = await self._github_action_impl(params)
+        result.setdefault("response", _summarize_devops_result(result))
+        return result
+
+    async def _github_action_impl(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Real GitHub operations via the `gh` CLI (already authenticated in
+        this environment). Reads run immediately; pr_create requires approval."""
+        operation = str(params.get("operation", "repo_view"))
+
+        if operation in _GITHUB_READ_OPS:
+            cmd = {
+                "repo_view": ["gh", "repo", "view"],
+                "issue_list": ["gh", "issue", "list"],
+                "pr_list": ["gh", "pr", "list"],
+                "pr_view": ["gh", "pr", "view", str(params.get("pr_number", ""))],
+            }[operation]
+            result = await _run_cmd_async([c for c in cmd if c], cwd=params.get("cwd"))
+            return {"success": result["success"], "task_type": "github_action", "operation": operation, **result}
+
+        if operation == "pr_create":
+            title = params.get("title", "Update")
+            body = params.get("body", "")
+            approved = telegram_notifier is not None and await telegram_notifier.request_approval(
+                f"Create a pull request:\nTitle: {title}\nBody: {body[:200]}", timeout=180.0
+            )
+            if not approved:
+                return {"success": False, "task_type": "github_action", "operation": operation, "error": "User did not approve creating this pull request."}
+            result = await _run_cmd_async(["gh", "pr", "create", "--title", title, "--body", body], cwd=params.get("cwd"))
+            return {"success": result["success"], "task_type": "github_action", "operation": operation, **result}
+
+        return {"success": False, "task_type": "github_action", "operation": operation, "error": f"Unknown GitHub operation: {operation}"}
 
     async def _setup_ci_pipeline(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Set up CI/CD pipeline using real system state."""
