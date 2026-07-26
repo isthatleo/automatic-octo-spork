@@ -21,6 +21,7 @@ import {
 } from '@/components/nancy/admin-panels'
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
+import { TradingViewDialog } from '@/components/nancy/tradingview'
 import { askNancyStreaming, onEconomicAlert } from '@/lib/nancy/ws-client'
 import { synthesizeSpeech } from '@/lib/nancy/tts-client'
 import { geocode } from '@/lib/nancy/geocode'
@@ -110,6 +111,10 @@ export default function Page() {
   const [newsMedia, setNewsMedia] = useState<'articles' | 'videos'>('articles')
   const [newsAutoOpenTop, setNewsAutoOpenTop] = useState(false)
   const [newsRequestId, setNewsRequestId] = useState(0)
+  // TradingView chart dialog -- only ever set by an explicit "open the
+  // chart for X" command (see commands.ts's chartMatch), never shown
+  // proactively alongside a plain price mention.
+  const [chartSymbol, setChartSymbol] = useState<string | null>(null)
   // Mirrors currentAudioRef as state (not just a ref) so NancyOrb re-renders
   // with the live <audio> element and can analyze its real playback level —
   // only set for the real NeuTTS path, stays null for the Web Speech fallback.
@@ -378,6 +383,11 @@ export default function Page() {
         case 'launch':
           nancySay(result.reply)
           doLaunch(result.target)
+          break
+        case 'chart':
+          sfx.whooshIn()
+          setChartSymbol(result.symbol)
+          nancySay(result.reply)
           break
         case 'news':
           sfx.whooshIn()
@@ -752,6 +762,8 @@ export default function Page() {
           </div>
         )}
       </div>
+
+      <TradingViewDialog symbol={chartSymbol} onClose={() => setChartSymbol(null)} />
     </main>
   )
 }

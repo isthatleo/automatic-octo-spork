@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
@@ -60,7 +60,7 @@ import terminal_tool
 import skill_loader
 from mcp_client import mcp_manager, plugin_store
 from tts import tts_backend
-from neu_tts import NeuTTSBackend
+from neu_tts import NeuTTSBackend, USER_REF_WAV, USER_REF_TXT
 from tools import get_tools
 from wake_word import get_wake_word_detector
 from audio_decode import decode_webm_opus_b64_to_pcm, pcm_int16_to_float32
@@ -2012,6 +2012,38 @@ async def tts_status():
     # even `getattr`/`hasattr` on it would trigger the (possibly slow, first-load)
     # getter synchronously on the event loop thread if called outside one.
     status = await loop.run_in_executor(None, lambda: tts_backend.status)
+    return {"success": True, **status}
+
+
+@app.post("/voice/reference", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def upload_voice_reference(file: UploadFile = File(...)):
+    """Real voice-clone upload -- drop in a clip and NeuTTS clones it on the
+    very next synthesis, no restart (see neu_tts.py's refresh_reference).
+    Auto-transcribed via faster-whisper (beam_size=5, the same one-time
+    higher-accuracy pass _transcribe_user_reference always used), so no
+    hand-typed transcript is needed."""
+    if not isinstance(tts_backend, NeuTTSBackend):
+        raise HTTPException(status_code=400, detail="Voice cloning requires the NeuTTS backend (TTS_BACKEND=neutts)")
+    if not (file.filename or "").lower().endswith(".wav"):
+        raise HTTPException(status_code=400, detail="Only .wav clips are supported")
+    data = await file.read()
+    if len(data) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Clip too large (25MB max)")
+    USER_REF_WAV.parent.mkdir(parents=True, exist_ok=True)
+    USER_REF_WAV.write_bytes(data)
+    USER_REF_TXT.unlink(missing_ok=True)  # force re-transcription of the new clip, never reuse the old transcript
+    status = await tts_backend.refresh_reference()
+    return {"success": True, **status}
+
+
+@app.delete("/voice/reference", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def delete_voice_reference():
+    """Reverts to the synthetic Pyttsx3 placeholder voice."""
+    if not isinstance(tts_backend, NeuTTSBackend):
+        raise HTTPException(status_code=400, detail="Voice cloning requires the NeuTTS backend (TTS_BACKEND=neutts)")
+    USER_REF_WAV.unlink(missing_ok=True)
+    USER_REF_TXT.unlink(missing_ok=True)
+    status = await tts_backend.refresh_reference()
     return {"success": True, **status}
 
 

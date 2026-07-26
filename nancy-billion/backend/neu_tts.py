@@ -6,9 +6,11 @@ no cloud API and no per-request cost: a small quantized GGUF backbone
 (neuphonic/neutts-nano-q4-gguf) run via llama-cpp-python, plus an ONNX codec
 decoder (neuphonic/neucodec-onnx-decoder).
 
-Voice source, checked in this order (no restart-free hot path needed beyond
-dropping files -- just restart the backend after uploading):
-  1. voice_ref/user_reference.wav + user_reference.txt  <- drop your own clip here
+Voice source, checked fresh on every synthesize() call -- no restart needed
+after dropping in or uploading a clip (see POST /voice/reference in
+main_new.py for the real upload path; a .wav can also be dropped straight
+into this directory by hand):
+  1. voice_ref/user_reference.wav + user_reference.txt  <- your own clip
   2. voice_ref/synthetic_reference.wav + .txt           <- auto-bootstrapped once
      via the existing Pyttsx3 "Hazel" engine, so there is always a genuinely
      British-female placeholder without any external download.
@@ -191,6 +193,19 @@ class NeuTTSBackend(TTSBackend):
             logger.info("Voice clone reference ready: %r", transcript)
         except Exception as e:
             logger.warning("Could not auto-transcribe %s: %s", USER_REF_WAV, e)
+
+    async def refresh_reference(self) -> dict:
+        """Called right after a new reference clip is uploaded (see
+        POST /voice/reference) so the status response reflects it
+        immediately instead of waiting for the next synthesize() call to
+        lazily discover it. Clears the text->WAV cache too -- every cached
+        clip was generated against the *old* reference voice and would keep
+        being served in the wrong voice otherwise."""
+        async with self._ref_lock:
+            await self._ensure_reference_ready()
+        self._cache.clear()
+        self._cache_order.clear()
+        return self.status
 
     def _resolve_reference(self) -> Tuple[str, str, str]:
         """Sync lookup -- call only after _ensure_reference_ready has run."""

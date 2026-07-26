@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef } from 'react'
+import { X } from 'lucide-react'
 
 /**
  * Generic TradingView embed. Injects the given widget script with a JSON config
@@ -50,4 +51,45 @@ export function TradingViewWidget({
   }, [scriptSrc, json])
 
   return <div ref={ref} className={className} style={{ height: '100%', width: '100%' }} />
+}
+
+/**
+ * On-demand TradingView chart window -- only ever rendered when explicitly
+ * requested ("open the chart for gold"), never shown proactively alongside
+ * a regular price mention. Real Advanced Chart widget, no API key, dark
+ * theme to match the rest of the app.
+ */
+export function TradingViewDialog({ symbol, onClose }: { symbol: string | null; onClose: () => void }) {
+  if (!symbol) return null
+  return (
+    <div className="fixed inset-0 z-[95] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={`TradingView chart for ${symbol}`}>
+      <button type="button" aria-label="Dismiss" onClick={onClose} className="absolute inset-0 cursor-default bg-background/80 backdrop-blur-md" />
+      <div className="relative z-10 flex h-[85vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
+        <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+          <span className="font-heading text-xs text-foreground">{symbol}</span>
+          <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground" aria-label="Close chart">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="flex-1">
+          <TradingViewWidget
+            scriptSrc="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
+            config={{
+              autosize: true,
+              symbol,
+              interval: 'D',
+              timezone: 'Etc/UTC',
+              theme: 'dark',
+              style: '1',
+              locale: 'en',
+              enable_publishing: false,
+              allow_symbol_change: true,
+              hide_top_toolbar: false,
+              hide_legend: false,
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  )
 }

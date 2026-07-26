@@ -13,7 +13,7 @@ import {
   Plus, Trash2, Save, Bot, ToggleLeft, ToggleRight,
   Radar, ChevronRight, Lock, ShieldCheck,
   CalendarClock, Library, ArrowRight, FileCode2,
-  Fingerprint, Layers, MessageCircle, SendHorizonal,
+  Fingerprint, Layers, MessageCircle, SendHorizonal, Upload, Mic,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
@@ -816,6 +816,100 @@ export function ModelsPanel() {
           </div>
         </div>
       )}
+
+      <VoiceCloneCard />
+    </div>
+  )
+}
+
+/* ═══ VOICE CLONE — real upload -> auto-transcribe -> clone, no restart ═══ */
+function VoiceCloneCard() {
+  const [status, setStatus] = useState<{ available: boolean; voice_source: string; error: string | null } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch('/api/tts/status', { cache: 'no-store' })
+      const json = await res.json()
+      if (json.success) setStatus(json)
+    } catch { /* transient — next poll retries */ }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const onUpload = useCallback(async (file: File) => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const res = await fetch('/api/voice/reference', { method: 'POST', body: form })
+      const json = await res.json()
+      if (json.success) {
+        setStatus(json)
+        setMessage('Voice cloned from your clip — every reply now speaks in it.')
+      } else {
+        setMessage(json.detail ?? 'Upload failed.')
+      }
+    } catch {
+      setMessage('Upload failed.')
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  const onRevert = useCallback(async () => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await fetch('/api/voice/reference', { method: 'DELETE' })
+      const json = await res.json()
+      if (json.success) { setStatus(json); setMessage('Reverted to the default placeholder voice.') }
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  if (!status?.available) return null
+  const isUser = status.voice_source === 'user'
+
+  return (
+    <div className="mt-2 flex flex-col gap-2 rounded-xl border border-border bg-card/60 px-4 py-3">
+      <div className="flex items-center gap-2">
+        <Mic className="h-4 w-4 text-tertiary" />
+        <span className="font-heading text-xs text-foreground">Voice Clone</span>
+        <span className={cn(
+          'ml-auto rounded-full border px-2 py-0.5 text-[0.5rem] uppercase',
+          isUser ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/60 text-muted-foreground',
+        )}>
+          {isUser ? 'your voice' : 'default placeholder'}
+        </span>
+      </div>
+      <p className="text-[0.55rem] text-muted-foreground">
+        Drop in a clean .wav clip of your voice (a few sentences is enough) — Nancy auto-transcribes it and clones it immediately, no restart needed.
+      </p>
+      <div className="flex items-center gap-2">
+        <label className={cn(
+          'flex cursor-pointer items-center gap-1.5 rounded-lg border border-primary/50 bg-primary/10 px-3 py-1.5 text-[0.6rem] text-primary transition-colors hover:bg-primary/20',
+          busy && 'pointer-events-none opacity-40',
+        )}>
+          <Upload className="h-3 w-3" /> {busy ? 'Working…' : 'Upload clip (.wav)'}
+          <input
+            type="file"
+            accept=".wav,audio/wav"
+            className="hidden"
+            disabled={busy}
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void onUpload(f); e.target.value = '' }}
+          />
+        </label>
+        {isUser && (
+          <button type="button" onClick={onRevert} disabled={busy} className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-[0.6rem] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40">
+            <Trash2 className="h-3 w-3" /> Revert to default
+          </button>
+        )}
+      </div>
+      {message && <div className="text-[0.55rem] text-primary">{message}</div>}
     </div>
   )
 }
@@ -1317,60 +1411,172 @@ export function ProfilesPanel() {
   )
 }
 
-/* ═══════════════════ PLUGINS / MCP — honestly not built ════════════════
-   No fake marketplace or protocol client -- these capabilities genuinely
-   don't exist yet. Redesigned as a considered "not built" state (icon
-   badge + explanation + a real pointer to what actually provides that
-   capability today) instead of the plain EmptyNote box, without
-   pretending either system is real. ══════════════════════════════════ */
-function NotYetBuilt({
-  icon: Icon, title, body, pointerLabel, onPointerClick,
-}: {
-  icon: React.ElementType
-  title: string
-  body: string
-  pointerLabel: string
-  onPointerClick?: () => void
-}) {
+/* ═══════════════════ PLUGINS / MCP — real MCP client, real servers ═════
+   Backed by mcp_client.py's official-SDK MCP client: real subprocess
+   servers, real tool lists, real tool calls through Claude's tool-use loop.
+   "Plugins" and "MCP" are the same real capability now, so both nav entries
+   render this one panel instead of duplicating it. ═══════════════════════ */
+interface PluginServer {
+  id: string
+  name: string
+  command: string
+  args: string[]
+  env: Record<string, string>
+  enabled: boolean
+  connected: boolean
+  error: string | null
+  tools: string[]
+}
+
+export function PluginsPanel(_props: { onNavigate?: () => void } = {}) {
+  const [servers, setServers] = useState<PluginServer[]>([])
+  const [loading, setLoading] = useState(true)
+  const [name, setName] = useState('')
+  const [command, setCommand] = useState('npx')
+  const [argsInput, setArgsInput] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+
+  const fetchServers = useCallback(async () => {
+    try {
+      const res = await fetch('/api/plugins', { cache: 'no-store' })
+      const json = await res.json()
+      if (json.success) setServers(json.servers)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchServers()
+    const t = setInterval(fetchServers, 15_000)
+    return () => clearInterval(t)
+  }, [fetchServers])
+
+  const createServer = async () => {
+    if (!name.trim() || !command.trim()) return
+    setCreating(true); setFormError(null)
+    try {
+      const res = await fetch('/api/plugins', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), command: command.trim(), args: argsInput.trim().split(/\s+/).filter(Boolean) }),
+      })
+      const json = await res.json()
+      if (!json.success) { setFormError(json.detail || 'Failed to register server (approval denied or timed out)'); return }
+      setName(''); setArgsInput('')
+      fetchServers()
+    } catch (e) {
+      setFormError(String(e))
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const toggleServer = async (s: PluginServer) => {
+    await fetch(`/api/plugins/${s.id}?enabled=${!s.enabled}`, { method: 'PATCH' })
+    fetchServers()
+  }
+  const deleteServer = async (s: PluginServer) => {
+    await fetch(`/api/plugins/${s.id}`, { method: 'DELETE' })
+    fetchServers()
+  }
+
   return (
-    <div className="mx-auto flex max-w-[560px] flex-col items-center gap-4 rounded-xl border border-dashed border-border/60 bg-card/40 px-6 py-12 text-center">
-      <span className="flex h-14 w-14 items-center justify-center rounded-full border border-border/60 bg-secondary/30">
-        <Icon className="h-6 w-6 text-muted-foreground" />
-      </span>
-      <div>
-        <h2 className="font-heading text-sm text-foreground">{title}</h2>
-        <p className="mt-2 text-[0.62rem] leading-relaxed text-muted-foreground">{body}</p>
+    <div className="mx-auto flex max-w-[900px] flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/60 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <PlugZap className="h-4 w-4 text-primary" />
+          <span className="font-heading text-xs text-foreground">MCP Plugin Servers</span>
+        </div>
+        <span className="text-[0.55rem] text-muted-foreground">
+          {servers.length} configured · {servers.filter((s) => s.connected).length} connected · real tools via the official MCP SDK
+        </span>
       </div>
-      {onPointerClick && (
-        <button type="button" onClick={onPointerClick} className="flex items-center gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-3 py-1.5 text-[0.58rem] text-primary transition-colors hover:bg-primary/20">
-          <Bot className="h-3 w-3" /> {pointerLabel}
-        </button>
-      )}
+
+      <div className="rounded-xl border border-border bg-card/60 p-4">
+        <h3 className="mb-2.5 flex items-center gap-2 font-heading text-[0.68rem] text-foreground">
+          <Plus className="h-3.5 w-3.5 text-primary" /> Connect a server
+        </h3>
+        <p className="mb-2.5 text-[0.55rem] text-muted-foreground">
+          Registers a real local subprocess (e.g. <code>npx -y @modelcontextprotocol/server-filesystem C:\path</code>) — Nancy asks for Telegram approval before spawning it, the same gate as running any other command.
+        </p>
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-[160px_120px_1fr_auto]">
+          <div>
+            <FieldLabel>Name</FieldLabel>
+            <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="filesystem" />
+          </div>
+          <div>
+            <FieldLabel>Command</FieldLabel>
+            <input className={inputCls} value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx" />
+          </div>
+          <div>
+            <FieldLabel>Args (space-separated)</FieldLabel>
+            <input className={inputCls} value={argsInput} onChange={(e) => setArgsInput(e.target.value)} placeholder="-y @modelcontextprotocol/server-filesystem C:\path" />
+          </div>
+          <div className="flex items-end">
+            <PrimaryButton onClick={createServer} disabled={creating || !name.trim() || !command.trim()}>
+              {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} {creating ? 'Awaiting approval…' : 'Connect'}
+            </PrimaryButton>
+          </div>
+        </div>
+        {formError && <p className="mt-2 text-[0.55rem] text-destructive">{formError}</p>}
+      </div>
+
+      <div className="rounded-xl border border-border bg-card/60">
+        <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">
+          Connected servers&rsquo; tools appear automatically in every tool-use-capable chat turn and cron run_skill job — no separate activation step.
+        </p>
+        {loading && servers.length === 0 ? (
+          <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
+            <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…
+          </div>
+        ) : servers.length === 0 ? (
+          <EmptyNote>No plugin servers yet — connect one above to give Nancy real third-party tools.</EmptyNote>
+        ) : (
+          <ul className="divide-y divide-border/40">
+            {servers.map((s) => (
+              <li key={s.id} className="flex flex-col gap-1.5 px-4 py-2.5">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full border', s.connected ? 'border-primary/40 bg-primary/10' : 'border-border/50 bg-secondary/20')}>
+                    <PlugZap className={cn('h-3.5 w-3.5', s.connected ? 'text-primary' : 'text-muted-foreground')} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[0.62rem] text-foreground">{s.name}</div>
+                    <div className="truncate text-[0.5rem] text-muted-foreground">
+                      {s.command} {s.args.join(' ')} · {s.connected ? `${s.tools.length} tool${s.tools.length !== 1 ? 's' : ''}` : (s.error ? `error: ${s.error}` : 'disconnected')}
+                    </div>
+                  </div>
+                  {s.connected && s.tools.length > 0 && (
+                    <button type="button" onClick={() => setExpanded(expanded === s.id ? null : s.id)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Show tools" aria-label={`Show tools for ${s.name}`}>
+                      <ChevronRight className={cn('h-3.5 w-3.5 transition-transform', expanded === s.id && 'rotate-90')} />
+                    </button>
+                  )}
+                  <button type="button" onClick={() => toggleServer(s)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Toggle enabled" aria-label={s.enabled ? `Disable ${s.name}` : `Enable ${s.name}`}>
+                    {s.enabled ? <ToggleRight className="h-4 w-4 text-primary" /> : <ToggleLeft className="h-4 w-4" />}
+                  </button>
+                  <button type="button" onClick={() => deleteServer(s)} className="rounded p-1.5 text-muted-foreground hover:text-destructive" title="Remove" aria-label={`Remove ${s.name}`}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                {expanded === s.id && (
+                  <div className="ml-11 flex flex-wrap gap-1.5">
+                    {s.tools.map((t) => (
+                      <span key={t} className="rounded-full border border-border/60 bg-secondary/30 px-2 py-0.5 text-[0.5rem] text-muted-foreground">{t}</span>
+                    ))}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   )
 }
-
-export function PluginsPanel({ onNavigate }: { onNavigate?: () => void } = {}) {
-  return (
-    <NotYetBuilt
-      icon={PlugZap}
-      title="No plugin system in this build"
-      body="Nancy's extensibility is real specialized agents and self-created subagents, not a plugin marketplace. Adding a capability here means adding a real agent, not installing a package."
-      pointerLabel="See the real agent fleet →"
-      onPointerClick={onNavigate}
-    />
-  )
-}
-export function McpPanel({ onNavigate }: { onNavigate?: () => void } = {}) {
-  return (
-    <NotYetBuilt
-      icon={Wrench}
-      title="No MCP integration wired up yet"
-      body="Nancy's tool-use today is Claude's native tool-calling against a fixed local tool set, not external Model Context Protocol servers. This page will become real the day that integration actually exists."
-      pointerLabel="See the real model stack →"
-      onPointerClick={onNavigate}
-    />
-  )
+export function McpPanel(props: { onNavigate?: () => void } = {}) {
+  return <PluginsPanel {...props} />
 }
 /* ═══════════════════ WEBHOOKS — real outbound HTTP delivery ═══════════
    A genuine subscription system: POST /webhooks stores a real (url, event)

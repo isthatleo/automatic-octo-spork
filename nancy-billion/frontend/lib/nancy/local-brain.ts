@@ -83,6 +83,14 @@ const SYMBOL_MAP: Record<string, string> = {
   amd: 'NASDAQ:AMD',
   gold: 'TVC:GOLD',
   silver: 'TVC:SILVER',
+  // "xauusd"/"xagusd" don't contain the substring "gold"/"silver", so they
+  // fell through to the bare-ticker branch below and produced an
+  // unprefixed "XAUUSD" the widget can't reliably resolve -- these are the
+  // user's own actual traded pairs, worth a real mapping.
+  xauusd: 'OANDA:XAUUSD',
+  xau: 'OANDA:XAUUSD',
+  xagusd: 'OANDA:XAGUSD',
+  xag: 'OANDA:XAGUSD',
   oil: 'TVC:USOIL',
   's&p': 'SP:SPX',
   'sp500': 'SP:SPX',
@@ -117,7 +125,11 @@ function base(reply: string, action: NancyDecision['action']): NancyDecision {
   }
 }
 
-function guessSymbol(raw: string): string {
+/** Exported for commands.ts's explicit "open the chart for X" intent, which
+ * needs the same spoken-name -> TradingView-symbol mapping without pulling
+ * in the rest of this file's (currently unused) local-fallback decision
+ * tree. */
+export function guessSymbol(raw: string): string {
   const lower = raw.toLowerCase()
   for (const [name, sym] of Object.entries(SYMBOL_MAP)) {
     if (lower.includes(name)) return sym

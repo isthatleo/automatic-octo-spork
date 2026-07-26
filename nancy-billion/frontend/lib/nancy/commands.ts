@@ -1,9 +1,11 @@
 import type { KnowledgeCategory, PanelKey } from './types'
+import { guessSymbol } from './local-brain'
 
 export type CommandResult =
   | { type: 'navigate'; panel: PanelKey; reply: string }
   | { type: 'locate'; query: string; reply: string }
   | { type: 'launch'; target: string; reply: string }
+  | { type: 'chart'; symbol: string; reply: string }
   | { type: 'time'; reply: string }
   | { type: 'session'; reply: string }
   | {
@@ -135,6 +137,22 @@ export function parseCommand(rawInput: string): CommandResult {
       media,
       reply: `Pulling up the latest ${media === 'videos' ? 'briefings' : 'coverage'} on ${subject}, Sir.`,
     }
+  }
+
+  // TradingView chart, only ever on explicit request -- requires BOTH an
+  // open-verb AND the literal word "chart"/"trading view", so a casual
+  // mention of a price never pops the widget uninvited (the user was
+  // explicit: never show it unless asked to open it). Checked before the
+  // generic launch/locate matchers below, which would otherwise swallow
+  // "open the chart for gold" (launchMatch) or "show me a chart of gold"
+  // (locateMatch's "show me" trigger) as the wrong command type.
+  const chartMatch = input.match(
+    /\b(?:open|show|launch|pull up|bring up)\b.*?\b(?:trading\s*view|tradingview|chart)\b(?:\s+(?:for|of|on)\s+(.+))?$/,
+  )
+  if (chartMatch) {
+    const subject = chartMatch[1] ? clean(chartMatch[1]) : ''
+    const symbol = guessSymbol(subject)
+    return { type: 'chart', symbol, reply: `Opening the chart for ${symbol}, Sir.` }
   }
 
   // "open/launch/run X" -- either a real panel (navigate) or a cosmetic
