@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { AmbientField } from './ambient-field'
-import { SnakeBorder, snakeStateForMission } from './snake-border'
 import { listAgents } from '@/lib/nancy/agent-client'
 import { categoryFor, colorFor } from '@/lib/nancy/agent-taxonomy'
 import { onDomainEvent } from '@/lib/nancy/ws-client'
@@ -437,7 +436,7 @@ function PipelineView({
           </div>
         ))}
       </div>
-      <div className="flex gap-3 overflow-x-auto pb-2">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {STAGES.map((stage) => (
           <StageColumn
             key={stage.key}
@@ -503,7 +502,7 @@ function StageColumn({
       }}
       onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) onDragLeaveStage() }}
       onDrop={(e) => { e.preventDefault(); onDrop(stage.key) }}
-      className={cn('flex w-[280px] shrink-0 flex-col gap-2 rounded-2xl border border-border/30 bg-secondary/5 p-2.5 transition-colors', isOver && 'border-primary/50 bg-primary/5')}
+      className={cn('flex min-w-0 flex-col gap-2 rounded-2xl border border-border/30 bg-secondary/5 p-2.5 transition-colors', isOver && 'border-primary/50 bg-primary/5')}
     >
       <div className="sticky top-0 z-10 flex items-center justify-between rounded-xl bg-secondary/20 px-2 py-1.5">
         <span className="font-heading text-[0.6rem] text-muted-foreground">{stage.label}</span>
@@ -556,19 +555,28 @@ function MissionCard({
   const execMs = mission.dispatched_at && mission.result ? (mission.result.at - mission.dispatched_at) * 1000 : null
   const color = agent ? colorFor(agent.domain) : 'var(--muted-foreground)'
   const isLast = mission.stage === 'archive'
-  const snakeState = snakeStateForMission(mission.stage, mission.cancelled, mission.result?.success)
+  // Real stage-derived accent -- same signal the old animated snake border
+  // encoded (cancelled/failed -> error, execution/approval -> in-progress,
+  // archive -> settled, else -> the assigned agent's own category color),
+  // now a static color instead of a rotating glow.
+  const stageColor =
+    mission.cancelled || mission.result?.success === false ? 'var(--destructive)'
+      : mission.stage === 'archive' ? 'var(--muted-foreground)'
+      : mission.stage === 'execution' || mission.stage === 'human_approval' ? 'var(--gold)'
+      : color
 
   return (
-    <SnakeBorder state={mission.cancelled ? 'error' : snakeState} radiusClassName="rounded-[14px]">
-      <motion.div
-        layout
-        draggable
-        onDragStart={onDragStart}
-        onClick={onOpen}
-        whileHover={{ y: -3 }}
-        transition={{ type: 'spring', stiffness: 320, damping: 24 }}
-        className={cn('group glass-surface relative cursor-pointer rounded-[14px] p-2.5 text-left transition-colors duration-200', mission.cancelled && 'opacity-50')}
-      >
+    <motion.div
+      layout
+      draggable
+      onDragStart={onDragStart}
+      onClick={onOpen}
+      whileHover={{ y: -3 }}
+      transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+      className={cn('group glass-surface relative cursor-pointer overflow-hidden rounded-[14px] p-2.5 pl-3.5 text-left transition-colors duration-200 hover:border-primary/30', mission.cancelled && 'opacity-50')}
+    >
+      <span className="absolute inset-y-0 left-0 w-[2.5px]" style={{ background: stageColor }} />
+
         <div className="mb-1.5 flex items-start justify-between gap-2">
           <p className="text-[0.65rem] font-medium leading-snug text-foreground">{mission.title}</p>
           <span className={cn('shrink-0 rounded-md border px-1.5 py-0.5 text-[0.42rem]', PRIORITY_COLOR[mission.priority])}>{mission.priority}</span>
@@ -660,8 +668,7 @@ function MissionCard({
             </button>
           </span>
         </div>
-      </motion.div>
-    </SnakeBorder>
+    </motion.div>
   )
 }
 
