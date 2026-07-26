@@ -296,7 +296,7 @@ export default function Page() {
   )
 
   const runCommand = useCallback(
-    (input: string) => {
+    async (input: string) => {
       const result = parseCommand(input)
       switch (result.type) {
         case 'navigate':
@@ -347,8 +347,8 @@ export default function Page() {
           // Hermes-like slash commands are handled by the backend /chat endpoint,
           // so local command parser only intercepts obvious local actions first.
           if (/^\s*\//.test(input)) {
-            const slashResult = await askNancy(input, history, null)
-            nancySay(slashResult.reply || 'Slash command sent, Sir.')
+            const reply = await askNancy(input)
+            nancySay(reply || 'Slash command sent, Sir.')
             setThinking(false)
             break
           } else {
