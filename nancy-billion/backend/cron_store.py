@@ -18,11 +18,22 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, Optional
 
+from croniter import croniter
+
 logger = logging.getLogger(__name__)
 
 STORE_PATH = Path(__file__).parent / "data" / "cron_jobs.json"
 
-ActionType = Literal["telegram_message", "agent_task"]
+# run_skill: {"skill_name": str, "context": str} -- runs a skill's
+# instructions through the same skill-matching prompt injection chat uses
+# (see skill_loader.py), letting a scheduled job follow a real procedure
+# instead of just pinging one fixed agent task.
+# terminal_command: {"command": str, "cwd": str | None} -- runs a real shell
+# command via terminal_tool.execute_command, gated by the same safe-command
+# allowlist/Telegram-approval split every other caller of that tool goes
+# through (a scheduled job doesn't get to skip approval for a destructive
+# command just because a human isn't watching in real time).
+ActionType = Literal["telegram_message", "agent_task", "run_skill", "terminal_command"]
 
 
 @dataclass
@@ -40,13 +51,39 @@ class CronJob:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_run: Optional[str] = None
     last_result: Optional[str] = None
+    # Real cron-expression scheduling (e.g. "*/15 * * * *" for every 15
+    # minutes, "0 9 * * 1-5" for 9am on weekdays) -- when set, this takes
+    # priority over hour/minute, which stay as the simple "once daily at a
+    # fixed time" mode most jobs actually need and the simplest UI to build
+    # a form for. hour/minute remain populated even when a cron_expression
+    # is set (best-effort, from the expression's first matching time) so
+    # any caller that only knows the old two-field shape still shows
+    # something sane instead of breaking.
+    cron_expression: Optional[str] = None
 
     def next_run(self) -> str:
         now = datetime.now()
+        if self.cron_expression:
+            try:
+                return croniter(self.cron_expression, now).get_next(datetime).isoformat()
+            except Exception:
+                logger.warning("Invalid cron_expression %r on job %s, falling back to hour/minute", self.cron_expression, self.id)
         candidate = now.replace(hour=self.hour, minute=self.minute, second=0, microsecond=0)
         if candidate <= now:
             candidate += timedelta(days=1)
         return candidate.isoformat()
+
+    def is_due(self, now: datetime) -> bool:
+        """Minute-resolution match against either the cron expression or the
+        simple daily hour/minute -- see CronStore.due_jobs() for the
+        already-fired-this-minute guard, applied separately."""
+        if self.cron_expression:
+            try:
+                return croniter.match(self.cron_expression, now)
+            except Exception:
+                logger.warning("Invalid cron_expression %r on job %s, treating as never due", self.cron_expression, self.id)
+                return False
+        return self.hour == now.hour and self.minute == now.minute
 
     def to_public_dict(self) -> dict:
         d = asdict(self)
@@ -83,7 +120,10 @@ class CronStore:
         return sorted(self._jobs.values(), key=lambda j: (j.hour, j.minute))
 
     def create(self, name: str, description: str, hour: int, minute: int,
-               action_type: ActionType, action_payload: dict) -> CronJob:
+               action_type: ActionType, action_payload: dict,
+               cron_expression: Optional[str] = None) -> CronJob:
+        if cron_expression:
+            croniter(cron_expression)  # raises ValueError on bad syntax -- fail at creation, not at every tick
         job = CronJob(
             id=uuid.uuid4().hex[:12],
             name=name,
@@ -92,6 +132,7 @@ class CronStore:
             minute=minute,
             action_type=action_type,
             action_payload=action_payload,
+            cron_expression=cron_expression,
         )
         self._jobs[job.id] = job
         self._save()
@@ -121,13 +162,14 @@ class CronStore:
         self._save()
 
     def due_jobs(self, now: datetime) -> list[CronJob]:
-        """Jobs whose hour/minute matches right now and haven't already
-        fired in this exact minute (checked via last_run)."""
+        """Jobs due right now (real cron-expression match if set, else the
+        simple daily hour/minute) that haven't already fired in this exact
+        minute (checked via last_run)."""
         due = []
         for job in self._jobs.values():
             if not job.enabled:
                 continue
-            if job.hour != now.hour or job.minute != now.minute:
+            if not job.is_due(now):
                 continue
             if job.last_run:
                 last = datetime.fromisoformat(job.last_run)

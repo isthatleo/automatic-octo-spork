@@ -11,6 +11,7 @@ This module provides:
 import json
 import logging
 import hashlib
+import os
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -58,14 +59,12 @@ class MemoryNode:
 
 class SimpleEmbedding:
     """
-    Simple embedding system using TF-IDF-like approach.
-
-    In production, would use:
-    - OpenAI embeddings API
-    - Sentence transformers
-    - Other ML models
-
-    For now: keyword-based embedding for fast iteration
+    Hashed-bag-of-words fallback -- only used if sentence-transformers isn't
+    importable or its model fails to load (e.g. no internet on first run to
+    fetch weights). Real semantic similarity lives in SentenceTransformerEmbedding
+    below; this exists purely so memory search degrades to "still works, just
+    keyword-ish" instead of crashing, same tradeoff already made everywhere
+    else in this codebase (NeuTTS -> Pyttsx3, Claude -> fallback chain, etc.).
     """
 
     def __init__(self, vocab_size: int = 1000):
@@ -98,6 +97,14 @@ class SimpleEmbedding:
 
     def similarity(self, emb1: List[float], emb2: List[float]) -> float:
         """Calculate cosine similarity between two embeddings"""
+        if len(emb1) != len(emb2):
+            # A memory saved under a different embedding engine (e.g. before
+            # this machine had sentence-transformers available) has a
+            # different vector length -- zip() would silently truncate to
+            # the shorter one and produce a meaningless score instead of
+            # erroring, so treat it as simply unrelated rather than trusting
+            # a comparison that was never valid.
+            return 0.0
         dot_product = sum(a * b for a, b in zip(emb1, emb2))
         norm1 = sum(a * a for a in emb1) ** 0.5
         norm2 = sum(b * b for b in emb2) ** 0.5
@@ -106,6 +113,69 @@ class SimpleEmbedding:
             return 0.0
 
         return dot_product / (norm1 * norm2)
+
+
+class SentenceTransformerEmbedding:
+    """Real semantic embeddings via sentence-transformers (all-MiniLM-L6-v2:
+    22M params, 384-dim, fast enough on CPU for single short texts -- this
+    replaces SimpleEmbedding's hashed-bag-of-words, which could only ever
+    match on literal shared words, never actual meaning ("what's my trading
+    performance" would never match a memory saying "I closed the EUR/USD
+    position for a profit" -- no words in common, same meaning).
+
+    Same embed()/similarity() interface as SimpleEmbedding, so MemoryGraph
+    doesn't need to know which one it's using. Lazy-loaded (the model isn't
+    fetched/loaded until the first real .embed() call) -- see
+    main_new.py's _prewarm_memory_embeddings for why that first call is
+    pre-warmed at startup instead of stalling a user's first real message.
+    """
+
+    MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+    def __init__(self):
+        self._model = None
+
+    def _ensure_loaded(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+
+            logger.info("Loading memory embedding model (%s)...", self.MODEL_NAME)
+            self._model = SentenceTransformer(self.MODEL_NAME)
+            logger.info("Memory embedding model loaded.")
+        return self._model
+
+    def embed(self, text: str) -> List[float]:
+        model = self._ensure_loaded()
+        # normalize_embeddings=True means the vectors are already unit-length,
+        # so cosine similarity below is just a dot product -- no need to
+        # recompute norms on every comparison.
+        vector = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
+        return vector.tolist()
+
+    def similarity(self, emb1: List[float], emb2: List[float]) -> float:
+        if len(emb1) != len(emb2):
+            return 0.0  # see SimpleEmbedding.similarity's comment on why
+        return sum(a * b for a, b in zip(emb1, emb2))
+
+
+def _create_embedding_engine():
+    """sentence-transformers by default; falls back to the hashed-bag-of-words
+    engine if the package or its model genuinely can't load (e.g. no network
+    on a first run with no cached weights) -- degrades gracefully rather than
+    taking memory search down entirely."""
+    backend = os.getenv("MEMORY_EMBEDDING_BACKEND", "sentence-transformers").lower()
+    if backend == "simple":
+        return SimpleEmbedding()
+    try:
+        import sentence_transformers  # noqa: F401 -- just checking importability here
+
+        return SentenceTransformerEmbedding()
+    except Exception as e:
+        logger.warning(
+            "sentence-transformers unavailable (%s) -- memory search falling back "
+            "to keyword-based similarity instead of real semantic matching.", e,
+        )
+        return SimpleEmbedding()
 
 
 class MemoryGraph:
@@ -122,7 +192,7 @@ class MemoryGraph:
     def __init__(self, storage_path: str = "data/memory_graph.json"):
         self.storage_path = storage_path
         self.nodes: Dict[str, MemoryNode] = {}
-        self.embedding_engine = SimpleEmbedding()
+        self.embedding_engine = _create_embedding_engine()
         self._load_from_disk()
         logger.info(f"MemoryGraph initialized with {len(self.nodes)} existing memories")
 
@@ -177,26 +247,30 @@ class MemoryGraph:
 
         return node
 
-    def query(self, query_text: str, top_k: int = 10, threshold: float = 0.3) -> List[MemoryNode]:
-        """
-        Find memories similar to query.
-
-        Returns top_k most similar memories above threshold.
-        """
+    def query_with_scores(self, query_text: str, top_k: int = 10, threshold: float = 0.3) -> List[Tuple[MemoryNode, float]]:
+        """Same real semantic search as query(), but also returns each
+        result's similarity score -- used by memory/extensions.py's
+        _SemanticRetriever (the /memory/search REST path), which used to
+        run a completely separate token-overlap scorer instead of this
+        same real embedding-based search."""
         query_embedding = self.embedding_engine.embed(query_text)
 
-        # Calculate similarities
         similarities = []
         for node_id, node in self.nodes.items():
             similarity = self.embedding_engine.similarity(query_embedding, node.embedding)
             if similarity >= threshold:
                 similarities.append((node_id, similarity, node))
 
-        # Sort by similarity (descending)
         similarities.sort(key=lambda x: x[1], reverse=True)
+        return [(node, score) for _, score, node in similarities[:top_k]]
 
-        # Return top_k nodes
-        results = [node for _, _, node in similarities[:top_k]]
+    def query(self, query_text: str, top_k: int = 10, threshold: float = 0.3) -> List[MemoryNode]:
+        """
+        Find memories similar to query.
+
+        Returns top_k most similar memories above threshold.
+        """
+        results = [node for node, _score in self.query_with_scores(query_text, top_k=top_k, threshold=threshold)]
 
         logger.debug(f"Query returned {len(results)} memories")
         return results

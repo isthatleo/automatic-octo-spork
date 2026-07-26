@@ -20,7 +20,14 @@ class _MemorySearchResult:
         }
 
 
-class _KeywordRetriever:
+class _SemanticRetriever:
+    """Was _KeywordRetriever -- ran its own separate token-overlap scorer
+    completely independent of MemoryGraph's own (now real, embedding-based)
+    query() method, so /memory/search and a direct graph.query() call could
+    disagree about what's relevant for the exact same question. Now a thin
+    wrapper over graph.query_with_scores(), the same real semantic search
+    used everywhere else -- one search behavior, not two."""
+
     def __init__(self, graph) -> None:
         self.graph = graph
 
@@ -28,35 +35,35 @@ class _KeywordRetriever:
         q = str(query or "").strip()
         if not q:
             return []
-        results: List[_MemorySearchResult] = []
-        seen: set[str] = set()
-        tokens = [t for t in [tok.lower() for tok in q.split()] if len(t) > 2]
+        query_with_scores = getattr(self.graph, "query_with_scores", None)
+        if query_with_scores is None:
+            return []
+        try:
+            hits = query_with_scores(q, top_k=max(top_k, 1), threshold=0.2)
+        except Exception:
+            return []
 
-        nodes = list(getattr(self.graph, "nodes", {}).values())
-        for node in nodes:
+        results: List[_MemorySearchResult] = []
+        for node, score in hits:
             text = str(getattr(node, "content", "") or "")
             if not text:
                 continue
-            low = text.lower()
-            matches = sum(len(tok) for tok in tokens if tok in low)
-            if not matches:
-                continue
-            node_id = str(getattr(node, "id", text))
-            if node_id in seen:
-                continue
-            seen.add(node_id)
             mem_type = getattr(getattr(node, "type", None), "value", None) or getattr(node, "type", None)
-            score = 0.1 + 0.9 * min(matches / max(len(tokens), 1), 1.0)
-            score *= float(getattr(node, "importance", 0.5) or 0.5)
             results.append(
                 _MemorySearchResult(
                     content=text,
-                    score=score,
+                    score=float(score),
                     meta={"source": getattr(node, "metadata", None) or {}, "memory_type": mem_type},
                 )
             )
-        results.sort(key=lambda x: x.score, reverse=True)
-        return results[: max(top_k, 1)]
+        return results
+
+
+# Old name kept as an alias -- nothing outside this file should construct
+# either directly (both are wired up via _extend_memory_manager below), but
+# this avoids breaking anything that imported the old name during the
+# transition.
+_KeywordRetriever = _SemanticRetriever
 
 
 def _extend_memory_manager(manager_class) -> None:

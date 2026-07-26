@@ -962,10 +962,14 @@ class SynthesizeRequest(BaseModel):
 class CronJobCreateRequest(BaseModel):
     name: str
     description: str = ""
-    hour: int
-    minute: int
-    action_type: str  # "telegram_message" | "agent_task"
+    hour: int = 0
+    minute: int = 0
+    action_type: str  # "telegram_message" | "agent_task" | "run_skill" | "terminal_command"
     action_payload: Dict[str, Any] = {}
+    # Real cron expression (e.g. "*/15 * * * *") -- takes priority over
+    # hour/minute when set. hour/minute stay required-by-default (0/0) for
+    # backward compatibility with any existing caller still only sending those.
+    cron_expression: Optional[str] = None
 
 class WebhookCreateRequest(BaseModel):
     url: str
@@ -1727,15 +1731,28 @@ async def list_cron_jobs():
 
 @app.post("/cron/jobs")
 async def create_cron_job(req: CronJobCreateRequest):
-    if not (0 <= req.hour <= 23 and 0 <= req.minute <= 59):
-        raise HTTPException(status_code=400, detail="hour must be 0-23 and minute 0-59")
-    if req.action_type not in ("telegram_message", "agent_task"):
-        raise HTTPException(status_code=400, detail="action_type must be telegram_message or agent_task")
+    if req.cron_expression:
+        try:
+            from croniter import croniter
+            croniter(req.cron_expression)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid cron_expression: {e}")
+    elif not (0 <= req.hour <= 23 and 0 <= req.minute <= 59):
+        raise HTTPException(status_code=400, detail="hour must be 0-23 and minute 0-59 (or set cron_expression)")
+    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command"):
+        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, or terminal_command")
     if req.action_type == "telegram_message" and not req.action_payload.get("text"):
         raise HTTPException(status_code=400, detail="telegram_message jobs need action_payload.text")
     if req.action_type == "agent_task" and not req.action_payload.get("agent_key"):
         raise HTTPException(status_code=400, detail="agent_task jobs need action_payload.agent_key")
-    job = cron_store.create(req.name, req.description, req.hour, req.minute, req.action_type, req.action_payload)
+    if req.action_type == "run_skill" and not req.action_payload.get("skill_name"):
+        raise HTTPException(status_code=400, detail="run_skill jobs need action_payload.skill_name")
+    if req.action_type == "terminal_command" and not req.action_payload.get("command"):
+        raise HTTPException(status_code=400, detail="terminal_command jobs need action_payload.command")
+    job = cron_store.create(
+        req.name, req.description, req.hour, req.minute, req.action_type, req.action_payload,
+        cron_expression=req.cron_expression,
+    )
     return {"success": True, "job": job.to_public_dict()}
 
 
@@ -2446,6 +2463,7 @@ async def startup_event():
     asyncio.create_task(_cron_execution_loop())
     asyncio.create_task(_economic_calendar_loop())
     asyncio.create_task(_prewarm_tts())
+    asyncio.create_task(_prewarm_memory_embeddings())
 
 
 async def _prewarm_tts() -> None:
@@ -2459,6 +2477,22 @@ async def _prewarm_tts() -> None:
         logger.info("TTS backend pre-warmed.")
     except Exception as e:
         logger.warning("TTS pre-warm failed (non-fatal, will retry on first real request): %s", e)
+
+
+async def _prewarm_memory_embeddings() -> None:
+    """SentenceTransformerEmbedding's model download+load (memory/graph.py)
+    is a real, potentially multi-second blocking call on its first use --
+    since MemoryGraph/MemoryManager's interface is synchronous throughout
+    the codebase (not worth an async rewrite of every call site for what's
+    normally a ~10-50ms embed() once warm), run that one first call here in
+    an executor at startup instead of letting a user's first memory-touching
+    message pay for it."""
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, memory_manager.graph.embedding_engine.embed, "Systems online.")
+        logger.info("Memory embedding model pre-warmed.")
+    except Exception as e:
+        logger.warning("Memory embedding pre-warm failed (non-fatal): %s", e)
 
 
 # Local time, 24h format -- override in .env if 07:30 isn't the right moment.
@@ -2500,9 +2534,11 @@ async def _cron_execution_loop() -> None:
     """Checks user-created cron_store jobs every 30s and actually fires
     whichever are due -- this is what makes the Cron Jobs page's "create
     job" button real instead of a form that writes to a list nothing ever
-    reads. Two real action types: push a Telegram message, or run a real
-    agent task (optionally pushing its result to Telegram too, same as
-    _run_long_agent_task's "notify when done" pattern)."""
+    reads. Four real action types: push a Telegram message, run a real
+    agent task, run a real skill's procedure (optionally with tool access),
+    or run a real shell command (optionally with tool access) -- optionally
+    pushing the result to Telegram too, same as _run_long_agent_task's
+    "notify when done" pattern."""
     while True:
         await asyncio.sleep(30)
         try:
@@ -2527,11 +2563,71 @@ async def _cron_execution_loop() -> None:
                             await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": result})
                         else:
                             cron_store.mark_run(job.id, "skipped: agent service not ready")
+                    elif job.action_type == "run_skill":
+                        summary = await _run_cron_skill(job)
+                        cron_store.mark_run(job.id, summary)
+                        if telegram_notifier.status["available"]:
+                            await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
+                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
+                    elif job.action_type == "terminal_command":
+                        summary = await _run_cron_terminal_command(job)
+                        cron_store.mark_run(job.id, summary)
+                        if telegram_notifier.status["available"]:
+                            await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
+                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
                 except Exception as e:
                     logger.exception("Cron job %s failed: %s", job.name, e)
                     cron_store.mark_run(job.id, f"error: {e}")
         except Exception:
             logger.exception("Cron execution loop tick failed")
+
+
+async def _run_cron_skill(job: "cron_store.CronJob") -> str:
+    """Runs a skill's real instructions on a schedule -- e.g. a nightly
+    "check git status and report" job using the git-and-github skill.
+    Goes through Claude's real tool-use loop (file/terminal tools) so the
+    skill can actually act, not just narrate what it would do."""
+    skill_name = job.action_payload.get("skill_name", "")
+    extra_context = job.action_payload.get("context", "")
+    skill = skill_loader.get_skill(skill_name)
+    if skill is None:
+        return f"Unknown skill: {skill_name!r}"
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return "Cannot run skill: ANTHROPIC_API_KEY not configured (tool-use requires Claude)"
+
+    prompt = (
+        f"{BASE_SYSTEM_PROMPT}\n\nA scheduled job triggered this skill -- follow its "
+        f"instructions and actually do the work, don't just describe it.\n\n"
+        f"### Skill: {skill.name}\n{skill.instructions}\n\n"
+        f"Additional context for this run: {extra_context or '(none)'}"
+    )
+    claude = AnthropicLLM()
+    resp = await asyncio.wait_for(
+        claude.generate_with_tools(
+            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL], _execute_file_tool, max_tokens=1024
+        ),
+        timeout=120.0,
+    )
+    return _enforce_sir(resp)[:800]
+
+
+async def _run_cron_terminal_command(job: "cron_store.CronJob") -> str:
+    """Runs a real shell command on a schedule, through the exact same
+    safe-command-allowlist-or-approval gate every other terminal_tool caller
+    goes through -- a scheduled job doesn't get to skip approval for a
+    destructive command just because a human isn't watching in real time."""
+    command = job.action_payload.get("command", "")
+    cwd = job.action_payload.get("cwd")
+    if not terminal_tool._is_safe_command(command):
+        approved = await telegram_notifier.request_approval(
+            f"Scheduled job \"{job.name}\" wants to run a command:\n\n{command}", timeout=120.0
+        )
+        if not approved:
+            return "Not approved: command requires explicit approval and none was given in time"
+    result = await terminal_tool.execute_command(command, cwd=cwd)
+    if result.get("success"):
+        return (result.get("stdout") or "(no output)")[:800]
+    return f"Command failed: {result.get('error') or result.get('stderr') or 'unknown error'}"
 
 
 async def _economic_calendar_loop() -> None:

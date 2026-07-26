@@ -33,6 +33,18 @@ llama-cpp-python>=0.3.0
 neucodec>=0.0.5
 phonemizer>=3.2.0
 soundfile>=0.13.0
+
+# Real semantic memory search (memory/graph.py's SentenceTransformerEmbedding)
+# -- replaces the old hashed-bag-of-words placeholder, which could only ever
+# match literal shared words, never actual meaning. all-MiniLM-L6-v2 (22M
+# params) is small enough to run fast on CPU; torch is already required above.
+sentence-transformers>=3.0.0
+
+# Real cron-expression scheduling (cron_store.py's CronJob.cron_expression /
+# is_due) -- replaces the old fixed-daily-hour/minute-only scheduler so jobs
+# can run e.g. "every 15 minutes" or "9am weekdays", not just once a day.
+croniter>=2.0.0
+
 faster-whisper>=0.9.0
 pyttsx3>=2.90
 python-socketio>=5.9.0
