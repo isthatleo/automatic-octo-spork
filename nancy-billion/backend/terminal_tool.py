@@ -64,16 +64,31 @@ def _is_safe_command(command: str) -> bool:
     return any(normalized.startswith(prefix) for prefix in TERMINAL_SAFE_PREFIXES)
 
 
-async def execute_command(command: str, cwd: str | None = None, timeout: float = DEFAULT_TIMEOUT_S) -> Dict[str, Any]:
+async def execute_command(command: str, cwd: str | None = None, timeout: float = DEFAULT_TIMEOUT_S, use_egress_proxy: bool = False) -> Dict[str, Any]:
     """Run `command` in a real shell and return its stdout/stderr/exit code.
     No sandboxing -- same "no folder sandbox, gate destructive action behind
-    human approval" choice file_access.py already made for this machine."""
+    human approval" choice file_access.py already made for this machine.
+
+    use_egress_proxy=True routes the subprocess's own HTTP(S) traffic
+    through egress_proxy.py's real TLS-intercepting allowlist (see that
+    module) via HTTP_PROXY/HTTPS_PROXY env vars -- an opt-in extra
+    isolation layer for a command whose network access should be bounded to
+    a real, enforced host allowlist, on top of the existing approval gate."""
+    env = None
+    if use_egress_proxy:
+        import egress_proxy
+        if egress_proxy._master is None:
+            return {"success": False, "error": "egress_proxy is not running -- start it first"}
+        proxy_url = f"http://127.0.0.1:{egress_proxy.DEFAULT_PORT}"
+        env = {**os.environ, "HTTP_PROXY": proxy_url, "HTTPS_PROXY": proxy_url}
+
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd or None,
+            env=env,
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -118,6 +133,10 @@ TERMINAL_TOOLS = [
             "properties": {
                 "command": {"type": "string", "description": "The full shell command to run."},
                 "cwd": {"type": "string", "description": "Optional working directory to run it from."},
+                "use_egress_proxy": {
+                    "type": "boolean",
+                    "description": "If true, routes this command's own network access through the real TLS-intercepting egress allowlist proxy (must already be running).",
+                },
             },
             "required": ["command"],
         },

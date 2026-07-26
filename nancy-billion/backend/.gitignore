@@ -18,3 +18,7 @@ scripts/
 # a snapshot of data/ and skills/, not source; created automatically on
 # first use, and even redacted-.env-included they shouldn't be committed.
 backups/
+
+# User-dropped-in lifecycle hook scripts (lifecycle_hooks.py) -- personal
+# automation, not source, same as scripts/ above.
+hooks/

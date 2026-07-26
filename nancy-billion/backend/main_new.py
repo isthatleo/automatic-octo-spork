@@ -80,6 +80,33 @@ from channels.home_assistant import HOME_ASSISTANT_TOOLS
 from providers.spotify_tool import SPOTIFY_TOOLS, handle_spotify_tool
 from memory import wiki_store, commitments
 import evidence_ledger
+import lifecycle_hooks
+from debug_share import share_debug_report
+import node_host
+import approval_policy
+import egress_proxy
+import coverage_proxy
+
+NODE_TOOLS = [
+    {
+        "name": "node_execute_command",
+        "description": (
+            "Run a real shell command on a paired second machine (a 'node') instead of this "
+            "computer. Requires the node to already be registered. Gated by a real allow-once/"
+            "allow-always/deny policy -- first use of a new command pattern on a node requires the "
+            "user's explicit yes/no approval on their phone."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "string"},
+                "command": {"type": "string"},
+                "cwd": {"type": "string"},
+            },
+            "required": ["node_id", "command"],
+        },
+    },
+]
 
 ensure_bootstrap_script()
 
@@ -821,6 +848,11 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
     if name == "spotify_control":
         return await handle_spotify_tool(tool_input)
 
+    if name == "node_execute_command":
+        return await node_host.dispatch_command(
+            tool_input.get("node_id", ""), tool_input.get("command", ""), cwd=tool_input.get("cwd"),
+        )
+
     if name in ("take_screenshot", "get_screen_size"):
         loop = asyncio.get_event_loop()
         fn = computer_use_tool.take_screenshot if name == "take_screenshot" else computer_use_tool.get_screen_size
@@ -854,7 +886,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             )
             if not approved:
                 return {"success": False, "error": "User did not approve this command."}
-        return await terminal_tool.execute_command(command, cwd=tool_input.get("cwd"))
+        return await terminal_tool.execute_command(command, cwd=tool_input.get("cwd"), use_egress_proxy=tool_input.get("use_egress_proxy", False))
 
     resolved_write_path: Optional[Path] = None
     if name == "write_file":
@@ -880,6 +912,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
     if name == "list_directory":
         return file_access.list_directory(tool_input["path"])
     if name == "write_file":
+        await lifecycle_hooks.fire_hook("pre_write", {"path": str(resolved_write_path)})
         result = file_access.write_file(str(resolved_write_path), tool_input["content"])
         evidence_ledger.record_evidence("write_file", str(resolved_write_path), result.get("success", False))
         return result
@@ -1019,7 +1052,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             resp = await asyncio.wait_for(
                 claude.generate_with_tools(
                     prompt,
-                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS,
+                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS,
                     _file_tool_executor,
                     max_tokens=1024,
                 ),
@@ -2833,6 +2866,116 @@ async def list_evidence(limit: int = 50, kind: Optional[str] = None):
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle hooks -- see lifecycle_hooks.py.
+# ---------------------------------------------------------------------------
+@app.get("/hooks", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_hooks_route():
+    return {"success": True, **lifecycle_hooks.list_hooks()}
+
+
+@app.post("/hooks/{event}/test", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def test_hook_route(event: str):
+    return await lifecycle_hooks.test_hook(event)
+
+
+# ---------------------------------------------------------------------------
+# Debug report sharing -- see debug_share.py.
+# ---------------------------------------------------------------------------
+@app.post("/debug/share", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def share_debug_report_route(local_only: bool = False):
+    return await share_debug_report(local_only=local_only)
+
+
+# ---------------------------------------------------------------------------
+# Paired nodes -- see node_host.py / approval_policy.py / node_agent_stub.py.
+# ---------------------------------------------------------------------------
+class NodeRegisterRequest(BaseModel):
+    node_id: str
+    base_url: str
+    shared_secret: str
+
+
+class NodePolicyRequest(BaseModel):
+    command: str
+    decision: str
+
+
+@app.get("/nodes", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_nodes_route():
+    return {"success": True, "nodes": node_host.list_nodes()}
+
+
+@app.post("/nodes", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def register_node_route(req: NodeRegisterRequest):
+    node_host.register_node(req.node_id, req.base_url, req.shared_secret)
+    return {"success": True}
+
+
+@app.delete("/nodes/{node_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def remove_node_route(node_id: str):
+    ok = node_host.remove_node(node_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="node not found")
+    return {"success": True}
+
+
+@app.get("/nodes/{node_id}/health", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def node_health_route(node_id: str):
+    return await node_host.check_node_health(node_id)
+
+
+@app.get("/nodes/{node_id}/policies", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_node_policies_route(node_id: str):
+    return {"success": True, "policies": approval_policy.list_policies(node_id)}
+
+
+@app.post("/nodes/{node_id}/policies", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def set_node_policy_route(node_id: str, req: NodePolicyRequest):
+    node_host.set_node_policy(node_id, req.command, req.decision)
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# Egress proxy + coverage report -- see egress_proxy.py / coverage_proxy.py.
+# ---------------------------------------------------------------------------
+@app.post("/egress-proxy/start", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def start_egress_proxy_route():
+    return await egress_proxy.start_egress_proxy()
+
+
+@app.post("/egress-proxy/stop", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def stop_egress_proxy_route():
+    return await egress_proxy.stop_egress_proxy()
+
+
+@app.get("/egress-proxy/status", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def egress_proxy_status_route():
+    return {"success": True, **egress_proxy.proxy_status()}
+
+
+@app.post("/egress-proxy/install-ca", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def install_egress_ca_route():
+    approved = await telegram_notifier.request_approval(
+        "Nancy wants to install a local root CA certificate into your Windows Trusted Root store "
+        "(needed for the egress-proxy's TLS interception). This is a system-trust change.",
+        timeout=120.0,
+    )
+    if not approved:
+        raise HTTPException(status_code=403, detail="User did not approve installing the CA certificate.")
+    return egress_proxy.install_ca_certificate()
+
+
+@app.post("/egress-proxy/coverage/enable", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def enable_coverage_route():
+    return coverage_proxy.enable_coverage_tracking()
+
+
+@app.get("/egress-proxy/coverage/report", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def coverage_report_route():
+    return coverage_proxy.generate_coverage_report()
+
+
+# ---------------------------------------------------------------------------
 # REST routes - Missions (AI Workflow Orchestrator)
 #
 # A mission is a real, persisted entity (data/missions.json - see
@@ -3477,7 +3620,7 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
     claude = AnthropicLLM()
     resp = await asyncio.wait_for(
         claude.generate_with_tools(
-            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS, _execute_file_tool, max_tokens=1024
+            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS, _execute_file_tool, max_tokens=1024
         ),
         timeout=120.0,
     )

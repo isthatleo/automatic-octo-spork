@@ -133,3 +133,6 @@ cryptography>=42.0
 # alternative to MemoryGraph's brute-force cosine scan, enabled via
 # MEMORY_BACKEND=lancedb. Pulls in pyarrow as a transitive dependency.
 lancedb>=0.15
+
+# Real local TLS-intercepting egress proxy (egress_proxy.py / coverage_proxy.py).
+mitmproxy>=11.0
