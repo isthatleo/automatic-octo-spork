@@ -51,6 +51,17 @@ croniter>=2.0.0
 # real JSON-RPC framing/session lifecycle, not a hand-rolled approximation.
 mcp>=1.0.0
 
+# Real web-page fetching for Claude's tool-use loop (web_tool.py) -- parses
+# real HTML into readable text (script/style/nav stripped), no paid
+# browser-automation provider needed for a simple "read this page" tool.
+beautifulsoup4>=4.12.0
+
+# Real local computer-use: screenshot + mouse/keyboard control of this
+# machine (computer_use_tool.py). Every action requires a live Telegram
+# approval -- see that file's module docstring for why this is the one
+# capability with no safe-by-default subset.
+pyautogui>=0.9.54
+
 faster-whisper>=0.9.0
 pyttsx3>=2.90
 python-socketio>=5.9.0

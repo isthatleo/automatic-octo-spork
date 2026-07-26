@@ -14,6 +14,7 @@ import { ConsoleBar } from '@/components/nancy/console-bar'
 import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
 import { LyricsTranscript } from '@/components/nancy/lyrics-transcript'
 import { WorkflowOrchestratorPanel } from '@/components/nancy/workflow-orchestrator'
+import { CanvasPanel } from '@/components/nancy/canvas-panel'
 import {
   SessionsPanel, ChannelsPanel, InstancesPanel, CronPanel, SkillsPanel, ModelsPanel,
   KeysPanel, ConfigPanel, UsagePanel, PairingPanel, ProfilesPanel, PluginsPanel,
@@ -33,6 +34,7 @@ import {
   Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, Newspaper, Kanban, X, Mic, MicOff,
   Keyboard, ChevronDown, MessageSquare, PanelLeftClose, PanelLeftOpen, Send, Server, Clock3,
   FileClock, Sparkles, Cpu, Key, Settings2, BarChart3, Link2, User, PlugZap, Wrench, Webhook, BookOpen,
+  StickyNote,
 } from 'lucide-react'
 
 import { DocsHelpPanel } from '@/components/nancy/docs-panel'
@@ -54,6 +56,7 @@ const NAV_GROUPS: { group: string; items: { key: PanelKey; label: string; icon: 
     { key: 'core', label: 'AI Core', icon: Brain },
     { key: 'agents', label: 'Agents', icon: Bot },
     { key: 'kanban', label: 'Kanban', icon: Kanban },
+    { key: 'canvas', label: 'Canvas', icon: StickyNote },
     { key: 'skills', label: 'Skills', icon: Sparkles },
     { key: 'models', label: 'Models', icon: Cpu },
   ] },
@@ -1011,6 +1014,7 @@ function WorkspaceLayout({
               {panel === 'plugins' && <PluginsPanel onNavigate={() => onNav('agents')} />}
               {panel === 'mcp' && <McpPanel onNavigate={() => onNav('core')} />}
               {panel === 'webhooks' && <WebhooksPanel />}
+              {panel === 'canvas' && <CanvasPanel />}
               {panel === 'docs' && <DocsHelpPanel />}
             </div>
           )}

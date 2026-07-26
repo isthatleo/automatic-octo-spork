@@ -224,10 +224,23 @@ class AnthropicLLM(LLMBackend):
                     result = await tool_executor(block.name, block.input)
                 except Exception as e:
                     result = {"success": False, "error": str(e)}
+                # Real vision support for tools that need Claude to actually
+                # SEE something (take_screenshot) rather than just read a
+                # text description of it -- an executor signals this with a
+                # reserved `_image_base64` key; every other tool's result is
+                # untouched, still a single JSON string, exactly as before.
+                image_b64 = result.pop("_image_base64", None) if isinstance(result, dict) else None
+                if image_b64:
+                    content: Any = [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_b64}},
+                        {"type": "text", "text": json.dumps(result)},
+                    ]
+                else:
+                    content = json.dumps(result)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": json.dumps(result),
+                    "content": content,
                 })
             messages.append({"role": "user", "content": tool_results})
 

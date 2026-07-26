@@ -10,7 +10,7 @@ export interface LogEntry {
 export type PanelKey =
   | 'overview' | 'map' | 'core' | 'agents' | 'system' | 'projects' | 'market' | 'news' | 'media' | 'kanban'
   | 'sessions' | 'channels' | 'instances' | 'cron' | 'skills' | 'models' | 'keys' | 'config' | 'usage'
-  | 'pairing' | 'profiles' | 'plugins' | 'mcp' | 'webhooks' | 'docs'
+  | 'pairing' | 'profiles' | 'plugins' | 'mcp' | 'webhooks' | 'docs' | 'canvas'
 
 export interface AgentInfo {
   key: string
@@ -198,6 +198,17 @@ export type DomainEventType =
   | 'MISSION_CREATED' | 'MISSION_UPDATED' | 'MISSION_ASSIGNED' | 'MISSION_STARTED'
   | 'MISSION_COMPLETED' | 'MISSION_CANCELLED' | 'MISSION_DELETED'
   | 'AGENT_ONLINE' | 'AGENT_OFFLINE' | 'AGENT_TASK_STARTED' | 'AGENT_TASK_FINISHED'
+  | 'CANVAS_ITEM_ADDED' | 'CANVAS_ITEM_UPDATED' | 'CANVAS_ITEM_REMOVED'
+
+export interface CanvasItem {
+  id: string
+  type: 'note' | 'link' | 'code' | 'image'
+  title: string
+  content: string
+  language: string | null
+  pinned: boolean
+  created_at: number
+}
 
 export interface DomainEvent {
   type: DomainEventType
@@ -208,5 +219,7 @@ export interface DomainEvent {
   task_type?: string
   success?: boolean
   error?: string
+  item?: CanvasItem
+  item_id?: string
   [key: string]: unknown
 }

@@ -63,6 +63,10 @@ import skill_loader
 from mcp_client import mcp_manager, plugin_store
 from moa import run_moa
 from inbound_webhooks_store import inbound_webhook_store
+from canvas_store import canvas_store
+from web_tool import fetch_url, WEB_TOOLS
+import computer_use_tool
+from computer_use_tool import COMPUTER_USE_TOOLS, ACTION_TOOLS as COMPUTER_ACTION_TOOLS
 from tts import tts_backend
 from neu_tts import NeuTTSBackend, USER_REF_WAV, USER_REF_TXT
 from tools import get_tools
@@ -569,7 +573,13 @@ _WANTS_TOOLS_RE = re.compile(
     r"run (a |the |this )?command|execute|shell|terminal|"
     r"git (status|log|diff|commit|push|pull|branch|checkout|clone)|"
     r"(check|list|show) (my )?(repo|repository|processes|packages)|"
-    r"install .*(package|dependency|library))\b",
+    r"install .*(package|dependency|library)|"
+    r"(fetch|read|open|check|look at|browse|pull up) (this |that |the )?(url|link|page|website|site)|"
+    r"https?://|"
+    r"(take|grab) (a |)?screenshot|screen ?shot|"
+    r"click (the|on)|move (the |)?mouse|type (this|that|the following)|press (the |)?\w+ key|"
+    r"control (my|the) (screen|computer|mouse|keyboard)|"
+    r"(pin|post|save|add) (this|that|it) to (the |your )?canvas|canvas)\b",
     re.IGNORECASE,
 )
 
@@ -621,10 +631,65 @@ CREATE_SUBAGENT_TOOL: Dict[str, Any] = {
     },
 }
 
+CANVAS_TOOL: Dict[str, Any] = {
+    "name": "post_to_canvas",
+    "description": (
+        "Pin something to the shared visual canvas for the user to see -- a note, a link, a code "
+        "snippet, or a finding worth keeping visible beyond this chat turn. Broadcasts live to every "
+        "connected tab. Read-only for the user (they see it appear); no approval needed to post."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["note", "link", "code", "image"]},
+            "title": {"type": "string"},
+            "content": {"type": "string", "description": "note text, URL, code text, or base64 image data"},
+            "language": {"type": "string", "description": "for type=='code' only, e.g. 'python'"},
+        },
+        "required": ["type", "title", "content"],
+    },
+}
+
 
 async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
     if mcp_manager.is_plugin_tool(name):
         return await mcp_manager.call_tool(name, tool_input)
+
+    if name == "post_to_canvas":
+        try:
+            item = canvas_store.create(
+                tool_input.get("type", "note"), tool_input.get("title", ""),
+                tool_input.get("content", ""), tool_input.get("language"),
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        await event_bus.publish("CANVAS_ITEM_ADDED", {"item": item.to_public_dict()})
+        return {"success": True, "item_id": item.id}
+
+    if name == "fetch_url":
+        return await fetch_url(tool_input.get("url", ""))
+
+    if name in ("take_screenshot", "get_screen_size"):
+        loop = asyncio.get_event_loop()
+        fn = computer_use_tool.take_screenshot if name == "take_screenshot" else computer_use_tool.get_screen_size
+        return await loop.run_in_executor(None, fn)
+
+    if name in COMPUTER_ACTION_TOOLS:
+        description = {
+            "click_screen": f"click the screen at ({tool_input.get('x')}, {tool_input.get('y')})",
+            "move_mouse": f"move the mouse to ({tool_input.get('x')}, {tool_input.get('y')})",
+            "type_text": f"type: {tool_input.get('text', '')!r}",
+            "press_key": f"press the '{tool_input.get('key')}' key",
+            "scroll_screen": f"scroll by {tool_input.get('amount')}",
+        }[name]
+        approved = await telegram_notifier.request_approval(
+            f"Nancy wants to control your screen: {description}", timeout=120.0
+        )
+        if not approved:
+            return {"success": False, "error": "User did not approve this screen control action."}
+        loop = asyncio.get_event_loop()
+        fn = getattr(computer_use_tool, name)
+        return await loop.run_in_executor(None, lambda: fn(**tool_input))
 
     if name == "create_subagent":
         return await _execute_create_subagent_tool(tool_input)
@@ -778,7 +843,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             resp = await asyncio.wait_for(
                 claude.generate_with_tools(
                     prompt,
-                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL] + mcp_manager.list_plugin_tools(),
+                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS,
                     _execute_file_tool,
                     max_tokens=1024,
                 ),
@@ -1012,6 +1077,12 @@ class InboundWebhookCreateRequest(BaseModel):
     name: str
     action_type: str  # "telegram_message" | "agent_task" | "run_skill" | "terminal_command"
     action_payload: Dict[str, Any] = {}
+
+class CanvasItemCreateRequest(BaseModel):
+    type: str  # "note" | "link" | "code" | "image"
+    title: str
+    content: str
+    language: Optional[str] = None
 
 class SkillCreateRequest(BaseModel):
     name: str
@@ -1923,6 +1994,41 @@ async def receive_inbound_webhook(hook_id: str, request: Request):
 
     inbound_webhook_store.mark_triggered(hook_id, summary)
     return {"success": True, "result": summary}
+
+
+@app.get("/canvas")
+async def list_canvas_items():
+    """Real, persisted shared canvas items (data/canvas.json) -- pinned
+    first, newest first otherwise. Live updates broadcast to every
+    connected tab via CANVAS_ITEM_ADDED/REMOVED/UPDATED (see event_bus)."""
+    return {"success": True, "items": [i.to_public_dict() for i in canvas_store.list()]}
+
+
+@app.post("/canvas", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_canvas_item(req: CanvasItemCreateRequest):
+    try:
+        item = canvas_store.create(req.type, req.title, req.content, req.language)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await event_bus.publish("CANVAS_ITEM_ADDED", {"item": item.to_public_dict()})
+    return {"success": True, "item": item.to_public_dict()}
+
+
+@app.patch("/canvas/{item_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def toggle_canvas_item_pinned(item_id: str, pinned: bool):
+    item = canvas_store.set_pinned(item_id, pinned)
+    if item is None:
+        raise HTTPException(status_code=404, detail="canvas item not found")
+    await event_bus.publish("CANVAS_ITEM_UPDATED", {"item": item.to_public_dict()})
+    return {"success": True, "item": item.to_public_dict()}
+
+
+@app.delete("/canvas/{item_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def delete_canvas_item(item_id: str):
+    if not canvas_store.delete(item_id):
+        raise HTTPException(status_code=404, detail="canvas item not found")
+    await event_bus.publish("CANVAS_ITEM_REMOVED", {"item_id": item_id})
+    return {"success": True}
 
 
 @app.get("/economic-calendar/events")
@@ -2962,7 +3068,7 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
     claude = AnthropicLLM()
     resp = await asyncio.wait_for(
         claude.generate_with_tools(
-            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL] + mcp_manager.list_plugin_tools(), _execute_file_tool, max_tokens=1024
+            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS, _execute_file_tool, max_tokens=1024
         ),
         timeout=120.0,
     )
