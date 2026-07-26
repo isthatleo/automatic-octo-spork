@@ -10,7 +10,7 @@ import { categoryFor, colorFor } from '@/lib/nancy/agent-taxonomy'
 import { onDomainEvent } from '@/lib/nancy/ws-client'
 import { describeDomainEvent, STAGE_LABELS } from '@/lib/nancy/event-descriptions'
 import {
-  listMissions, createMission, updateMission, assignMission, transitionMission,
+  listMissions, createMission, updateMission, assignMission, assignMissionMulti, transitionMission,
   cancelMission, deleteMission, type MissionCreateInput,
 } from '@/lib/nancy/mission-client'
 import type { AgentInfo, Mission, MissionStage } from '@/lib/nancy/types'
@@ -180,10 +180,16 @@ export function WorkflowOrchestratorPanel() {
       if (!res.success) logEvent(`Could not create mission: ${res.detail ?? 'unknown error'}`, 'error')
       return
     }
-    const { assigned_agent, ...rest } = input
+    const { assigned_agent, assigned_agents, ...rest } = input
     const res = await updateMission(existing.id, rest)
     if (!res.success) { logEvent(`Could not update mission: ${res.detail ?? 'unknown error'}`, 'error'); return }
-    if (assigned_agent !== existing.assigned_agent) {
+    const sameList = (a: string[], b: string[]) => a.length === b.length && [...a].sort().every((v, i) => v === [...b].sort()[i])
+    if (assigned_agents && assigned_agents.length > 0) {
+      if (!sameList(assigned_agents, existing.assigned_agents ?? [])) {
+        const assignRes = await assignMissionMulti(existing.id, assigned_agents)
+        if (!assignRes.success) logEvent('Could not update assignment', 'error')
+      }
+    } else if (assigned_agent !== existing.assigned_agent) {
       const assignRes = await assignMission(existing.id, assigned_agent ?? null)
       if (!assignRes.success) logEvent('Could not update assignment', 'error')
     }
@@ -611,7 +617,9 @@ function MissionCard({
 
         <div className="flex items-center justify-between gap-1 text-[0.42rem] text-muted-foreground">
           <span className="flex items-center gap-1.5 truncate">
-            {mission.assigned_agent && (
+            {mission.assigned_agents.length > 0 ? (
+              <span className="flex shrink-0 items-center gap-0.5 text-primary"><Sparkles className="h-2.5 w-2.5" /> {mission.assigned_agents.length} agents (parallel)</span>
+            ) : mission.assigned_agent && (
               <span className={cn('flex shrink-0 items-center gap-0.5', agentOnline && 'text-primary')}><Sparkles className="h-2.5 w-2.5" /> {mission.assigned_agent}</span>
             )}
             {mission.owner && <span className="flex shrink-0 items-center gap-0.5"><Users className="h-2.5 w-2.5" /> {mission.owner}</span>}
@@ -882,6 +890,9 @@ function MissionComposer({
   const [description, setDescription] = useState(mission?.description ?? '')
   const [tagsInput, setTagsInput] = useState(mission?.tags.join(', ') ?? '')
   const [assignedAgent, setAssignedAgent] = useState(mission?.assigned_agent ?? '')
+  const [multiAgentMode, setMultiAgentMode] = useState((mission?.assigned_agents?.length ?? 0) > 0)
+  const [assignedAgents, setAssignedAgents] = useState<string[]>(mission?.assigned_agents ?? [])
+  const toggleAssignedAgent = (key: string) => setAssignedAgents((keys) => (keys.includes(key) ? keys.filter((k) => k !== key) : [...keys, key]))
   const [owner, setOwner] = useState(mission?.owner ?? '')
   const [priority, setPriority] = useState<Mission['priority']>(mission?.priority ?? 'medium')
   const [risk, setRisk] = useState<Mission['risk']>(mission?.risk ?? 'low')
@@ -905,7 +916,8 @@ function MissionComposer({
       title: title.trim(),
       description: description.trim(),
       tags: tagsInput.split(',').map((t) => t.trim()).filter(Boolean),
-      assigned_agent: assignedAgent || null,
+      assigned_agent: multiAgentMode ? null : (assignedAgent || null),
+      assigned_agents: multiAgentMode ? assignedAgents : [],
       owner: owner.trim(),
       priority,
       risk,
@@ -957,12 +969,37 @@ function MissionComposer({
         />
 
         <div className="grid grid-cols-2 gap-2">
-          <label className="flex flex-col gap-1 text-[0.5rem] text-muted-foreground">
-            <span className="flex items-center gap-1"><Bot className="h-3 w-3" /> Assign AI</span>
-            <select value={assignedAgent} onChange={(e) => setAssignedAgent(e.target.value)} className="rounded-lg border border-border bg-background/60 px-2 py-1.5 text-[0.6rem] text-foreground outline-none focus:border-primary/60">
-              <option value="">— unassigned —</option>
-              {agents.map((a) => <option key={a.key} value={a.key}>{a.name} ({a.status})</option>)}
-            </select>
+          <label className="col-span-2 flex flex-col gap-1 text-[0.5rem] text-muted-foreground">
+            <span className="flex items-center justify-between gap-1">
+              <span className="flex items-center gap-1"><Bot className="h-3 w-3" /> Assign AI</span>
+              <button
+                type="button"
+                onClick={() => setMultiAgentMode((v) => !v)}
+                className={cn(
+                  'rounded-full border px-2 py-0.5 text-[0.5rem] transition-colors',
+                  multiAgentMode ? 'border-primary/50 bg-primary/10 text-primary' : 'border-border/60 text-muted-foreground hover:text-foreground',
+                )}
+                title="Run multiple agents in real parallel and synthesize their outputs, instead of a single agent"
+              >
+                Parallel (multi-agent)
+              </button>
+            </span>
+            {multiAgentMode ? (
+              <div className="flex max-h-28 flex-col gap-1 overflow-y-auto rounded-lg border border-border bg-background/60 p-1.5">
+                {agents.length === 0 && <span className="px-1 py-1 text-[0.6rem] opacity-60">No agents online</span>}
+                {agents.map((a) => (
+                  <label key={a.key} className="flex items-center gap-1.5 rounded px-1 py-0.5 text-[0.6rem] text-foreground hover:bg-secondary/40">
+                    <input type="checkbox" checked={assignedAgents.includes(a.key)} onChange={() => toggleAssignedAgent(a.key)} className="accent-primary" />
+                    {a.name} <span className="opacity-50">({a.status})</span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <select value={assignedAgent} onChange={(e) => setAssignedAgent(e.target.value)} className="rounded-lg border border-border bg-background/60 px-2 py-1.5 text-[0.6rem] text-foreground outline-none focus:border-primary/60">
+                <option value="">— unassigned —</option>
+                {agents.map((a) => <option key={a.key} value={a.key}>{a.name} ({a.status})</option>)}
+              </select>
+            )}
           </label>
           <label className="flex flex-col gap-1 text-[0.5rem] text-muted-foreground">
             <span className="flex items-center gap-1"><Users className="h-3 w-3" /> Owner</span>
