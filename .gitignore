@@ -3,3 +3,11 @@
 # real-looking API keys/DB passwords more than once. .env.example and
 # similar template files are unaffected (different filename).
 **/.env
+
+# Vendored/generated content -- never belongs in git history. A stray
+# compiled binary under node_modules once exceeded GitHub's 100MB file
+# limit and blocked every push until history was rewritten to remove it.
+**/node_modules/
+**/__pycache__/
+*.pyc
+**/.next/
