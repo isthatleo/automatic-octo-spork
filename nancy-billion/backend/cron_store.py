@@ -33,7 +33,13 @@ STORE_PATH = Path(__file__).parent / "data" / "cron_jobs.json"
 # allowlist/Telegram-approval split every other caller of that tool goes
 # through (a scheduled job doesn't get to skip approval for a destructive
 # command just because a human isn't watching in real time).
-ActionType = Literal["telegram_message", "agent_task", "run_skill", "terminal_command"]
+# run_script: {"script": str, "no_agent": bool} -- runs a real sandboxed
+# script (see run_script_tool.py); its stdout either IS the delivered
+# message verbatim (no_agent=True, a deterministic watchdog pattern) or
+# gets injected as real collected data into the dispatcher agent's prompt
+# (no_agent=False/default) -- separates deterministic data-collection from
+# the LLM call that turns it into a response, unlike run_skill/agent_task.
+ActionType = Literal["telegram_message", "agent_task", "run_skill", "terminal_command", "run_script"]
 
 
 @dataclass

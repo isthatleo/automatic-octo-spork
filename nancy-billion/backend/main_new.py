@@ -64,6 +64,9 @@ from mcp_client import mcp_manager, plugin_store
 from moa import run_moa
 from inbound_webhooks_store import inbound_webhook_store
 from canvas_store import canvas_store
+from blueprint_catalog import CATALOG as BLUEPRINT_CATALOG, get_blueprint, blueprint_catalog_entry, fill_blueprint, BlueprintFillError
+from skill_bundles import skill_bundle_store
+import run_script_tool
 from web_tool import fetch_url, WEB_TOOLS
 import computer_use_tool
 from computer_use_tool import COMPUTER_USE_TOOLS, ACTION_TOOLS as COMPUTER_ACTION_TOOLS
@@ -1062,7 +1065,7 @@ class CronJobCreateRequest(BaseModel):
     description: str = ""
     hour: int = 0
     minute: int = 0
-    action_type: str  # "telegram_message" | "agent_task" | "run_skill" | "terminal_command"
+    action_type: str  # "telegram_message" | "agent_task" | "run_skill" | "terminal_command" | "run_script"
     action_payload: Dict[str, Any] = {}
     # Real cron expression (e.g. "*/15 * * * *") -- takes priority over
     # hour/minute when set. hour/minute stay required-by-default (0/0) for
@@ -1075,7 +1078,7 @@ class WebhookCreateRequest(BaseModel):
 
 class InboundWebhookCreateRequest(BaseModel):
     name: str
-    action_type: str  # "telegram_message" | "agent_task" | "run_skill" | "terminal_command"
+    action_type: str  # "telegram_message" | "agent_task" | "run_skill" | "terminal_command" | "run_script"
     action_payload: Dict[str, Any] = {}
 
 class CanvasItemCreateRequest(BaseModel):
@@ -1849,16 +1852,18 @@ async def create_cron_job(req: CronJobCreateRequest):
             raise HTTPException(status_code=400, detail=f"Invalid cron_expression: {e}")
     elif not (0 <= req.hour <= 23 and 0 <= req.minute <= 59):
         raise HTTPException(status_code=400, detail="hour must be 0-23 and minute 0-59 (or set cron_expression)")
-    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command"):
-        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, or terminal_command")
+    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script"):
+        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, terminal_command, or run_script")
     if req.action_type == "telegram_message" and not req.action_payload.get("text"):
         raise HTTPException(status_code=400, detail="telegram_message jobs need action_payload.text")
     if req.action_type == "agent_task" and not req.action_payload.get("agent_key"):
         raise HTTPException(status_code=400, detail="agent_task jobs need action_payload.agent_key")
-    if req.action_type == "run_skill" and not req.action_payload.get("skill_name"):
-        raise HTTPException(status_code=400, detail="run_skill jobs need action_payload.skill_name")
+    if req.action_type == "run_skill" and not (req.action_payload.get("skill_name") or req.action_payload.get("bundle_name")):
+        raise HTTPException(status_code=400, detail="run_skill jobs need action_payload.skill_name or action_payload.bundle_name")
     if req.action_type == "terminal_command" and not req.action_payload.get("command"):
         raise HTTPException(status_code=400, detail="terminal_command jobs need action_payload.command")
+    if req.action_type == "run_script" and not req.action_payload.get("script"):
+        raise HTTPException(status_code=400, detail="run_script jobs need action_payload.script")
     job = cron_store.create(
         req.name, req.description, req.hour, req.minute, req.action_type, req.action_payload,
         cron_expression=req.cron_expression,
@@ -1881,6 +1886,33 @@ async def delete_cron_job(job_id: str):
     return {"success": True}
 
 
+@app.get("/cron/blueprints")
+async def list_cron_blueprints():
+    """Pre-built automation templates (blueprint_catalog.py) -- fill in a
+    few real slots (time, topic, recurrence) instead of hand-writing a cron
+    expression and a prompt from scratch."""
+    return {"success": True, "blueprints": [blueprint_catalog_entry(b) for b in BLUEPRINT_CATALOG]}
+
+
+class BlueprintFillRequest(BaseModel):
+    values: Dict[str, Any] = {}
+
+@app.post("/cron/blueprints/{key}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_job_from_blueprint(key: str, req: BlueprintFillRequest):
+    blueprint = get_blueprint(key)
+    if blueprint is None:
+        raise HTTPException(status_code=404, detail="blueprint not found")
+    try:
+        spec = fill_blueprint(blueprint, req.values)
+    except BlueprintFillError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job = cron_store.create(
+        spec["name"], spec["description"], 0, 0, spec["action_type"], spec["action_payload"],
+        cron_expression=spec["cron_expression"],
+    )
+    return {"success": True, "job": job.to_public_dict()}
+
+
 @app.get("/webhooks/inbound", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def list_inbound_webhooks():
     """Real, persisted inbound webhook endpoints -- each one's real trigger
@@ -1892,16 +1924,18 @@ async def list_inbound_webhooks():
 
 @app.post("/webhooks/inbound", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def create_inbound_webhook(req: InboundWebhookCreateRequest):
-    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command"):
-        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, or terminal_command")
+    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script"):
+        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, terminal_command, or run_script")
     if req.action_type == "telegram_message" and not req.action_payload.get("text"):
         raise HTTPException(status_code=400, detail="telegram_message hooks need action_payload.text")
     if req.action_type == "agent_task" and not req.action_payload.get("agent_key"):
         raise HTTPException(status_code=400, detail="agent_task hooks need action_payload.agent_key")
-    if req.action_type == "run_skill" and not req.action_payload.get("skill_name"):
-        raise HTTPException(status_code=400, detail="run_skill hooks need action_payload.skill_name")
+    if req.action_type == "run_skill" and not (req.action_payload.get("skill_name") or req.action_payload.get("bundle_name")):
+        raise HTTPException(status_code=400, detail="run_skill hooks need action_payload.skill_name or action_payload.bundle_name")
     if req.action_type == "terminal_command" and not req.action_payload.get("command"):
         raise HTTPException(status_code=400, detail="terminal_command hooks need action_payload.command")
+    if req.action_type == "run_script" and not req.action_payload.get("script"):
+        raise HTTPException(status_code=400, detail="run_script hooks need action_payload.script")
     hook = inbound_webhook_store.create(req.name, req.action_type, req.action_payload)
     # The raw secret is only ever revealed here, at creation -- every other
     # read (list, this same hook fetched again later) only exposes
@@ -1976,6 +2010,8 @@ async def receive_inbound_webhook(hook_id: str, request: Request):
             summary = await _run_cron_skill(payload, trigger_name)
         elif hook.action_type == "terminal_command":
             summary = await _run_cron_terminal_command(hook.action_payload, trigger_name)
+        elif hook.action_type == "run_script":
+            summary = await _run_cron_script(hook.action_payload, trigger_name)
         else:
             summary = f"Unknown action_type: {hook.action_type}"
     except Exception as e:
@@ -2148,6 +2184,38 @@ async def archive_skill_route(name: str):
 async def restore_skill_route(name: str):
     if not skill_loader.restore_skill(name):
         raise HTTPException(status_code=404, detail="archived skill not found")
+    return {"success": True}
+
+
+class SkillBundleCreateRequest(BaseModel):
+    name: str
+    skill_names: List[str]
+    description: str = ""
+
+@app.get("/skills/bundles")
+async def list_skill_bundles():
+    """Real, persisted named groups of skills (skill_bundles.py) -- running
+    one via a cron/webhook run_skill action (action_payload.bundle_name)
+    injects every named skill's real instructions together as one combined
+    procedure, instead of skill_loader's normal keyword-matched top-2."""
+    return {"success": True, "bundles": [b.to_public_dict() for b in skill_bundle_store.list()]}
+
+
+@app.post("/skills/bundles", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_skill_bundle(req: SkillBundleCreateRequest):
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    unknown = [n for n in req.skill_names if skill_loader.get_skill(n) is None]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown skill(s): {', '.join(unknown)}")
+    bundle = skill_bundle_store.create(req.name.strip(), req.skill_names, req.description)
+    return {"success": True, "bundle": bundle.to_public_dict()}
+
+
+@app.delete("/skills/bundles/{bundle_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def delete_skill_bundle(bundle_id: str):
+    if not skill_bundle_store.delete(bundle_id):
+        raise HTTPException(status_code=404, detail="bundle not found")
     return {"success": True}
 
 
@@ -3026,6 +3094,12 @@ async def _cron_execution_loop() -> None:
                         if telegram_notifier.status["available"]:
                             await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
                         await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
+                    elif job.action_type == "run_script":
+                        summary = await _run_cron_script(job.action_payload, f"scheduled job \"{job.name}\"")
+                        cron_store.mark_run(job.id, summary)
+                        if telegram_notifier.status["available"] and not summary.startswith("(silent"):
+                            await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
+                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
                 except Exception as e:
                     logger.exception("Cron job %s failed: %s", job.name, e)
                     cron_store.mark_run(job.id, f"error: {e}")
@@ -3041,18 +3115,33 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
     would do. Plain (payload, name) params rather than a cron_store.CronJob
     so both the cron loop and inbound webhooks can share this one real
     execution path instead of each having their own copy."""
-    skill_name = action_payload.get("skill_name", "")
     extra_context = action_payload.get("context", "")
-    skill = skill_loader.get_skill(skill_name)
-    if skill is None:
-        return f"Unknown skill: {skill_name!r}"
+    bundle_name = action_payload.get("bundle_name", "")
+
+    if bundle_name:
+        bundle = skill_bundle_store.get_by_name(bundle_name)
+        if bundle is None:
+            return f"Unknown skill bundle: {bundle_name!r}"
+        skills = [skill_loader.get_skill(n) for n in bundle.skill_names]
+        skills = [s for s in skills if s is not None]
+        if not skills:
+            return f"Skill bundle {bundle_name!r} has no valid skills"
+        skills_block = "\n\n".join(f"### Skill: {s.name}\n{s.instructions}" for s in skills)
+    else:
+        skill_name = action_payload.get("skill_name", "")
+        skill = skill_loader.get_skill(skill_name)
+        if skill is None:
+            return f"Unknown skill: {skill_name!r}"
+        skills_block = f"### Skill: {skill.name}\n{skill.instructions}"
+
     if not os.getenv("ANTHROPIC_API_KEY"):
         return "Cannot run skill: ANTHROPIC_API_KEY not configured (tool-use requires Claude)"
 
     prompt = (
-        f"{BASE_SYSTEM_PROMPT}\n\nA {trigger_name} triggered this skill -- follow its "
-        f"instructions and actually do the work, don't just describe it.\n\n"
-        f"### Skill: {skill.name}\n{skill.instructions}\n\n"
+        f"{BASE_SYSTEM_PROMPT}\n\nA {trigger_name} triggered this skill (or skill bundle) -- follow its "
+        f"instructions and actually do the work, don't just describe it. If more than one skill is listed, "
+        f"follow all of them together as one combined procedure.\n\n"
+        f"{skills_block}\n\n"
         f"Additional context for this run: {extra_context or '(none)'}"
     )
     claude = AnthropicLLM()
@@ -3083,6 +3172,32 @@ async def _run_cron_terminal_command(action_payload: Dict[str, Any], trigger_nam
     if result.get("success"):
         return (result.get("stdout") or "(no output)")[:800]
     return f"Command failed: {result.get('error') or result.get('stderr') or 'unknown error'}"
+
+
+async def _run_cron_script(action_payload: Dict[str, Any], trigger_name: str = "job") -> str:
+    """Runs a real sandboxed script (run_script_tool.py) and either delivers
+    its stdout verbatim (no_agent=True -- a deterministic watchdog: "print a
+    message only if X happened") or hands it to the dispatcher agent as real
+    collected data to reason over (default) -- separates deterministic
+    data-collection from the LLM call that turns it into a response."""
+    script = action_payload.get("script", "")
+    no_agent = bool(action_payload.get("no_agent", False))
+    result = await run_script_tool.run_script(script, no_agent=no_agent)
+    if not result.get("success"):
+        return f"error: {result.get('error')}"
+    if result.get("silent"):
+        return "(silent — script reported nothing new)"
+
+    stdout = result.get("stdout", "")
+    if no_agent:
+        return stdout or "(script produced no output)"
+
+    if not agent_service.is_ready():
+        return "skipped: agent service not ready"
+    goal = action_payload.get("prompt") or f"Summarize what this {trigger_name} found and whether it needs attention."
+    query = f"The following data was just collected by a real pre-run script:\n\n{stdout}\n\n{goal}"
+    agent_result = await agent_service.run("dispatcher", {"type": "query", "query": query}, timeout=90.0)
+    return _summarize_agent_result(agent_result)
 
 
 async def _economic_calendar_loop() -> None:

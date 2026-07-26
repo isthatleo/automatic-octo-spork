@@ -7,6 +7,9 @@ import subprocess
 from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable, Dict, List
 
+from tool_args import coerce_tool_input
+from retry_util import retry_async, is_transient_llm_error
+
 logger = logging.getLogger(__name__)
 
 class LLMBackend(ABC):
@@ -197,6 +200,7 @@ class AnthropicLLM(LLMBackend):
             raise Exception("ANTHROPIC_API_KEY not configured")
         client = self._get_client()
         messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
+        schema_by_name = {t["name"]: t.get("input_schema", {}) for t in tools if isinstance(t, dict) and "name" in t}
 
         for _ in range(max_rounds):
             try:
@@ -220,8 +224,15 @@ class AnthropicLLM(LLMBackend):
             for block in response.content:
                 if block.type != "tool_use":
                     continue
+                # Even through Claude's real structured tool-use API, an
+                # argument can come back in the wrong JSON-schema shape (a
+                # stringified number/bool/object) -- coerce toward the
+                # tool's own declared schema before it ever reaches a
+                # Python function with normal type hints. Never raises: an
+                # uncoercible value passes through unchanged.
+                tool_input = coerce_tool_input(block.input, schema_by_name.get(block.name, {}))
                 try:
-                    result = await tool_executor(block.name, block.input)
+                    result = await tool_executor(block.name, tool_input)
                 except Exception as e:
                     result = {"success": False, "error": str(e)}
                 # Real vision support for tools that need Claude to actually
@@ -574,8 +585,20 @@ class FallbackLLM(LLMBackend):
                 continue
             try:
                 logger.info(f"Trying LLM backend: {backend.__class__.__name__}")
+                # One real, fast retry for a genuinely transient failure
+                # (timeout/connection reset) before conceding this backend --
+                # never for a credit/auth/quota error, which won't succeed on
+                # retry and (for quota specifically) is strictly better
+                # served by immediately trying the NEXT backend in the chain
+                # than waiting out this one's own suggested retry delay.
+                # Still bounded by the same overall BACKEND_TIMEOUT_S.
                 result = await asyncio.wait_for(
-                    backend.generate(prompt, max_tokens=max_tokens, temperature=temperature),
+                    retry_async(
+                        lambda: backend.generate(prompt, max_tokens=max_tokens, temperature=temperature),
+                        max_attempts=2,
+                        base_delay_s=0.4,
+                        should_retry=is_transient_llm_error,
+                    ),
                     timeout=self.BACKEND_TIMEOUT_S,
                 )
                 logger.info(f"LLM backend {backend.__class__.__name__} succeeded")

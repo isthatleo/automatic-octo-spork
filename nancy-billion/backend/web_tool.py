@@ -4,24 +4,25 @@ training data, without needing a paid provider (Browserbase/Firecrawl-style
 services from the Hermes/OpenClaw research). Read-only, so no Telegram
 approval gate (same tier as read_file/list_directory) -- but real network
 access from an LLM-controlled tool call is still a genuine SSRF surface, so
-requests to localhost/private/link-local addresses are refused outright
-regardless of approval, since that's not something a human glancing at an
-approval prompt would reliably catch anyway.
+requests are checked against net_policy.py's shared IP-classification
+policy regardless of approval, since that's not something a human glancing
+at an approval prompt would reliably catch anyway.
 """
 from __future__ import annotations
 
-import ipaddress
 import logging
-import socket
 from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
+from net_policy import is_blocked_host, redact_url_for_logging
+
 logger = logging.getLogger(__name__)
 
 FETCH_TIMEOUT_S = 15.0
 MAX_TEXT_CHARS = 4000
+MAX_REDIRECTS = 5
 _USER_AGENT = "Mozilla/5.0 (compatible; NancyBillion/1.0; +local-assistant)"
 
 WEB_TOOLS = [
@@ -42,35 +43,36 @@ WEB_TOOLS = [
 ]
 
 
-def _is_blocked_host(hostname: str) -> bool:
-    """Refuses localhost/private/link-local/loopback targets -- an LLM tool
-    call fetching http://169.254.169.254/ (cloud metadata) or an internal
-    LAN service is a real SSRF pattern, not a hypothetical one, even on a
-    single-user personal machine that itself runs other local services."""
-    try:
-        infos = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
-        return True  # can't resolve -- refuse rather than let a DNS trick through
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            return True
-    return False
-
-
 async def fetch_url(url: str) -> dict:
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return {"success": False, "error": "Only http/https URLs are supported"}
-    if not parsed.hostname:
-        return {"success": False, "error": "URL has no host"}
-    if _is_blocked_host(parsed.hostname):
-        return {"success": False, "error": f"Refusing to fetch internal/private address: {parsed.hostname}"}
-
+    """Manual redirect handling (not httpx's follow_redirects=True) is
+    deliberate: a server can 302 an initially-safe public URL to an
+    internal address, and blindly following that would bypass the host
+    check entirely since it only ever validated the original URL -- a real,
+    known SSRF technique, not a hypothetical one. Every hop is re-checked."""
+    current_url = url
     try:
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT_S, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": _USER_AGENT})
+        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT_S, follow_redirects=False) as client:
+            for _ in range(MAX_REDIRECTS + 1):
+                parsed = urlparse(current_url)
+                if parsed.scheme not in ("http", "https"):
+                    return {"success": False, "error": "Only http/https URLs are supported"}
+                if not parsed.hostname:
+                    return {"success": False, "error": "URL has no host"}
+                if is_blocked_host(parsed.hostname):
+                    return {"success": False, "error": f"Refusing to fetch internal/private address: {parsed.hostname}"}
+
+                resp = await client.get(current_url, headers={"User-Agent": _USER_AGENT})
+                if resp.is_redirect:
+                    next_url = resp.headers.get("location")
+                    if not next_url:
+                        return {"success": False, "error": "Redirect response had no Location header"}
+                    current_url = str(httpx.URL(current_url).join(next_url))
+                    continue
+                break
+            else:
+                return {"success": False, "error": f"Too many redirects (> {MAX_REDIRECTS})"}
     except Exception as e:
+        logger.warning("fetch_url failed for %s: %s", redact_url_for_logging(url), e)
         return {"success": False, "error": f"Fetch failed: {e}"}
 
     if resp.status_code >= 400:

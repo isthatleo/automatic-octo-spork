@@ -9,3 +9,7 @@ voice_ref/
 # Runtime state: conversation history (fury HistoryManager) and the memory
 # store (MEMORY_DB_PATH) — private data, not source, and grows on every run.
 data/
+
+# User-dropped-in cron scripts (run_script_tool.py) -- personal automation,
+# not source; the directory is created automatically on first use.
+scripts/
