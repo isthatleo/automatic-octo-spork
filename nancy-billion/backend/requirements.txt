@@ -119,3 +119,17 @@ torchaudio>=2.1.0
 # place, CLAP_MODEL_PATH won't resolve and the feature honestly reports
 # unavailable rather than fabricating a result. Uncomment once both are set up.
 # torchvision
+
+# Outbound WebSocket client (providers/transcription/realtime_ws.py) --
+# connects OUT to a realtime speech API's own WS endpoint. Distinct from
+# FastAPI/uvicorn's inbound WebSocket support (already covered by uvicorn's
+# own dependencies) -- this is for Nancy acting as a WS *client*.
+websockets>=13.0
+
+# Real cryptography for channels/reef.py's message encryption (Fernet).
+cryptography>=42.0
+
+# Real embedded vector-DB memory backend (memory/lancedb_store.py) -- optional
+# alternative to MemoryGraph's brute-force cosine scan, enabled via
+# MEMORY_BACKEND=lancedb. Pulls in pyarrow as a transitive dependency.
+lancedb>=0.15

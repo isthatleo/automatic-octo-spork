@@ -39,7 +39,17 @@ STORE_PATH = Path(__file__).parent / "data" / "cron_jobs.json"
 # gets injected as real collected data into the dispatcher agent's prompt
 # (no_agent=False/default) -- separates deterministic data-collection from
 # the LLM call that turns it into a response, unlike run_skill/agent_task.
-ActionType = Literal["telegram_message", "agent_task", "run_skill", "terminal_command", "run_script"]
+# channel_message: {"channel": str, "message": str} -- sends a real message
+# through any registered channels.Channel (ntfy, Home Assistant, etc. -- see
+# channels/registry.py), the same way telegram_message does for Telegram
+# specifically. Lets any new channel be scheduled for free the moment it's
+# registered, with no cron-side changes needed per channel.
+# memory_consolidate: {} (no payload needed) -- runs a real memory/dreaming.py
+# light+deep+REM consolidation cycle over the live memory_manager.graph.
+# commitment_checkin: {} (no payload needed) -- sends a real Telegram
+# reminder listing unresolved commitments (memory/commitments.py), or stays
+# silent if there's nothing open.
+ActionType = Literal["telegram_message", "agent_task", "run_skill", "terminal_command", "run_script", "channel_message", "memory_consolidate", "commitment_checkin"]
 
 
 @dataclass

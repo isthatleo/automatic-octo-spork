@@ -11,6 +11,7 @@ Handles:
 import logging
 from typing import Dict, List, Optional
 from memory.graph import MemoryGraph, MemoryType, MemoryNode
+from memory import holographic_store
 from context_manager import ContextManager
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,8 @@ class MemoryManager:
 
     def __init__(self, user_id: str = "default"):
         self.user_id = user_id
-        self.graph = MemoryGraph()
+        from memory.lancedb_store import create_memory_backend
+        self.graph = create_memory_backend()
         self.context: Optional[ContextManager] = None
         self.last_extracted_ids = []
 
@@ -135,13 +137,28 @@ class MemoryManager:
         """
         memories = self.graph.query(query, top_k=max_memories)
 
-        if not memories:
-            return ""
+        lines = []
+        if memories:
+            lines.append("# Previous memories relevant to your question:\n")
+            for mem in memories:
+                lines.append(f"- ({mem.type.value}) {mem.content[:80]}")
 
-        lines = ["# Previous memories relevant to your question:\n"]
-
-        for mem in memories:
-            lines.append(f"- ({mem.type.value}) {mem.content[:80]}")
+        # Additive holographic-memory merge (memory/holographic_store.py) --
+        # a symbolic fact store distinct from this embedding-similarity
+        # search. has_any_facts() keeps this a genuine no-op (no query, no
+        # extra latency) until something has actually called add_fact().
+        if holographic_store.has_any_facts():
+            try:
+                facts = holographic_store.search_facts(query, top_k=3, min_trust=1.0)
+            except Exception as e:
+                logger.warning("holographic_store search failed, skipping: %s", e)
+                facts = []
+            if facts:
+                if not lines:
+                    lines.append("# Previous memories relevant to your question:\n")
+                lines.append("# Known facts:")
+                for f in facts:
+                    lines.append(f"- {f['content']} (trust={f['trust_score']:.1f})")
 
         return "\n".join(lines)
 

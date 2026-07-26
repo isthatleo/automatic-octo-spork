@@ -18,7 +18,7 @@ import { CanvasPanel } from '@/components/nancy/canvas-panel'
 import {
   SessionsPanel, ChannelsPanel, InstancesPanel, CronPanel, SkillsPanel, ModelsPanel,
   KeysPanel, ConfigPanel, UsagePanel, PairingPanel, ProfilesPanel, PluginsPanel,
-  McpPanel, WebhooksPanel, DocsPanel,
+  McpPanel, WebhooksPanel, DocsPanel, MemoryInsightsPanel,
 } from '@/components/nancy/admin-panels'
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
@@ -38,6 +38,7 @@ import {
 } from 'lucide-react'
 
 import { DocsHelpPanel } from '@/components/nancy/docs-panel'
+import { OnboardingToast } from '@/components/nancy/onboarding-toast'
 
 /** Grouped exactly like OpenClaw/Hermes's sidebar (Control/Agent/Settings/
  * Resources), mapped onto Nancy's real pages -- a top-level "Voice" entry
@@ -59,6 +60,7 @@ const NAV_GROUPS: { group: string; items: { key: PanelKey; label: string; icon: 
     { key: 'canvas', label: 'Canvas', icon: StickyNote },
     { key: 'skills', label: 'Skills', icon: Sparkles },
     { key: 'models', label: 'Models', icon: Cpu },
+    { key: 'memory-insights', label: 'Memory Insights', icon: Brain },
   ] },
   { group: 'Settings', items: [
     { key: 'system', label: 'Command Layer', icon: TerminalSquare },
@@ -179,6 +181,9 @@ export default function Page() {
    *  generation, this is the full fix for Nancy finishing an old reply
    *  instead of switching to the new one. */
   const beginStreamedTurn = useCallback((turnId: number) => {
+    if (currentTurnIdRef.current !== null) {
+      import('@/components/nancy/onboarding-toast').then(({ fireOnboardingHint }) => fireOnboardingHint('chat-while-busy'))
+    }
     cancelSpeech()
     currentAudioRef.current?.pause()
     currentAudioRef.current = null
@@ -641,6 +646,8 @@ export default function Page() {
       {/* One quiet ambient wash instead of competing glow layers. */}
       <div className="pointer-events-none fixed inset-0 z-0 bg-[radial-gradient(ellipse_at_50%_-10%,oklch(0.24_0.03_60_/_35%),transparent_60%)]" />
 
+      <OnboardingToast />
+
       {/* Minimal top bar — hidden when a workspace is fullscreen. No nav
           row here: the orb's own click-to-open quick nav is the single way
           to move around from voice-first mode, so this stays uncluttered. */}
@@ -1014,6 +1021,7 @@ function WorkspaceLayout({
               {panel === 'plugins' && <PluginsPanel onNavigate={() => onNav('agents')} />}
               {panel === 'mcp' && <McpPanel onNavigate={() => onNav('core')} />}
               {panel === 'webhooks' && <WebhooksPanel />}
+              {panel === 'memory-insights' && <MemoryInsightsPanel />}
               {panel === 'canvas' && <CanvasPanel />}
               {panel === 'docs' && <DocsHelpPanel />}
             </div>

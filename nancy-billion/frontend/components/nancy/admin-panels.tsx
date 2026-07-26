@@ -14,6 +14,7 @@ import {
   Radar, ChevronRight, Lock, ShieldCheck,
   CalendarClock, Library, ArrowRight, FileCode2,
   Fingerprint, Layers, MessageCircle, SendHorizonal, Upload, Mic,
+  Moon, CheckSquare, Network,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
@@ -1789,6 +1790,177 @@ export function DocsPanel() {
           </li>
         ))}
       </ol>
+    </div>
+  )
+}
+
+/* ═══════════════════ MEMORY INSIGHTS — real journey timeline, dream diary,
+   commitments, and the memory wiki, all backed by real backend data (memory/
+   journey.py, memory/dreaming.py, memory/commitments.py, memory/wiki_store.py).
+   One panel, tabbed, matching the lighter-touch DOCS treatment above rather
+   than a full CRUD form since three of these four surfaces are read-mostly. ═══ */
+type MemoryTab = 'journey' | 'dreams' | 'commitments' | 'wiki'
+
+export function MemoryInsightsPanel() {
+  const [tab, setTab] = useState<MemoryTab>('journey')
+  const [journey, setJourney] = useState<{ timeline: any[]; stats: any } | null>(null)
+  const [dreams, setDreams] = useState<any[]>([])
+  const [openCommitments, setOpenCommitments] = useState<any[]>([])
+  const [wikiPages, setWikiPages] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+
+  const fetchAll = useCallback(async () => {
+    try {
+      const [j, d, c, w] = await Promise.all([
+        fetch('/api/memory/journey').then((r) => r.json()).catch(() => null),
+        fetch('/api/memory/dream-diary').then((r) => r.json()).catch(() => null),
+        fetch('/api/memory/commitments').then((r) => r.json()).catch(() => null),
+        fetch('/api/memory/wiki').then((r) => r.json()).catch(() => null),
+      ])
+      if (j?.success) setJourney({ timeline: j.timeline, stats: j.stats })
+      if (d?.success) setDreams(d.entries)
+      if (c?.success) setOpenCommitments(c.commitments)
+      if (w?.success) setWikiPages(w.pages)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchAll()
+    const t = setInterval(fetchAll, 60_000)
+    return () => clearInterval(t)
+  }, [fetchAll])
+
+  const resolveCommitment = async (id: string) => {
+    await fetch(`/api/memory/commitments/${id}/resolve`, { method: 'POST' })
+    fetchAll()
+  }
+
+  const tabs: { key: MemoryTab; label: string; icon: typeof CalendarClock }[] = [
+    { key: 'journey', label: 'Journey', icon: CalendarClock },
+    { key: 'dreams', label: 'Dream Diary', icon: Moon },
+    { key: 'commitments', label: 'Commitments', icon: CheckSquare },
+    { key: 'wiki', label: 'Memory Wiki', icon: Network },
+  ]
+
+  return (
+    <div className="mx-auto flex max-w-[900px] flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-card/60 px-3 py-2">
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setTab(t.key)}
+            className={cn(
+              'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[0.6rem] transition-colors',
+              tab === t.key ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            <t.icon className="h-3.5 w-3.5" /> {t.label}
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-8 text-[0.6rem] text-muted-foreground">
+          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…
+        </div>
+      ) : tab === 'journey' ? (
+        <div className="rounded-xl border border-border bg-card/60">
+          {journey?.stats && (
+            <div className="flex flex-wrap gap-4 border-b border-border/50 px-4 py-2.5 text-[0.55rem] text-muted-foreground">
+              <span>{journey.stats.total_memories} memories</span>
+              <span>{journey.stats.skills_used_count} skills used</span>
+              <span>{journey.stats.skill_uses_total} total skill invocations</span>
+            </div>
+          )}
+          {!journey?.timeline?.length ? (
+            <EmptyNote>No journey events yet — memories and skill usage will appear here as they happen.</EmptyNote>
+          ) : (
+            <ul className="divide-y divide-border/40">
+              {journey.timeline.map((e: any, i: number) => (
+                <li key={i} className="flex items-center gap-3 px-4 py-2.5">
+                  {e.kind === 'skill' ? <Wrench className="h-3.5 w-3.5 shrink-0 text-tertiary" /> : <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" />}
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[0.62rem] text-foreground">{e.label}</div>
+                    <div className="text-[0.5rem] text-muted-foreground">{new Date(e.timestamp * 1000).toLocaleString()}</div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : tab === 'dreams' ? (
+        <div className="rounded-xl border border-border bg-card/60">
+          <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">
+            Real memory-consolidation cycles — deduped near-duplicates and promoted recurring themes into insights.
+          </p>
+          {dreams.length === 0 ? (
+            <EmptyNote>No consolidation cycles have run yet — schedule the &ldquo;Memory consolidation cycle&rdquo; blueprint in Cron Jobs.</EmptyNote>
+          ) : (
+            <ul className="divide-y divide-border/40">
+              {dreams.map((entry: any, i: number) => (
+                <li key={i} className="px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <Moon className="h-3.5 w-3.5 shrink-0 text-tertiary" />
+                    <span className="text-[0.62rem] text-foreground">{entry.narrative}</span>
+                  </div>
+                  <div className="mt-1 pl-5.5 text-[0.5rem] text-muted-foreground">
+                    {new Date(entry.timestamp * 1000).toLocaleString()} · merged {entry.light?.removed ?? 0} · promoted {entry.deep?.clusters_found ?? 0}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : tab === 'commitments' ? (
+        <div className="rounded-xl border border-border bg-card/60">
+          <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">
+            Real promises/follow-ups extracted from conversation — resurfaced daily if the check-in blueprint is scheduled.
+          </p>
+          {openCommitments.length === 0 ? (
+            <EmptyNote>Nothing open right now.</EmptyNote>
+          ) : (
+            <ul className="divide-y divide-border/40">
+              {openCommitments.map((c: any) => (
+                <li key={c.id} className="flex items-center gap-3 px-4 py-2.5">
+                  <CheckSquare className="h-3.5 w-3.5 shrink-0 text-primary" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[0.62rem] text-foreground">{c.text}</div>
+                    <div className="text-[0.5rem] text-muted-foreground">{c.category} · {c.sensitivity}{c.due_hint ? ` · ${c.due_hint}` : ''}</div>
+                  </div>
+                  <button type="button" onClick={() => resolveCommitment(c.id)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Mark resolved" aria-label={`Mark "${c.text}" resolved`}>
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-border bg-card/60">
+          <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">
+            Real Markdown pages with structured claim/evidence/provenance metadata — Obsidian-compatible files under backend/data/memory_wiki/.
+          </p>
+          {wikiPages.length === 0 ? (
+            <EmptyNote>No wiki pages yet.</EmptyNote>
+          ) : (
+            <ul className="divide-y divide-border/40">
+              {wikiPages.map((p: any) => (
+                <li key={p.slug} className="px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <Library className="h-3.5 w-3.5 shrink-0 text-primary" />
+                    <span className="text-[0.65rem] text-foreground">{p.title}</span>
+                    {p.contradiction_of && <span className="rounded bg-destructive/15 px-1.5 py-0.5 text-[0.5rem] text-destructive">contradicts {p.contradiction_of}</span>}
+                  </div>
+                  <p className="mt-1 pl-5.5 text-[0.6rem] text-muted-foreground">{p.claim}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   )
 }

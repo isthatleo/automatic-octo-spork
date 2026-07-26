@@ -10,7 +10,7 @@ export interface LogEntry {
 export type PanelKey =
   | 'overview' | 'map' | 'core' | 'agents' | 'system' | 'projects' | 'market' | 'news' | 'media' | 'kanban'
   | 'sessions' | 'channels' | 'instances' | 'cron' | 'skills' | 'models' | 'keys' | 'config' | 'usage'
-  | 'pairing' | 'profiles' | 'plugins' | 'mcp' | 'webhooks' | 'docs' | 'canvas'
+  | 'pairing' | 'profiles' | 'plugins' | 'mcp' | 'webhooks' | 'docs' | 'canvas' | 'memory-insights'
 
 export interface AgentInfo {
   key: string

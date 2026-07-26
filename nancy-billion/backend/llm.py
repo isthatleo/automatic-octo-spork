@@ -440,6 +440,43 @@ class OpenCodeLLM(LLMBackend):
                     raise Exception(f"OpenCode Zen returned no content (finish_reason={reason})")
                 return content
 
+
+class ClawRouterLLM(LLMBackend):
+    """ClawRouter -- a managed multi-provider model router with its own
+    quota reporting, ported from OpenClaw's ClawRouter extension. Same
+    OpenAI-chat-completions-compatible shape as OpenCodeLLM above; a single
+    ClawRouter key stands in for routing across whichever underlying
+    providers ClawRouter itself is configured to use."""
+
+    def __init__(self):
+        self.api_key = os.getenv("CLAWROUTER_API_KEY")
+        if not self.api_key:
+            logger.warning("CLAWROUTER_API_KEY not set; ClawRouter LLM will not function")
+        self.model = os.getenv("CLAWROUTER_MODEL", "auto")
+        self.base_url = os.getenv("CLAWROUTER_BASE_URL", "https://api.clawrouter.com/v1")
+        logger.info(f"ClawRouterLLM initialized with model={self.model}")
+
+    async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+        import aiohttp
+        url = f"{self.base_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise Exception(f"ClawRouter error: {resp.status} - {text}")
+                result = await resp.json()
+                content = result["choices"][0]["message"].get("content")
+                if not content:
+                    raise Exception("ClawRouter returned no content")
+                return content
+
 # =============================================================================
 # Fallback LLM Backend
 # =============================================================================
@@ -668,6 +705,11 @@ def get_llm_backends():
     if os.getenv("OPENCODE_API_KEY"):
         logger.info("Adding OpenCodeLLM as coding-focused cloud backend")
         backends.append(OpenCodeLLM())
+
+    # ClawRouter: managed multi-provider routing (Batch 3, item #20)
+    if os.getenv("CLAWROUTER_API_KEY"):
+        logger.info("Adding ClawRouterLLM as managed multi-provider backend")
+        backends.append(ClawRouterLLM())
 
     # ---- PHASE 2: Local (free, offline fallback) ----
     disable_auto_ollama = os.getenv("DISABLE_AUTO_OLLAMA", "0").strip() == "1"

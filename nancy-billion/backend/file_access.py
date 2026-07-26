@@ -14,11 +14,13 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict
 
+from workspace_uri import resolve_oc_path
+
 MAX_READ_BYTES = 200_000  # cap how much file content gets pulled into a prompt
 
 
 def read_file(path: str) -> Dict[str, Any]:
-    p = Path(path).expanduser()
+    p = Path(resolve_oc_path(path)).expanduser()
     if not p.exists():
         return {"success": False, "error": f"No such file: {path}"}
     if not p.is_file():
@@ -33,7 +35,7 @@ def read_file(path: str) -> Dict[str, Any]:
 
 
 def list_directory(path: str) -> Dict[str, Any]:
-    p = Path(path).expanduser()
+    p = Path(resolve_oc_path(path)).expanduser()
     if not p.exists():
         return {"success": False, "error": f"No such directory: {path}"}
     if not p.is_dir():
@@ -52,7 +54,7 @@ def list_directory(path: str) -> Dict[str, Any]:
 
 
 def write_file(path: str, content: str) -> Dict[str, Any]:
-    p = Path(path).expanduser()
+    p = Path(resolve_oc_path(path)).expanduser()
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -62,7 +64,7 @@ def write_file(path: str, content: str) -> Dict[str, Any]:
 
 
 def delete_file(path: str) -> Dict[str, Any]:
-    p = Path(path).expanduser()
+    p = Path(resolve_oc_path(path)).expanduser()
     if not p.exists():
         return {"success": False, "error": f"No such path: {path}"}
     try:
@@ -76,8 +78,8 @@ def delete_file(path: str) -> Dict[str, Any]:
 
 
 def move_file(src: str, dst: str) -> Dict[str, Any]:
-    src_p = Path(src).expanduser()
-    dst_p = Path(dst).expanduser()
+    src_p = Path(resolve_oc_path(src)).expanduser()
+    dst_p = Path(resolve_oc_path(dst)).expanduser()
     if not src_p.exists():
         return {"success": False, "error": f"No such path: {src}"}
     try:

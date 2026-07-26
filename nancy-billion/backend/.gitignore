@@ -13,3 +13,8 @@ data/
 # User-dropped-in cron scripts (run_script_tool.py) -- personal automation,
 # not source; the directory is created automatically on first use.
 scripts/
+
+# Real backup zips (backup_tool.py) -- generated runtime artifacts containing
+# a snapshot of data/ and skills/, not source; created automatically on
+# first use, and even redacted-.env-included they shouldn't be committed.
+backups/

@@ -62,10 +62,16 @@ class AutomationBlueprint:
     category: str
     # Cron expression with {slot} placeholders (e.g. "{minute} {hour} * * {dow}").
     schedule_template: str
-    # Seed prompt for the dispatcher agent; may reference {slot}s.
+    # Dual meaning based on action_type (still one schema, no second one --
+    # matching this module's own design principle above): for the default
+    # "agent_task", this is the seed prompt for the dispatcher agent (may
+    # reference {slot}s). For "run_script", it's the script filename under
+    # backend/scripts/ to run via run_script_tool.py instead -- a real,
+    # deterministic action with no LLM call involved.
     prompt_template: str
     slots: List[BlueprintSlot] = field(default_factory=list)
     tags: tuple = ()
+    action_type: str = "agent_task"
 
 
 _TIME = lambda default="08:00": BlueprintSlot(  # noqa: E731
@@ -250,6 +256,33 @@ CATALOG: List[AutomationBlueprint] = [
         ],
         tags=("daily", "curiosity"),
     ),
+    AutomationBlueprint(
+        key="disk-cleanup", title="Ephemeral file cleanup", category="maintenance",
+        description="Deletes Nancy's own old throwaway files (backups/scratch output) on a schedule -- a real deterministic script, no LLM call.",
+        schedule_template="{minute} {hour} * * *",
+        prompt_template="disk_cleanup.py",
+        action_type="run_script",
+        slots=[_TIME("03:00")],
+        tags=("maintenance", "cleanup"),
+    ),
+    AutomationBlueprint(
+        key="memory-dreaming", title="Memory consolidation cycle", category="maintenance",
+        description="Deduplicates near-identical memories and promotes recurring conversation themes into insights (see memory/dreaming.py).",
+        schedule_template="{minute} {hour} * * *",
+        prompt_template="",
+        action_type="memory_consolidate",
+        slots=[_TIME("04:00")],
+        tags=("maintenance", "memory"),
+    ),
+    AutomationBlueprint(
+        key="commitment-checkin", title="Open commitments check-in", category="general",
+        description="A daily reminder of anything you (or Nancy) committed to that's still open (see memory/commitments.py).",
+        schedule_template="{minute} {hour} * * *",
+        prompt_template="",
+        action_type="commitment_checkin",
+        slots=[_TIME("19:00")],
+        tags=("reminder", "commitments"),
+    ),
 ]
 
 _CATALOG_BY_KEY = {b.key: b for b in CATALOG}
@@ -360,6 +393,25 @@ def fill_blueprint(blueprint: AutomationBlueprint, values: Dict[str, Any]) -> Di
         resolved[s.name] = raw
 
     schedule = _resolve_schedule(blueprint, resolved)
+
+    if blueprint.action_type == "run_script":
+        return {
+            "name": blueprint.title,
+            "description": blueprint.description,
+            "cron_expression": schedule,
+            "action_type": "run_script",
+            "action_payload": {"script": blueprint.prompt_template, "no_agent": True},
+        }
+
+    if blueprint.action_type in ("memory_consolidate", "commitment_checkin"):
+        return {
+            "name": blueprint.title,
+            "description": blueprint.description,
+            "cron_expression": schedule,
+            "action_type": blueprint.action_type,
+            "action_payload": {},
+        }
+
     try:
         prompt = blueprint.prompt_template.format(**resolved)
     except KeyError as e:

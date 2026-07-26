@@ -67,7 +67,24 @@ from canvas_store import canvas_store
 from blueprint_catalog import CATALOG as BLUEPRINT_CATALOG, get_blueprint, blueprint_catalog_entry, fill_blueprint, BlueprintFillError
 from skill_bundles import skill_bundle_store
 import run_script_tool
-from web_tool import fetch_url, WEB_TOOLS
+from web_tool import fetch_url, web_search, extract_urls, WEB_TOOLS
+from providers.bootstrap import load_all_providers
+from channels.bootstrap import load_all_channels
+import security_lint
+import arm_switch
+from llm_task import structured_llm_call, UTILITY_TOOLS
+from workspace_uri import resolve_oc_path
+from backup_tool import create_backup, list_backups, BACKUP_TOOLS
+from disk_cleanup import ensure_bootstrap_script
+from channels.home_assistant import HOME_ASSISTANT_TOOLS
+from providers.spotify_tool import SPOTIFY_TOOLS, handle_spotify_tool
+from memory import wiki_store, commitments
+import evidence_ledger
+
+ensure_bootstrap_script()
+
+load_all_providers()
+load_all_channels()
 import computer_use_tool
 from computer_use_tool import COMPUTER_USE_TOOLS, ACTION_TOOLS as COMPUTER_ACTION_TOOLS
 from tts import tts_backend
@@ -528,7 +545,13 @@ FILE_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "write_file",
         "description": (
-            "Create or overwrite a text file on the user's computer. "
+            "Create or overwrite a file on the user's computer -- source code just as much as "
+            "plain text. ALWAYS give `path` a real extension matching the actual content: .py for "
+            "Python, .js/.ts for JavaScript/TypeScript, .html, .css, .json, .sh, .md, .java, .cpp, "
+            "etc. Only use .txt for genuine plain-language notes -- never as a generic default for "
+            "code, or a Python script asked to run will fail to even execute. If the user didn't "
+            "ask for a specific folder, just give a bare filename (e.g. 'calculator.py') and it "
+            "will be saved to their Desktop automatically, so they can find and run it immediately. "
             "Requires the user's explicit yes/no approval (sent to their phone) before it takes effect."
         ),
         "input_schema": {
@@ -564,6 +587,105 @@ FILE_TOOLS: List[Dict[str, Any]] = [
 ]
 
 _FILE_WRITE_TOOLS = {"write_file", "delete_file", "move_file"}
+
+# Real-world safety net for write_file: a real bug this session was Claude
+# happily writing runnable Python source out to a bare "calculator.txt" --
+# the tool description above now tells it not to, but LLMs miss instructions,
+# so this is a second, code-level guarantee that a file's extension actually
+# matches its content before it ever touches disk. Ordered so the earliest
+# confident match wins; deliberately conservative (only fires on missing or
+# clearly-generic ".txt"/no extension) so it never fights an extension the
+# caller picked on purpose.
+_EXT_SNIFF_RULES: List[tuple] = [
+    (re.compile(r'^#!.*\bpython'), ".py"),
+    (re.compile(r'^#!.*\b(bash|sh|zsh)\b'), ".sh"),
+    (re.compile(r'^#!.*\bnode\b'), ".js"),
+    (re.compile(r'<!DOCTYPE html|<html[ >]', re.I), ".html"),
+    (re.compile(r'^\s*(import\s+\w|from\s+\w+\s+import\b)', re.M), ".py"),
+    (re.compile(r'^\s*def\s+\w+\s*\(.*\)\s*:', re.M), ".py"),
+    (re.compile(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]\s*:'), ".py"),
+    (re.compile(r'^\s*(public|private)\s+(static\s+)?(class|void)\b', re.M), ".java"),
+    (re.compile(r'^\s*#include\s*<'), ".cpp"),
+    (re.compile(r'\bconsole\.log\(|\brequire\(|=>\s*\{|\bconst\s+\w+\s*=|\blet\s+\w+\s*='), ".js"),
+    (re.compile(r'^\s*(SELECT|INSERT INTO|CREATE TABLE|UPDATE)\b', re.I), ".sql"),
+]
+
+
+def _sniff_extension(content: str) -> Optional[str]:
+    head = content[:2000]
+    for pattern, ext in _EXT_SNIFF_RULES:
+        if pattern.search(head):
+            return ext
+    stripped = content.strip()
+    if stripped[:1] in "{[":
+        try:
+            json.loads(stripped)
+            return ".json"
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+# Highest-confidence signal of all: the user's own words. If they said
+# "python"/"bash"/"a json config"/etc., that names the file type they
+# actually want, full stop -- more reliable than sniffing generated content
+# (which can be ambiguous, e.g. a short snippet with no imports or keywords
+# yet) and worth trusting over whatever extension Claude happened to pick.
+# Ordered so more specific names (javascript/typescript) are safe to check
+# before/after "java" without collision -- \b word boundaries mean "java"
+# alone never matches inside "javascript" anyway.
+_LANGUAGE_NAME_HINTS: List[tuple] = [
+    (re.compile(r'\btypescript\b', re.I), ".ts"),
+    (re.compile(r'\bjavascript\b', re.I), ".js"),
+    (re.compile(r'\bpython\b', re.I), ".py"),
+    (re.compile(r'\bhtml\b', re.I), ".html"),
+    (re.compile(r'\bcss\b', re.I), ".css"),
+    (re.compile(r'\b(bash|shell)\s*script\b|\bbash\b', re.I), ".sh"),
+    (re.compile(r'\bjson\b', re.I), ".json"),
+    (re.compile(r'\byaml\b|\byml\b', re.I), ".yaml"),
+    (re.compile(r'\bjava\b', re.I), ".java"),
+    (re.compile(r'c\+\+', re.I), ".cpp"),
+    (re.compile(r'c#', re.I), ".cs"),
+    (re.compile(r'\bgo(lang)?\b', re.I), ".go"),
+    (re.compile(r'\brust\b', re.I), ".rs"),
+    (re.compile(r'\bsql\b', re.I), ".sql"),
+    (re.compile(r'\bmarkdown\b', re.I), ".md"),
+    (re.compile(r'\bruby\b', re.I), ".rb"),
+    (re.compile(r'\bphp\b', re.I), ".php"),
+    (re.compile(r'\bcsv\b', re.I), ".csv"),
+]
+
+
+def _explicit_language_hint(user_text: str) -> Optional[str]:
+    for pattern, ext in _LANGUAGE_NAME_HINTS:
+        if pattern.search(user_text):
+            return ext
+    return None
+
+
+def _resolve_write_path(raw_path: str, content: str, user_hint: str = "") -> Path:
+    """Bare filename (no folder given) -> save to the real Desktop, not
+    wherever the backend process happens to be running from. The file type
+    the user actually asked for (user_hint) wins outright over whatever
+    extension Claude picked; failing that, missing/generic ".txt" on content
+    that's clearly real source gets corrected by sniffing the content itself.
+    Together these mean "create a calculator in python" can never again land
+    as an unrunnable calculator.txt, no matter which of the two signals
+    catches it."""
+    p = Path(resolve_oc_path(raw_path)).expanduser()
+    if not p.is_absolute() and p.parent == Path("."):
+        p = _DESKTOP_DIR / p.name
+
+    current_ext = p.suffix.lower()
+    requested = _explicit_language_hint(user_hint) if user_hint else None
+    if requested and current_ext != requested:
+        return p.with_suffix(requested)
+
+    if current_ext in ("", ".txt"):
+        sniffed = _sniff_extension(content)
+        if sniffed:
+            p = p.with_suffix(sniffed)
+    return p
 
 # Only messages that plausibly need a file-system action or a new agent take
 # the (slow, multi-round) Claude tool-use path -- see the latency note where
@@ -654,7 +776,7 @@ CANVAS_TOOL: Dict[str, Any] = {
 }
 
 
-async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: str = "") -> Dict[str, Any]:
     if mcp_manager.is_plugin_tool(name):
         return await mcp_manager.call_tool(name, tool_input)
 
@@ -671,6 +793,33 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str,
 
     if name == "fetch_url":
         return await fetch_url(tool_input.get("url", ""))
+
+    if name == "web_search":
+        return await web_search(tool_input.get("query", ""), max_results=tool_input.get("max_results", 5))
+
+    if name == "llm_structured_task":
+        return await structured_llm_call(tool_input.get("prompt", ""), tool_input.get("json_schema", {}))
+
+    if name == "create_backup":
+        if not arm_switch.is_armed():
+            approved = await telegram_notifier.request_approval(
+                "Nancy wants to: create a backup zip of your data/skills/.env", timeout=120.0
+            )
+            if not approved:
+                return {"success": False, "error": "User did not approve this backup."}
+        return create_backup()
+
+    if name == "ha_call_service":
+        from channels.registry import get_channel
+        ha = get_channel("home_assistant")
+        if ha is None:
+            return {"success": False, "error": "Home Assistant is not configured (HOME_ASSISTANT_URL/HOME_ASSISTANT_TOKEN)."}
+        return await ha.call_service(
+            tool_input.get("domain", ""), tool_input.get("service", ""), tool_input.get("service_data", {})
+        )
+
+    if name == "spotify_control":
+        return await handle_spotify_tool(tool_input)
 
     if name in ("take_screenshot", "get_screen_size"):
         loop = asyncio.get_event_loop()
@@ -699,7 +848,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str,
 
     if name == "execute_command":
         command = str(tool_input.get("command", ""))
-        if not terminal_tool._is_safe_command(command):
+        if not terminal_tool._is_safe_command(command) and not arm_switch.is_armed():
             approved = await telegram_notifier.request_approval(
                 f"Nancy wants to run a command:\n\n{command}", timeout=120.0
             )
@@ -707,12 +856,19 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str,
                 return {"success": False, "error": "User did not approve this command."}
         return await terminal_tool.execute_command(command, cwd=tool_input.get("cwd"))
 
-    if name in _FILE_WRITE_TOOLS:
+    resolved_write_path: Optional[Path] = None
+    if name == "write_file":
+        resolved_write_path = _resolve_write_path(tool_input["path"], tool_input["content"], user_hint)
+
+    if name in _FILE_WRITE_TOOLS and not arm_switch.is_armed():
         description = {
-            "write_file": f"Write to file: {tool_input.get('path')}",
+            "write_file": f"Write to file: {resolved_write_path}",
             "delete_file": f"Delete: {tool_input.get('path')}",
             "move_file": f"Move {tool_input.get('src')} -> {tool_input.get('dst')}",
         }[name]
+        if name == "write_file":
+            lint_findings = security_lint.lint_content(tool_input.get("content", ""))
+            description += security_lint.format_findings(lint_findings)
         approved = await telegram_notifier.request_approval(
             f"Nancy wants to: {description}", timeout=120.0
         )
@@ -724,11 +880,17 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str,
     if name == "list_directory":
         return file_access.list_directory(tool_input["path"])
     if name == "write_file":
-        return file_access.write_file(tool_input["path"], tool_input["content"])
+        result = file_access.write_file(str(resolved_write_path), tool_input["content"])
+        evidence_ledger.record_evidence("write_file", str(resolved_write_path), result.get("success", False))
+        return result
     if name == "delete_file":
-        return file_access.delete_file(tool_input["path"])
+        result = file_access.delete_file(tool_input["path"])
+        evidence_ledger.record_evidence("delete_file", tool_input["path"], result.get("success", False))
+        return result
     if name == "move_file":
-        return file_access.move_file(tool_input["src"], tool_input["dst"])
+        result = file_access.move_file(tool_input["src"], tool_input["dst"])
+        evidence_ledger.record_evidence("move_file", f"{tool_input['src']} -> {tool_input['dst']}", result.get("success", False))
+        return result
     return {"success": False, "error": f"Unknown tool {name}"}
 
 
@@ -780,9 +942,13 @@ def _build_chat_prompt(user_text: str, history_text: str) -> str:
     """Shared prompt assembly for both the blocking hierarchy path and the
     streaming path below -- kept in one place so they can't silently drift."""
     skills_block = skill_loader.build_skill_prompt_block(user_text)
+    links_block = ""
+    detected_urls = extract_urls(user_text)
+    if detected_urls:
+        links_block = "Links detected in the user's message (already SSRF-checked, safe to fetch_url if relevant): " + ", ".join(detected_urls)
     return (
         f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n"
-        f"{skills_block}\n\n{history_text}\nuser: {user_text}\nassistant:"
+        f"{skills_block}\n\n{links_block}\n\n{history_text}\nuser: {user_text}\nassistant:"
     )
 
 
@@ -843,11 +1009,18 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
     if os.getenv("ANTHROPIC_API_KEY") and _WANTS_TOOLS_RE.search(user_text):
         try:
             claude = AnthropicLLM()
+
+            async def _file_tool_executor(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+                # Binds this turn's real user_text in as a write_file extension
+                # hint -- see _explicit_language_hint -- without changing the
+                # tool_executor(name, input) contract generate_with_tools calls.
+                return await _execute_file_tool(name, tool_input, user_hint=user_text)
+
             resp = await asyncio.wait_for(
                 claude.generate_with_tools(
                     prompt,
-                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS,
-                    _execute_file_tool,
+                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS,
+                    _file_tool_executor,
                     max_tokens=1024,
                 ),
                 timeout=45.0,
@@ -1009,6 +1182,13 @@ async def _run_chat_turn(websocket: WebSocket, turn_id: int, user_text: str) -> 
 
         if history_manager:
             await history_manager.add({"role": "assistant", "content": full_text})
+
+        # Real commitment extraction (memory/commitments.py) -- fire-and-
+        # forget so it never adds latency to the reply already sent above;
+        # might_contain_commitment() is a cheap regex check that keeps this
+        # a no-op (no LLM call at all) for ordinary turns.
+        if commitments.might_contain_commitment(user_text):
+            asyncio.create_task(commitments.extract_commitments(user_text, full_text))
 
         await manager.send(
             json.dumps({
@@ -1852,8 +2032,8 @@ async def create_cron_job(req: CronJobCreateRequest):
             raise HTTPException(status_code=400, detail=f"Invalid cron_expression: {e}")
     elif not (0 <= req.hour <= 23 and 0 <= req.minute <= 59):
         raise HTTPException(status_code=400, detail="hour must be 0-23 and minute 0-59 (or set cron_expression)")
-    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script"):
-        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, terminal_command, or run_script")
+    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script", "channel_message", "memory_consolidate", "commitment_checkin"):
+        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, terminal_command, run_script, or channel_message")
     if req.action_type == "telegram_message" and not req.action_payload.get("text"):
         raise HTTPException(status_code=400, detail="telegram_message jobs need action_payload.text")
     if req.action_type == "agent_task" and not req.action_payload.get("agent_key"):
@@ -1864,6 +2044,8 @@ async def create_cron_job(req: CronJobCreateRequest):
         raise HTTPException(status_code=400, detail="terminal_command jobs need action_payload.command")
     if req.action_type == "run_script" and not req.action_payload.get("script"):
         raise HTTPException(status_code=400, detail="run_script jobs need action_payload.script")
+    if req.action_type == "channel_message" and not (req.action_payload.get("channel") and req.action_payload.get("message")):
+        raise HTTPException(status_code=400, detail="channel_message jobs need action_payload.channel and action_payload.message")
     job = cron_store.create(
         req.name, req.description, req.hour, req.minute, req.action_type, req.action_payload,
         cron_expression=req.cron_expression,
@@ -1924,8 +2106,8 @@ async def list_inbound_webhooks():
 
 @app.post("/webhooks/inbound", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def create_inbound_webhook(req: InboundWebhookCreateRequest):
-    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script"):
-        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, terminal_command, or run_script")
+    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script", "channel_message", "memory_consolidate", "commitment_checkin"):
+        raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, terminal_command, run_script, or channel_message")
     if req.action_type == "telegram_message" and not req.action_payload.get("text"):
         raise HTTPException(status_code=400, detail="telegram_message hooks need action_payload.text")
     if req.action_type == "agent_task" and not req.action_payload.get("agent_key"):
@@ -1936,6 +2118,8 @@ async def create_inbound_webhook(req: InboundWebhookCreateRequest):
         raise HTTPException(status_code=400, detail="terminal_command hooks need action_payload.command")
     if req.action_type == "run_script" and not req.action_payload.get("script"):
         raise HTTPException(status_code=400, detail="run_script hooks need action_payload.script")
+    if req.action_type == "channel_message" and not (req.action_payload.get("channel") and req.action_payload.get("message")):
+        raise HTTPException(status_code=400, detail="channel_message hooks need action_payload.channel and action_payload.message")
     hook = inbound_webhook_store.create(req.name, req.action_type, req.action_payload)
     # The raw secret is only ever revealed here, at creation -- every other
     # read (list, this same hook fetched again later) only exposes
@@ -2012,6 +2196,12 @@ async def receive_inbound_webhook(hook_id: str, request: Request):
             summary = await _run_cron_terminal_command(hook.action_payload, trigger_name)
         elif hook.action_type == "run_script":
             summary = await _run_cron_script(hook.action_payload, trigger_name)
+        elif hook.action_type == "channel_message":
+            summary = await _run_cron_channel_message(hook.action_payload, trigger_name)
+        elif hook.action_type == "memory_consolidate":
+            summary = await _run_cron_memory_consolidate(hook.action_payload, trigger_name)
+        elif hook.action_type == "commitment_checkin":
+            summary = await _run_cron_commitment_checkin(hook.action_payload, trigger_name)
         else:
             summary = f"Unknown action_type: {hook.action_type}"
     except Exception as e:
@@ -2512,6 +2702,134 @@ async def save_to_desktop(req: SaveFileRequest):
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to write file: {exc}")
     return {"success": True, "path": str(path), "filename": path.name}
+
+
+# ---------------------------------------------------------------------------
+# Arm/disarm safety switch -- a time-boxed alternative to a one-off Telegram
+# approval for a batch of risky actions (real shell commands, file
+# writes/deletes/moves) -- see arm_switch.py.
+# ---------------------------------------------------------------------------
+class ArmRequest(BaseModel):
+    duration_s: float = arm_switch.DEFAULT_ARM_SECONDS
+    reason: Optional[str] = None
+
+
+@app.post("/safety/arm", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def arm_safety_switch(req: ArmRequest):
+    return arm_switch.arm(req.duration_s, req.reason)
+
+
+@app.post("/safety/disarm", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def disarm_safety_switch():
+    return arm_switch.disarm()
+
+
+@app.get("/safety/status", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def safety_switch_status():
+    return arm_switch.status()
+
+
+# ---------------------------------------------------------------------------
+# Backups -- see backup_tool.py.
+# ---------------------------------------------------------------------------
+@app.get("/backups", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_backups_route():
+    return {"success": True, "backups": list_backups()}
+
+
+@app.post("/backups", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_backup_route():
+    if not arm_switch.is_armed():
+        approved = await telegram_notifier.request_approval(
+            "Nancy wants to: create a backup zip of your data/skills/.env", timeout=120.0
+        )
+        if not approved:
+            raise HTTPException(status_code=403, detail="User did not approve this backup.")
+    return create_backup()
+
+
+# ---------------------------------------------------------------------------
+# Memory Wiki -- see memory/wiki_store.py.
+# ---------------------------------------------------------------------------
+class WikiPageCreateRequest(BaseModel):
+    title: str
+    claim: str
+    evidence: List[str] = []
+    provenance: str = "conversation"
+    contradiction_of: Optional[str] = None
+    body: str = ""
+
+
+@app.get("/memory/wiki", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_wiki_pages():
+    return {"success": True, "pages": [p.to_dict() for p in wiki_store.list_pages()]}
+
+
+@app.post("/memory/wiki", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_wiki_page(req: WikiPageCreateRequest):
+    if not req.title.strip() or not req.claim.strip():
+        raise HTTPException(status_code=400, detail="title and claim are required")
+    page = wiki_store.create_page(req.title, req.claim, req.evidence, req.provenance, req.contradiction_of, req.body)
+    return {"success": True, "page": page.to_dict()}
+
+
+@app.get("/memory/wiki/contradictions", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_wiki_contradictions():
+    return {"success": True, "contradictions": wiki_store.find_contradictions()}
+
+
+@app.get("/memory/wiki/{slug}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def get_wiki_page(slug: str):
+    page = wiki_store.get_page(slug)
+    if page is None:
+        raise HTTPException(status_code=404, detail="wiki page not found")
+    return {"success": True, "page": page.to_dict()}
+
+
+# ---------------------------------------------------------------------------
+# Journey timeline -- see memory/journey.py.
+# ---------------------------------------------------------------------------
+@app.get("/memory/journey", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def get_journey_timeline(limit: int = 100):
+    from memory import journey
+    return {
+        "success": True,
+        "timeline": journey.build_timeline(memory_manager.graph, limit=limit),
+        "stats": journey.summary_stats(memory_manager.graph),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Commitments -- see memory/commitments.py.
+# ---------------------------------------------------------------------------
+@app.get("/memory/commitments", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_commitments_route(include_resolved: bool = False):
+    return {"success": True, "commitments": [c.to_dict() for c in commitments.list_commitments(include_resolved)]}
+
+
+@app.post("/memory/commitments/{commitment_id}/resolve", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def resolve_commitment_route(commitment_id: str):
+    ok = commitments.resolve_commitment(commitment_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="commitment not found")
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# Dream diary -- see memory/dreaming.py.
+# ---------------------------------------------------------------------------
+@app.get("/memory/dream-diary", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def get_dream_diary_route(limit: int = 20):
+    from memory import dreaming
+    return {"success": True, "entries": dreaming.get_dream_diary(limit=limit)}
+
+
+# ---------------------------------------------------------------------------
+# Verification evidence ledger -- see evidence_ledger.py.
+# ---------------------------------------------------------------------------
+@app.get("/evidence", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_evidence(limit: int = 50, kind: Optional[str] = None):
+    return {"success": True, "evidence": evidence_ledger.query_evidence(limit=limit, kind=kind)}
 
 
 # ---------------------------------------------------------------------------
@@ -3100,6 +3418,18 @@ async def _cron_execution_loop() -> None:
                         if telegram_notifier.status["available"] and not summary.startswith("(silent"):
                             await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
                         await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
+                    elif job.action_type == "channel_message":
+                        summary = await _run_cron_channel_message(job.action_payload, f"scheduled job \"{job.name}\"")
+                        cron_store.mark_run(job.id, summary)
+                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
+                    elif job.action_type == "memory_consolidate":
+                        summary = await _run_cron_memory_consolidate(job.action_payload, f"scheduled job \"{job.name}\"")
+                        cron_store.mark_run(job.id, summary)
+                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
+                    elif job.action_type == "commitment_checkin":
+                        summary = await _run_cron_commitment_checkin(job.action_payload, f"scheduled job \"{job.name}\"")
+                        cron_store.mark_run(job.id, summary)
+                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
                 except Exception as e:
                     logger.exception("Cron job %s failed: %s", job.name, e)
                     cron_store.mark_run(job.id, f"error: {e}")
@@ -3147,7 +3477,7 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
     claude = AnthropicLLM()
     resp = await asyncio.wait_for(
         claude.generate_with_tools(
-            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS, _execute_file_tool, max_tokens=1024
+            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS, _execute_file_tool, max_tokens=1024
         ),
         timeout=120.0,
     )
@@ -3172,6 +3502,39 @@ async def _run_cron_terminal_command(action_payload: Dict[str, Any], trigger_nam
     if result.get("success"):
         return (result.get("stdout") or "(no output)")[:800]
     return f"Command failed: {result.get('error') or result.get('stderr') or 'unknown error'}"
+
+
+async def _run_cron_channel_message(action_payload: Dict[str, Any], trigger_name: str = "job") -> str:
+    """Sends a real message through any registered channels.Channel (see
+    channels/registry.py) -- the general-purpose sibling of the
+    Telegram-specific telegram_message action, for any new channel that
+    registers itself (ntfy, Home Assistant, etc.)."""
+    from channels.registry import get_channel
+    channel_name = action_payload.get("channel", "")
+    message = action_payload.get("message", "")
+    channel = get_channel(channel_name)
+    if channel is None:
+        return f"error: channel {channel_name!r} is not registered/configured"
+    sent = await channel.send(message)
+    return "sent" if sent else f"error: {channel_name} send failed"
+
+
+async def _run_cron_memory_consolidate(action_payload: Dict[str, Any], trigger_name: str = "job") -> str:
+    """Runs a real memory/dreaming.py light+deep+REM consolidation cycle
+    over the live memory_manager.graph -- see memory/dreaming.py."""
+    from memory import dreaming
+    result = await dreaming.run_full_cycle(memory_manager.graph)
+    return result["rem"]["entry"]["narrative"]
+
+
+async def _run_cron_commitment_checkin(action_payload: Dict[str, Any], trigger_name: str = "job") -> str:
+    """Sends a real Telegram reminder for unresolved commitments
+    (memory/commitments.py), or stays silent if there's nothing open."""
+    reminder = commitments.format_overdue_reminder()
+    if reminder is None:
+        return "(nothing open -- no reminder sent)"
+    await telegram_notifier.send(reminder)
+    return reminder
 
 
 async def _run_cron_script(action_payload: Dict[str, Any], trigger_name: str = "job") -> str:

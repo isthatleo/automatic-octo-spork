@@ -21,6 +21,28 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = float(os.getenv("TERMINAL_TOOL_TIMEOUT_S", "30"))
 MAX_OUTPUT_CHARS = 8000
+MAX_OUTPUT_LINES = 200  # per stream (stdout/stderr), before head+tail compaction kicks in
+
+
+def _compact_output(text: str, max_lines: int = MAX_OUTPUT_LINES) -> str:
+    """Real exec-output compaction -- ported from OpenClaw's tokenjuice
+    extension. A noisy command (a build log, a verbose test run) that
+    produces thousands of lines shouldn't blow the context budget, but a
+    flat head-only truncation (the previous behavior here) throws away
+    exactly the part that usually matters most: the error at the *end* of
+    the output. Keeps the first and last halves of the line budget, with an
+    explicit omitted-line count in between, so both "what started running"
+    and "what it failed with" survive. Never touches the command's actual
+    exit code/stdout on disk -- this only shapes what re-enters the LLM's
+    context after the real command has already finished."""
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text[:MAX_OUTPUT_CHARS]
+    head_n = max_lines // 2
+    tail_n = max_lines - head_n
+    omitted = len(lines) - head_n - tail_n
+    compacted = "\n".join(lines[:head_n]) + f"\n\n... {omitted} lines omitted ...\n\n" + "\n".join(lines[-tail_n:])
+    return compacted[:MAX_OUTPUT_CHARS]
 
 # Command *prefixes* (matched against the lowercased, whitespace-collapsed
 # command string) that are read-only / side-effect-free enough to run without
@@ -58,12 +80,17 @@ async def execute_command(command: str, cwd: str | None = None, timeout: float =
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
+            import evidence_ledger
+            evidence_ledger.record_evidence("terminal_command", command, False, output=f"timed out after {timeout:.0f}s")
             return {"success": False, "error": f"Command timed out after {timeout:.0f}s", "command": command}
 
-        stdout = stdout_b.decode(errors="replace")[:MAX_OUTPUT_CHARS]
-        stderr = stderr_b.decode(errors="replace")[:MAX_OUTPUT_CHARS]
+        stdout = _compact_output(stdout_b.decode(errors="replace"))
+        stderr = _compact_output(stderr_b.decode(errors="replace"))
+        success = proc.returncode == 0
+        import evidence_ledger
+        evidence_ledger.record_evidence("terminal_command", command, success, exit_code=proc.returncode, output=stdout or stderr)
         return {
-            "success": proc.returncode == 0,
+            "success": success,
             "command": command,
             "exit_code": proc.returncode,
             "stdout": stdout,
@@ -71,6 +98,8 @@ async def execute_command(command: str, cwd: str | None = None, timeout: float =
         }
     except Exception as e:
         logger.exception("execute_command failed for %r", command)
+        import evidence_ledger
+        evidence_ledger.record_evidence("terminal_command", command, False, output=str(e))
         return {"success": False, "error": str(e), "command": command}
 
 
