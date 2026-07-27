@@ -147,3 +147,10 @@ python-lsp-server[all]>=1.14.0
 # Real Word document text extraction (doc_extraction.py) -- pypdf (PDF) is
 # already a dependency via other tooling; python-docx is the .docx equivalent.
 python-docx>=1.2.0
+
+# Real LAN service discovery (mdns_discovery.py).
+zeroconf>=0.140.0
+
+# Real Docker-backed multi-tenant sandboxes (fleet/*.py) -- requires Docker
+# Desktop (or another Docker Engine) actually running on this machine.
+docker>=7.0.0

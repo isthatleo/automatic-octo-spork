@@ -28,6 +28,7 @@ _VENDOR_MODULES = [
     "memory.providers.byterover",
     "memory.providers.openviking",
     "memory.providers.retaindb",
+    "providers.telephony.twilio",
 ]
 
 

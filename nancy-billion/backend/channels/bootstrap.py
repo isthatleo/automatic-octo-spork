@@ -17,6 +17,7 @@ _CHANNEL_MODULES: list[str] = [
     "channels.reef",
     "channels.clickclack",
     "channels.slack",
+    "channels.voice_call",
 ]
 
 

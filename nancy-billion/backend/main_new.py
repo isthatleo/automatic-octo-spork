@@ -94,6 +94,21 @@ import coverage_proxy
 import usage_analytics
 import achievements_store
 
+VOICE_CALL_TOOLS = [
+    {
+        "name": "place_phone_call",
+        "description": "Place a real phone call that speaks a message via text-to-speech on the line. Requires a telephony provider (e.g. Twilio) to be configured.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to_number": {"type": "string", "description": "E.164 format, e.g. +15551234567"},
+                "message": {"type": "string"},
+            },
+            "required": ["to_number", "message"],
+        },
+    },
+]
+
 DIFF_TOOLS = [
     {
         "name": "show_diff",
@@ -883,6 +898,19 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
     if name == "extract_document_text":
         return doc_extraction.extract_document(tool_input.get("path", ""))
 
+    if name == "place_phone_call":
+        if not arm_switch.is_armed():
+            approved = await telegram_notifier.request_approval(
+                f"Nancy wants to call {tool_input.get('to_number')} and say: {tool_input.get('message', '')[:200]}", timeout=120.0,
+            )
+            if not approved:
+                return {"success": False, "error": "User did not approve this phone call."}
+        from providers.registry import get_ordered_providers
+        providers = get_ordered_providers("telephony")
+        if not providers:
+            return {"success": False, "error": "No telephony provider is configured (e.g. TWILIO_ACCOUNT_SID)."}
+        return await providers[0].place_call(tool_input.get("to_number", ""), message=tool_input.get("message", ""))
+
     if name in ("take_screenshot", "get_screen_size"):
         loop = asyncio.get_event_loop()
         fn = computer_use_tool.take_screenshot if name == "take_screenshot" else computer_use_tool.get_screen_size
@@ -1094,7 +1122,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             resp = await asyncio.wait_for(
                 claude.generate_with_tools(
                     prompt,
-                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS,
+                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS,
                     _file_tool_executor,
                     max_tokens=1024,
                 ),
@@ -3790,7 +3818,7 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
     claude = AnthropicLLM()
     resp = await asyncio.wait_for(
         claude.generate_with_tools(
-            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS, _execute_file_tool, max_tokens=1024
+            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS, _execute_file_tool, max_tokens=1024
         ),
         timeout=120.0,
     )

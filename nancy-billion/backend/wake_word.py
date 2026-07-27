@@ -256,6 +256,17 @@ def get_wake_word_detector():
     class CompositeWakeWord(WakeWordDetector):
         def __init__(self):
             self.detectors = [ClapWakeWord(), VoiceWakeWord()]
+            # Real opt-in realtime backend (realtime_voice.py, Batch 9) --
+            # additive: the existing local-Whisper VoiceWakeWord above keeps
+            # running either way, this just also starts a lower-latency
+            # cloud-streaming detector alongside it when explicitly enabled
+            # and configured (DEEPGRAM_API_KEY set).
+            if os.getenv("WAKE_WORD_BACKEND", "").lower() == "realtime":
+                try:
+                    from realtime_voice import RealtimeVoiceWakeWord
+                    self.detectors.append(RealtimeVoiceWakeWord())
+                except Exception as e:
+                    logger.warning("Realtime wake-word backend unavailable: %s", e)
 
         def start(self, callback):
             for d in self.detectors:
