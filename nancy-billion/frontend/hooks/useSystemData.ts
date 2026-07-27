@@ -557,3 +557,212 @@ export async function sendChannelTest(key: string, message?: string): Promise<{ 
   return res.json()
 }
 
+// ---------------------------------------------------------------------------
+// Real paired nodes (node_host.py) -- a second machine running
+// node_agent_stub.py that this backend can dispatch real commands to,
+// gated by approval_policy.py's allow-once/allow-always/deny engine.
+// ---------------------------------------------------------------------------
+export function useNodes() {
+  return useSimplePoll<{ success: boolean; nodes: Record<string, { base_url: string }> }>('/api/nodes', 20000)
+}
+
+export async function registerNode(nodeId: string, baseUrl: string, sharedSecret: string): Promise<{ success: boolean; detail?: string }> {
+  const res = await fetch('/api/nodes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ node_id: nodeId, base_url: baseUrl, shared_secret: sharedSecret }),
+  })
+  return res.json()
+}
+
+export async function removeNode(nodeId: string): Promise<{ success: boolean }> {
+  const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, { method: 'DELETE' })
+  return res.json()
+}
+
+export async function checkNodeHealth(nodeId: string): Promise<{ success: boolean; error?: string }> {
+  const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/health`, { cache: 'no-store' })
+  return res.json()
+}
+
+// ---------------------------------------------------------------------------
+// Real Docker-backed multi-tenant fleet cells (fleet/manager.py, fleet/cell.py).
+// ---------------------------------------------------------------------------
+export interface FleetCell {
+  cell_id: string
+  tenant_id: string
+  container_id: string
+  image: string
+  mem_limit: string
+  nano_cpus: number
+  allowed_env_keys: string[]
+  created_at: number
+  status: string
+}
+export function useFleetHealth() {
+  return useSimplePoll<{ success: boolean; docker_available: boolean; containers_running?: number; error?: string }>('/api/fleet/health', 20000)
+}
+export function useFleetCells() {
+  return useSimplePoll<{ success: boolean; cells: FleetCell[] }>('/api/fleet/cells', 15000)
+}
+
+export async function createFleetCell(params: {
+  tenant_id: string
+  image?: string
+  mem_limit?: string
+  nano_cpus?: number
+}): Promise<{ success: boolean; detail?: string }> {
+  const res = await fetch('/api/fleet/cells', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  return res.json()
+}
+
+export async function stopFleetCell(cellId: string): Promise<{ success: boolean }> {
+  const res = await fetch(`/api/fleet/cells/${encodeURIComponent(cellId)}/stop`, { method: 'POST' })
+  return res.json()
+}
+
+export async function removeFleetCell(cellId: string): Promise<{ success: boolean; detail?: string }> {
+  const res = await fetch(`/api/fleet/cells/${encodeURIComponent(cellId)}`, { method: 'DELETE' })
+  return res.json()
+}
+
+// ---------------------------------------------------------------------------
+// Real LAN discovery (mdns_discovery.py) -- advertises this backend as
+// _nancy-gateway._tcp.local. and/or browses for other instances.
+// ---------------------------------------------------------------------------
+export function useMdnsStatus() {
+  return useSimplePoll<{ success: boolean; advertising: boolean; service_type: string; name: string | null }>('/api/mdns/status', 15000)
+}
+
+export async function mdnsAdvertise(): Promise<{ success: boolean; name?: string; address?: string; port?: number; error?: string }> {
+  const res = await fetch('/api/mdns/advertise', { method: 'POST' })
+  return res.json()
+}
+
+export async function mdnsStop(): Promise<{ success: boolean }> {
+  const res = await fetch('/api/mdns/stop', { method: 'POST' })
+  return res.json()
+}
+
+export interface MdnsService {
+  name: string
+  addresses: string[]
+  port: number
+  properties: Record<string, string>
+}
+export async function mdnsDiscover(): Promise<{ success: boolean; services: MdnsService[] }> {
+  const res = await fetch('/api/mdns/discover', { cache: 'no-store' })
+  return res.json()
+}
+
+// ---------------------------------------------------------------------------
+// Real session-level state: how many WebSocket connections (tabs/devices)
+// are actually open right now, and real persisted conversation history
+// (memory graph CONVERSATION nodes) that survives a page reload -- distinct
+// from the frontend's own in-tab `logs`, which resets on refresh.
+// ---------------------------------------------------------------------------
+export function useSessionsStatus() {
+  return useSimplePoll<{ success: boolean; active_connections: number; uptime_hours: number }>('/api/sessions/status', 15000)
+}
+
+export interface ConversationMemory {
+  id: string
+  content: string
+  source: string | null
+  timestamp: string | null
+  created_at: string
+}
+export function useConversationHistory(limit = 30) {
+  return useSimplePoll<{ success: boolean; conversations: ConversationMemory[] }>(`/api/memory/conversations?limit=${limit}`, 20000)
+}
+
+// ---------------------------------------------------------------------------
+// Real automation blueprints (blueprint_catalog.py) -- 14 pre-built
+// parameterized cron templates. One slot schema drives both this form and
+// the real job spec fill_blueprint() produces server-side.
+// ---------------------------------------------------------------------------
+export interface BlueprintField {
+  name: string
+  type: 'time' | 'enum' | 'text' | 'weekdays'
+  label: string
+  default: string | null
+  options: string[]
+  optional: boolean
+  help: string
+}
+export interface CronBlueprint {
+  key: string
+  title: string
+  description: string
+  category: string
+  tags: string[]
+  fields: BlueprintField[]
+  schedule: string
+  scheduleHuman: string
+}
+export function useCronBlueprints() {
+  return useSimplePoll<{ success: boolean; blueprints: CronBlueprint[] }>('/api/cron/blueprints', 120000)
+}
+
+export async function instantiateBlueprint(key: string, values: Record<string, string>): Promise<{ success: boolean; detail?: string; job?: unknown }> {
+  const res = await fetch(`/api/cron/blueprints/${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values }),
+  })
+  return res.json()
+}
+
+// ---------------------------------------------------------------------------
+// Real, invokable procedure skills (skill_loader.py's SKILL.md files) with
+// real usage stats -- how many times each has actually been keyword-matched
+// into a live prompt. Distinct from /skills/custom's purely descriptive
+// user-created tags, which have no effect on real behavior.
+// ---------------------------------------------------------------------------
+export interface LibrarySkill {
+  name: string
+  description: string
+  trigger_keywords: string[]
+  match_count: number
+  last_matched_at: number | null
+}
+export function useSkillLibrary() {
+  return useSimplePoll<{ success: boolean; skills: LibrarySkill[]; archived: string[] }>('/api/skills/library', 30000)
+}
+
+export async function archiveSkill(name: string): Promise<{ success: boolean; detail?: string }> {
+  const res = await fetch(`/api/skills/library/${encodeURIComponent(name)}/archive`, { method: 'POST' })
+  return res.json()
+}
+export async function restoreSkill(name: string): Promise<{ success: boolean; detail?: string }> {
+  const res = await fetch(`/api/skills/library/${encodeURIComponent(name)}/restore`, { method: 'POST' })
+  return res.json()
+}
+
+export interface SkillBundle {
+  id: string
+  name: string
+  skill_names: string[]
+  description: string
+  created_at: number
+}
+export function useSkillBundles() {
+  return useSimplePoll<{ success: boolean; bundles: SkillBundle[] }>('/api/skills/bundles', 30000)
+}
+export async function createSkillBundle(name: string, skillNames: string[], description = ''): Promise<{ success: boolean; detail?: string }> {
+  const res = await fetch('/api/skills/bundles', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, skill_names: skillNames, description }),
+  })
+  return res.json()
+}
+export async function deleteSkillBundle(id: string): Promise<{ success: boolean }> {
+  const res = await fetch(`/api/skills/bundles/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  return res.json()
+}
+

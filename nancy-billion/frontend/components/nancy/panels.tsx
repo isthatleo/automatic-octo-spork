@@ -2,7 +2,7 @@
 
 import { useEffect, useCallback, useMemo, useRef, useState } from 'react'
 import type { ElementType, ReactNode } from 'react'
-import { ArcReactor, HudPanel, RadialGauge, StatBar, AnimatedNumber } from './hud-bits'
+import { HudPanel, RadialGauge, StatBar, AnimatedNumber } from './hud-bits'
 import type { AgentInfo, PanelKey } from '@/lib/nancy/types'
 import { listAgents, type AgentListResponse } from '@/lib/nancy/agent-client'
 import { useSystemHealth, useTradeHistory, useLlmStatus, useCronStatus, useTelegramStatus } from '@/hooks/useSystemData'
@@ -868,6 +868,124 @@ function SystemCard({
 /* ═══════════════════════════════════════════════════════════════
    NEURAL CORE — Cognition dashboard
    ═══════════════════════════════════════════════════════════════ */
+/** Four corner HUD brackets -- a deliberate, page-scoped sci-fi flourish
+ * (see globals.css's note on this: the rest of the app retired exactly
+ * this kind of decoration on purpose; this page is an intentional
+ * exception, not a reversal of that call). Pure decoration, no data. */
+function CoreCornerBrackets() {
+  return (
+    <>
+      <span className="pointer-events-none absolute left-3 top-3 h-4 w-4 border-l-2 border-t-2 border-primary/60" aria-hidden />
+      <span className="pointer-events-none absolute right-3 top-3 h-4 w-4 border-r-2 border-t-2 border-primary/60" aria-hidden />
+      <span className="pointer-events-none absolute bottom-3 left-3 h-4 w-4 border-b-2 border-l-2 border-primary/60" aria-hidden />
+      <span className="pointer-events-none absolute bottom-3 right-3 h-4 w-4 border-b-2 border-r-2 border-primary/60" aria-hidden />
+    </>
+  )
+}
+
+/** A handful of ember/gold particles drifting up through the hero band.
+ * Fixed, deterministic positions (not Math.random()) so server and client
+ * render identically -- no hydration mismatch, still reads as "ambient",
+ * since real random can't be told apart from a few varied fixed values
+ * anyway. Pure atmosphere, not a data visualization. */
+const CORE_PARTICLES = [
+  { left: '8%', duration: '6.5s', delay: '0s', drift: '10px', color: 'var(--hud)' },
+  { left: '22%', duration: '8s', delay: '-2s', drift: '-14px', color: 'var(--gold)' },
+  { left: '38%', duration: '7s', delay: '-4.5s', drift: '8px', color: 'var(--hud)' },
+  { left: '55%', duration: '9s', delay: '-1s', drift: '-6px', color: 'var(--tertiary)' },
+  { left: '68%', duration: '6s', delay: '-3.5s', drift: '12px', color: 'var(--gold)' },
+  { left: '82%', duration: '7.5s', delay: '-5s', drift: '-10px', color: 'var(--hud)' },
+  { left: '92%', duration: '8.5s', delay: '-2.5s', drift: '6px', color: 'var(--tertiary)' },
+]
+function CoreParticles() {
+  return (
+    <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
+      {CORE_PARTICLES.map((p, i) => (
+        <span
+          key={i}
+          className="core-particle absolute bottom-0 h-1 w-1 rounded-full"
+          style={{
+            left: p.left,
+            background: p.color,
+            boxShadow: `0 0 6px ${p.color}`,
+            animationDuration: p.duration,
+            animationDelay: p.delay,
+            ['--core-drift-x' as string]: p.drift,
+          } as React.CSSProperties}
+        />
+      ))}
+    </div>
+  )
+}
+
+/** The bespoke, page-local "reactor" -- concentric counter-rotating rings
+ * around a pulsing core, with one real orbiting node per real LLM backend
+ * currently in the fallback chain (llm.backends -- never a fabricated
+ * count). Hover a node to see its real name/model. This intentionally
+ * doesn't reuse hud-bits.tsx's shared ArcReactor: that component is used
+ * elsewhere in the app under the "quiet, no sci-fi" convention, and this
+ * page is a deliberate one-off exception, not a change to that shared
+ * primitive. */
+function NeuralCoreVisualization({
+  backends,
+  online,
+}: {
+  backends: { name: string; model?: string }[]
+  online: boolean
+}) {
+  const size = 240
+  const orbitR = 108
+  const duration = 22
+
+  return (
+    <div className="core-radar relative flex shrink-0 items-center justify-center rounded-full" style={{ width: size, height: size }}>
+      <svg viewBox="0 0 200 200" className="absolute inset-0 h-full w-full">
+        <circle cx="100" cy="100" r="97" fill="none" stroke="var(--border)" strokeWidth="1" />
+        <circle
+          cx="100" cy="100" r="97" fill="none" stroke="var(--hud)" strokeWidth="1.5"
+          strokeDasharray="3 9" opacity="0.55" className="animate-hud-spin-slow" style={{ transformOrigin: '100px 100px' }}
+        />
+        <circle
+          cx="100" cy="100" r="80" fill="none" stroke="var(--tertiary)" strokeWidth="1"
+          strokeDasharray="1 7" opacity="0.45" className="animate-hud-spin-rev" style={{ transformOrigin: '100px 100px' }}
+        />
+        <circle
+          cx="100" cy="100" r="64" fill="none" stroke="var(--gold)" strokeWidth="1"
+          strokeDasharray="8 4" opacity="0.3" className="animate-hud-spin" style={{ transformOrigin: '100px 100px' }}
+        />
+      </svg>
+
+      <div
+        className={cn('relative flex h-[38%] w-[38%] items-center justify-center rounded-full core-glow-pulse', !online && 'opacity-40 grayscale')}
+        style={{
+          background: 'radial-gradient(circle at 35% 30%, oklch(0.85 0.1 60) 0%, var(--hud) 45%, oklch(0.4 0.08 42) 100%)',
+          boxShadow: '0 8px 30px oklch(0 0 0 / 35%)',
+        }}
+      >
+        <div className="h-[58%] w-[58%] rounded-full border border-background/30 bg-background/15" />
+      </div>
+
+      {backends.map((b, i) => {
+        const delay = -(i / Math.max(1, backends.length)) * duration
+        return (
+          <div
+            key={`${b.name}-${i}`}
+            className="core-orbit-node pointer-events-auto absolute left-1/2 top-1/2 h-0 w-0"
+            style={{ ['--core-orbit-r' as string]: `${orbitR}px`, ['--core-orbit-duration' as string]: `${duration}s`, animationDelay: `${delay}s` } as React.CSSProperties}
+          >
+            <div className="group relative -translate-x-1/2 -translate-y-1/2">
+              <span className="core-glow-pulse block h-3 w-3 rounded-full border border-primary/70 bg-primary/25" />
+              <span className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 whitespace-nowrap rounded border border-primary/30 bg-background/90 px-1.5 py-0.5 text-[0.42rem] text-primary opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100">
+                {b.name}{b.model ? ` · ${b.model}` : ''}
+              </span>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export function CorePanel() {
   const health = useSystemHealth()
   const { stats } = useAgentsBrief()
@@ -875,20 +993,31 @@ export function CorePanel() {
   const fleetOnlinePct = stats && stats.agents_online + stats.agents_offline > 0
     ? (stats.agents_online / (stats.agents_online + stats.agents_offline)) * 100
     : 0
+  const online = !!llm
 
   return (
     <div className="mx-auto flex max-w-[1680px] flex-col gap-4">
-      {/* ── Hero: reactor as the visual anchor, vitals wrapped as a ring of
-          gauges beneath it rather than a boxed grid beside it -- a
-          genuinely different composition from Overview's briefing-strip
-          layout. ── */}
-      <div className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-br from-card via-card to-primary/5 p-6">
+      {/* ── Hero: a bespoke, page-local sci-fi treatment (grid backdrop,
+          corner brackets, ambient particles, radar sweep, orbiting real
+          LLM-backend nodes) -- an explicit, scoped exception to the rest
+          of the app's "quiet, no sci-fi decoration" convention, not a
+          reversal of it. Every number is still real; only the presentation
+          got theatrical. ── */}
+      <div className="relative overflow-hidden rounded-2xl border border-primary/30 bg-gradient-to-br from-card via-card to-primary/5 p-6">
+        <div className="pointer-events-none absolute inset-0" aria-hidden>
+          <div className="core-grid-bg absolute inset-0 opacity-60" />
+        </div>
         <div className="pointer-events-none absolute -left-20 -bottom-20 h-56 w-56 rounded-full bg-primary/10 blur-3xl" aria-hidden />
+        <div className="pointer-events-none absolute -right-20 -top-20 h-56 w-56 rounded-full bg-tertiary/10 blur-3xl" aria-hidden />
+        <CoreParticles />
+        <CoreCornerBrackets />
+
         <div className="relative flex flex-col items-center gap-5">
-          <div className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
-            <span className="h-1.5 w-1.5 rounded-full bg-primary animate-hud-pulse" /> Neural Substrate · <span className="text-primary">STABLE</span>
+          <div className="core-flicker flex items-center gap-2 font-mono text-[0.6rem] tracking-[0.28em] text-muted-foreground">
+            <span className={cn('h-1.5 w-1.5 rounded-full', online ? 'bg-primary animate-hud-pulse' : 'bg-destructive')} />
+            NEURAL SUBSTRATE // <span className={online ? 'text-primary' : 'text-destructive'}>{online ? 'STABLE' : 'DEGRADED'}</span>
           </div>
-          <ArcReactor size={220} />
+          <NeuralCoreVisualization backends={llm?.backends ?? []} online={online} />
           <div className="grid w-full max-w-2xl grid-cols-2 gap-3 sm:grid-cols-4">
             <RadialGauge value={health.cpu ?? 0} label="CPU Load" color="var(--hud)" size={84} />
             <RadialGauge value={health.memory ?? 0} label="Memory" color="var(--accent)" size={84} />
@@ -899,12 +1028,12 @@ export function CorePanel() {
       </div>
 
       {/* ── Real reasoning pipeline: the actual STT -> LLM fallback chain ->
-          TTS flow this system runs, sourced from /llm/status. Replaces a
-          previous fully-fabricated "thought trace" animation that looped a
-          hardcoded, unrelated script regardless of what was really
-          happening -- this shows the real chain instead. ── */}
-      <HudPanel title="Reasoning Pipeline · Live Chain" accent="violet" right={<span className="text-primary text-[0.5rem]">{llm ? 'synced' : '…'}</span>}>
-        <ReasoningPipeline llm={llm} loading={llmLoading} />
+          TTS flow this system runs, sourced from /llm/status -- now
+          rendered as an animated energy-flow diagram (real stages, real
+          names, just a flowing-particle connector between them) instead
+          of plain boxes with a static arrow. ── */}
+      <HudPanel title="Reasoning Pipeline · Live Neural Chain" accent="violet" right={<span className="font-mono text-primary text-[0.5rem]">{llm ? '◆ SYNCED' : '…'}</span>}>
+        <NeuralPipelineFlow llm={llm} loading={llmLoading} />
       </HudPanel>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_320px]">
@@ -916,27 +1045,27 @@ export function CorePanel() {
           ) : (
             <ul className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
               {(llm?.backends ?? []).map((b, i) => (
-                <li key={`${b.name}-${i}`} className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
-                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                <li key={`${b.name}-${i}`} className="flex items-center justify-between gap-2 rounded border border-primary/20 bg-secondary/20 px-2 py-1.5 shadow-[inset_2px_0_0_var(--hud)]">
+                  <span className="flex items-center gap-2 font-mono text-[0.6rem] text-muted-foreground">
                     <Zap className="h-3 w-3 text-primary" /> {b.name}
                   </span>
-                  <span className="truncate text-[0.6rem] text-primary">{b.model ?? (i === 0 ? 'primary' : 'fallback')}</span>
+                  <span className="truncate font-mono text-[0.6rem] text-primary">{b.model ?? (i === 0 ? 'primary' : 'fallback')}</span>
                 </li>
               ))}
               {llm?.stt && (
-                <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
-                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                <li className="flex items-center justify-between gap-2 rounded border border-primary/20 bg-secondary/20 px-2 py-1.5 shadow-[inset_2px_0_0_var(--hud)]">
+                  <span className="flex items-center gap-2 font-mono text-[0.6rem] text-muted-foreground">
                     <Waves className="h-3 w-3 text-primary" /> Speech-to-text
                   </span>
-                  <span className="truncate text-[0.6rem] text-primary">{llm.stt.backend}{llm.stt.model ? ` · ${llm.stt.model}` : ''}</span>
+                  <span className="truncate font-mono text-[0.6rem] text-primary">{llm.stt.backend}{llm.stt.model ? ` · ${llm.stt.model}` : ''}</span>
                 </li>
               )}
               {llm?.tts && (
-                <li className="flex items-center justify-between gap-2 rounded border border-border/50 bg-secondary/20 px-2 py-1.5">
-                  <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground">
+                <li className="flex items-center justify-between gap-2 rounded border border-primary/20 bg-secondary/20 px-2 py-1.5 shadow-[inset_2px_0_0_var(--hud)]">
+                  <span className="flex items-center gap-2 font-mono text-[0.6rem] text-muted-foreground">
                     <Eye className="h-3 w-3 text-primary" /> Voice synthesis
                   </span>
-                  <span className="truncate text-[0.6rem] text-primary">{llm.tts.backend}</span>
+                  <span className="truncate font-mono text-[0.6rem] text-primary">{llm.tts.backend}</span>
                 </li>
               )}
             </ul>
@@ -945,17 +1074,17 @@ export function CorePanel() {
 
         <HudPanel title="Agent Fleet" accent="violet">
           <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between rounded border border-border/50 bg-secondary/20 px-2.5 py-2">
+            <div className="flex items-center justify-between rounded border border-tertiary/20 bg-secondary/20 px-2.5 py-2 shadow-[inset_2px_0_0_var(--tertiary)]">
               <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground"><Bot className="h-3.5 w-3.5 text-primary" /> Online</span>
-              <span className="font-heading text-sm text-primary"><AnimatedNumber value={stats?.agents_online ?? 0} /></span>
+              <span className="font-mono text-sm text-primary"><AnimatedNumber value={stats?.agents_online ?? 0} /></span>
             </div>
-            <div className="flex items-center justify-between rounded border border-border/50 bg-secondary/20 px-2.5 py-2">
+            <div className="flex items-center justify-between rounded border border-tertiary/20 bg-secondary/20 px-2.5 py-2 shadow-[inset_2px_0_0_var(--tertiary)]">
               <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground"><Zap className="h-3.5 w-3.5 text-primary" /> Tasks Run</span>
-              <span className="font-heading text-sm text-foreground"><AnimatedNumber value={stats?.total_tasks ?? 0} /></span>
+              <span className="font-mono text-sm text-foreground"><AnimatedNumber value={stats?.total_tasks ?? 0} /></span>
             </div>
-            <div className="flex items-center justify-between rounded border border-border/50 bg-secondary/20 px-2.5 py-2">
+            <div className="flex items-center justify-between rounded border border-tertiary/20 bg-secondary/20 px-2.5 py-2 shadow-[inset_2px_0_0_var(--tertiary)]">
               <span className="flex items-center gap-2 text-[0.6rem] text-muted-foreground"><Shield className="h-3.5 w-3.5 text-primary" /> Failures</span>
-              <span className="font-heading text-sm text-foreground"><AnimatedNumber value={stats?.failed_tasks ?? 0} /></span>
+              <span className="font-mono text-sm text-foreground"><AnimatedNumber value={stats?.failed_tasks ?? 0} /></span>
             </div>
           </div>
         </HudPanel>
@@ -965,8 +1094,11 @@ export function CorePanel() {
 }
 
 /** The real reasoning chain -- STT -> each LLM backend in real fallback
- * order -> TTS -- rendered as a flow instead of a fabricated scripted trace. */
-function ReasoningPipeline({ llm, loading }: { llm: ReturnType<typeof useLlmStatus>['data']; loading: boolean }) {
+ * order -> TTS -- rendered as an animated energy-flow diagram: real stage
+ * nodes connected by a glowing dot that travels the connector on a loop.
+ * Same real data as before (no stage is invented), just staged like an
+ * actual neural pipeline instead of static boxes. */
+function NeuralPipelineFlow({ llm, loading }: { llm: ReturnType<typeof useLlmStatus>['data']; loading: boolean }) {
   if (loading && !llm) {
     return (
       <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
@@ -987,16 +1119,19 @@ function ReasoningPipeline({ llm, loading }: { llm: ReturnType<typeof useLlmStat
     { label: 'Voice Synthesis', detail: llm.tts.backend, icon: Eye },
   ]
   return (
-    <div className="flex flex-wrap items-stretch gap-1.5">
+    <div className="flex flex-wrap items-stretch gap-0">
       {stages.map((s, i) => (
-        <div key={`${s.label}-${i}`} className="flex items-stretch gap-1.5">
-          <div className="flex min-w-[130px] flex-1 flex-col items-center gap-1.5 rounded border border-border/50 bg-secondary/20 px-3 py-3 text-center">
+        <div key={`${s.label}-${i}`} className="flex items-stretch">
+          <div className="core-glow-pulse relative flex min-w-[130px] flex-1 flex-col items-center gap-1.5 rounded border border-primary/30 bg-secondary/20 px-3 py-3 text-center">
             <s.icon className="h-4 w-4 text-primary" />
             <span className="font-heading text-[0.58rem] text-foreground">{s.label}</span>
-            <span className="truncate text-[0.52rem] text-muted-foreground">{s.detail}</span>
+            <span className="truncate font-mono text-[0.52rem] text-muted-foreground">{s.detail}</span>
           </div>
           {i < stages.length - 1 && (
-            <span className="flex items-center text-primary/50" aria-hidden>→</span>
+            <div className="relative mx-1 flex w-8 items-center overflow-hidden sm:w-12" aria-hidden>
+              <span className="h-px w-full bg-primary/30" />
+              <span className="core-flow-dot absolute left-0 top-1/2 h-1.5 w-1.5 rounded-full bg-primary" style={{ boxShadow: '0 0 6px var(--hud)' }} />
+            </div>
           )}
         </div>
       ))}

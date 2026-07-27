@@ -1732,6 +1732,31 @@ async def get_projects():
     }
 
 
+@app.get("/memory/conversations")
+async def get_conversation_history(limit: int = 30):
+    """Real persisted conversation turns (MemoryType.CONVERSATION nodes --
+    see memory/manager.py's process_conversation, which stores every real
+    turn as it happens). Unlike the frontend Sessions page's in-tab `logs`
+    (lost on refresh), this survives across reloads and browser tabs --
+    it's the same memory graph every other memory-backed feature reads
+    from. Embeddings are stripped before serialization (irrelevant to a
+    UI, and large)."""
+    nodes = memory_manager.graph.get_conversation_context(num_memories=limit)
+    return {
+        "success": True,
+        "conversations": [
+            {
+                "id": n.id,
+                "content": n.content,
+                "source": n.metadata.get("source"),
+                "timestamp": n.metadata.get("timestamp"),
+                "created_at": n.created_at,
+            }
+            for n in nodes
+        ],
+    }
+
+
 @app.get("/memory/trades")
 async def get_trades():
     """Get trade history from Nancy's memory"""
@@ -2377,6 +2402,24 @@ async def toggle_canvas_item_pinned(item_id: str, pinned: bool):
     return {"success": True, "item": item.to_public_dict()}
 
 
+class CanvasItemEditRequest(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    language: Optional[str] = None
+
+
+@app.put("/canvas/{item_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def edit_canvas_item(item_id: str, req: CanvasItemEditRequest):
+    """Real in-place edit of an existing canvas item's title/content/language
+    -- previously the only way to change one was delete + recreate, which
+    lost its id, pinned state, and created_at."""
+    item = canvas_store.update(item_id, title=req.title, content=req.content, language=req.language)
+    if item is None:
+        raise HTTPException(status_code=404, detail="canvas item not found")
+    await event_bus.publish("CANVAS_ITEM_UPDATED", {"item": item.to_public_dict()})
+    return {"success": True, "item": item.to_public_dict()}
+
+
 @app.delete("/canvas/{item_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def delete_canvas_item(item_id: str):
     if not canvas_store.delete(item_id):
@@ -2740,6 +2783,19 @@ async def delete_voice_reference():
     USER_REF_TXT.unlink(missing_ok=True)
     status = await tts_backend.refresh_reference()
     return {"success": True, **status}
+
+
+@app.get("/sessions/status")
+async def sessions_status():
+    """Real count of currently-open WebSocket connections (manager.active_connections
+    -- each browser tab/device actively talking to this backend right now)
+    plus real backend process uptime. Distinct from the frontend's own
+    per-tab `logs` state, which only reflects the current tab's turns."""
+    return {
+        "success": True,
+        "active_connections": len(manager.active_connections),
+        "uptime_hours": (_time.time() - _PROCESS_START_TIME) / 3600.0,
+    }
 
 
 @app.get("/telegram/status")

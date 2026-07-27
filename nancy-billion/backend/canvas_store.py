@@ -90,5 +90,24 @@ class CanvasStore:
         self._save()
         return item
 
+    def update(
+        self, item_id: str, title: Optional[str] = None, content: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> Optional[CanvasItem]:
+        """Real in-place edit -- previously the only way to change an item's
+        text was delete + recreate (losing its id, pinned state, and
+        created_at). Only overwrites fields actually passed."""
+        item = self._items.get(item_id)
+        if item is None:
+            return None
+        if title is not None:
+            item.title = title
+        if content is not None:
+            item.content = content
+        if language is not None:
+            item.language = language
+        self._save()
+        return item
+
 
 canvas_store = CanvasStore()

@@ -7,9 +7,17 @@ import {
   useCronStatus, useConfigPublic, useTelegramStatus, useLlmStatus,
   useScreenContextStatus, setScreenContextEnabled, captureScreenContextNow,
   useChannelsStatus, sendChannelTest, type ChannelStatus,
+  useNodes, registerNode, removeNode, checkNodeHealth,
+  useFleetHealth, useFleetCells, createFleetCell, stopFleetCell, removeFleetCell,
+  useMdnsStatus, mdnsAdvertise, mdnsStop, mdnsDiscover, type MdnsService,
+  useSessionsStatus, useConversationHistory,
+  useCronBlueprints, instantiateBlueprint, type CronBlueprint, type BlueprintField,
+  useSkillLibrary, archiveSkill, restoreSkill, type LibrarySkill,
+  useSkillBundles, createSkillBundle, deleteSkillBundle,
 } from '@/hooks/useSystemData'
 import type { AgentInfo, LogEntry } from '@/lib/nancy/types'
 import { cn } from '@/lib/utils'
+import { timeAgo } from '@/lib/nancy/time'
 import {
   Send, MessagesSquare, Hash, Phone, Globe2, CheckCircle2, XCircle,
   Wrench, Sparkles, Cpu, Waves, Eye, EyeOff, Key, User, Server,
@@ -19,6 +27,7 @@ import {
   CalendarClock, Library, ArrowRight, FileCode2,
   Fingerprint, Layers, MessageCircle, SendHorizonal, Upload, Mic,
   Moon, CheckSquare, Network, Award, Bell, Home, PhoneCall, MessageSquare,
+  Archive, ArchiveRestore, Package, GitMerge,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
@@ -76,10 +85,48 @@ function StatusPill({ ok, label }: { ok: boolean; label: string }) {
    conversation stream: user turns right-aligned, Nancy turns left-aligned
    on a center rail, system-level entries collapse to thin center dividers
    instead of taking a full turn slot. ═══════════════════════════════════ */
+/** Real persisted conversation turns (memory graph CONVERSATION nodes --
+ * see memory/manager.py's process_conversation). Unlike the live transcript
+ * above (this browser tab's in-memory `logs`, lost on refresh), this
+ * genuinely survives a reload or a second device -- the same memory graph
+ * every other memory-backed feature in the app reads from. */
+function ConversationHistoryCard() {
+  const { data, loading } = useConversationHistory(30)
+  const conversations = data?.conversations ?? []
+
+  return (
+    <div className="rounded-xl border border-border bg-card/60 p-4">
+      <div className="mb-2.5 flex items-center gap-2">
+        <Library className="h-4 w-4 text-primary" />
+        <h3 className="font-heading text-xs text-foreground">Conversation History</h3>
+        <span className="text-[0.5rem] text-muted-foreground">real, persisted across reloads</span>
+      </div>
+      {loading && conversations.length === 0 ? (
+        <div className="flex items-center justify-center py-4 text-[0.55rem] text-muted-foreground"><Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…</div>
+      ) : conversations.length === 0 ? (
+        <EmptyNote>No conversation turns have been persisted to memory yet. This reads the same real memory graph as Memory Insights (MemoryType.CONVERSATION), not the tab-local log above.</EmptyNote>
+      ) : (
+        <div className="flex max-h-72 flex-col gap-1.5 overflow-y-auto pr-1">
+          {conversations.map((c) => (
+            <div key={c.id} className="flex items-start gap-2 rounded border border-border/40 bg-secondary/10 px-2.5 py-1.5 text-[0.6rem]">
+              <span className={cn('mt-0.5 shrink-0 text-[0.5rem]', c.source === 'user' ? 'text-accent' : 'text-primary')}>
+                {c.source === 'user' ? <User className="h-2.5 w-2.5" /> : <Sparkles className="h-2.5 w-2.5" />}
+              </span>
+              <p className="min-w-0 flex-1 truncate text-foreground">{c.content}</p>
+              <span className="shrink-0 text-[0.48rem] text-muted-foreground">{new Date(c.created_at).toLocaleString('en-GB')}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function SessionsPanel({ logs }: { logs: LogEntry[] }) {
   const userTurns = logs.filter((l) => l.level === 'user').length
   const nancyTurns = logs.filter((l) => l.level === 'nancy').length
   const started = logs[0]?.ts ?? Date.now()
+  const { data: sessionStatus } = useSessionsStatus()
   return (
     <div className="mx-auto flex max-w-[1100px] flex-col gap-3">
       {/* slim session bar — live counts inline, no boxed stat grid */}
@@ -92,6 +139,11 @@ export function SessionsPanel({ logs }: { logs: LogEntry[] }) {
           </span>
         </div>
         <div className="flex items-center gap-4 text-[0.62rem]">
+          {sessionStatus && (
+            <span className="flex items-center gap-1.5 text-muted-foreground" title="Real open WebSocket connections to this backend right now">
+              <Network className="h-3 w-3 text-primary" /> {sessionStatus.active_connections} connected
+            </span>
+          )}
           <span className="flex items-center gap-1.5 text-accent">
             <span className="h-1.5 w-1.5 rounded-full bg-accent" /> {userTurns} you
           </span>
@@ -142,6 +194,8 @@ export function SessionsPanel({ logs }: { logs: LogEntry[] }) {
           </div>
         )}
       </div>
+
+      <ConversationHistoryCard />
     </div>
   )
 }
@@ -289,6 +343,268 @@ export function ChannelsPanel() {
    rail: root process → the two real subsystems it hosts. Nothing below the
    real signal is invented — there's genuinely no multi-instance fleet, so
    the ladder stays honestly short rather than padded with fake nodes. ═══ */
+/** Real paired remote nodes (node_host.py) -- a second machine running
+ * node_agent_stub.py that this backend can dispatch to, gated by
+ * approval_policy.py. Empty until you actually pair one; the pairing form
+ * writes a real registration, not a placeholder. */
+function PairedNodesCard() {
+  const { data, loading } = useNodes()
+  const nodes = Object.entries(data?.nodes ?? {})
+  const [healthById, setHealthById] = useState<Record<string, { ok: boolean; detail: string }>>({})
+  const [checking, setChecking] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [nodeId, setNodeId] = useState('')
+  const [baseUrl, setBaseUrl] = useState('')
+  const [secret, setSecret] = useState('')
+  const [pairing, setPairing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const checkHealth = async (id: string) => {
+    setChecking(id)
+    try {
+      const res = await checkNodeHealth(id)
+      setHealthById((prev) => ({ ...prev, [id]: { ok: !!res.success, detail: res.success ? 'reachable' : res.error ?? 'unreachable' } }))
+    } finally {
+      setChecking(null)
+    }
+  }
+
+  const pair = async () => {
+    setPairing(true); setError(null)
+    try {
+      const res = await registerNode(nodeId.trim(), baseUrl.trim(), secret.trim())
+      if (!res.success) { setError(res.detail ?? 'Failed to pair node'); return }
+      setNodeId(''); setBaseUrl(''); setSecret(''); setOpen(false)
+    } finally {
+      setPairing(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-border bg-card/60 p-4">
+      <div className="mb-2.5 flex items-center gap-2">
+        <Network className="h-4 w-4 text-primary" />
+        <h3 className="font-heading text-xs text-foreground">Paired Nodes</h3>
+        <span className="text-[0.5rem] text-muted-foreground">{loading ? '…' : `${nodes.length} paired`}</span>
+        <button type="button" onClick={() => setOpen((v) => !v)} className="ml-auto rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground">
+          {open ? 'Cancel' : 'Pair a node'}
+        </button>
+      </div>
+
+      {open && (
+        <div className="mb-3 flex flex-col gap-2 rounded-lg border border-border bg-secondary/20 p-3">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <input className={inputCls} placeholder="node_id" value={nodeId} onChange={(e) => setNodeId(e.target.value)} />
+            <input className={inputCls} placeholder="http://host:8100" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+            <input className={inputCls} type="password" placeholder="shared secret" value={secret} onChange={(e) => setSecret(e.target.value)} />
+          </div>
+          {error && <p className="text-[0.55rem] text-destructive">{error}</p>}
+          <PrimaryButton onClick={pair} disabled={pairing || !nodeId.trim() || !baseUrl.trim() || !secret.trim()}>
+            {pairing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Pair
+          </PrimaryButton>
+          <p className="text-[0.48rem] leading-snug text-muted-foreground">
+            The remote machine must be running node_agent_stub.py with the same shared secret.
+          </p>
+        </div>
+      )}
+
+      {nodes.length === 0 ? (
+        <EmptyNote>No nodes paired yet. This is a real capability (node_host.py) -- pair a second machine running node_agent_stub.py to dispatch real commands to it.</EmptyNote>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {nodes.map(([id, cfg]) => {
+            const health = healthById[id]
+            return (
+              <div key={id} className="flex items-center gap-3 rounded border border-border/50 bg-secondary/10 px-3 py-2">
+                <span className={cn('flex h-7 w-7 shrink-0 items-center justify-center rounded-full border', health?.ok ? 'border-primary/50 bg-primary/10' : 'border-border/50 bg-secondary/20')}>
+                  <Server className={cn('h-3.5 w-3.5', health?.ok ? 'text-primary' : 'text-muted-foreground')} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[0.62rem] text-foreground">{id}</div>
+                  <div className="truncate text-[0.5rem] text-muted-foreground">{cfg.base_url} · {health ? health.detail : 'not checked yet'}</div>
+                </div>
+                <button type="button" onClick={() => checkHealth(id)} disabled={checking === id} className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground disabled:opacity-50">
+                  {checking === id ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Check'}
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => { await removeNode(id) }}
+                  className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:border-destructive/60 hover:text-destructive"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Real Docker-backed multi-tenant fleet cells (fleet/manager.py,
+ * fleet/cell.py) -- each cell is a genuine isolated container with real
+ * resource limits. Honestly reports when Docker itself isn't reachable,
+ * rather than showing an empty list indistinguishable from "no cells yet". */
+function FleetCellsCard() {
+  const { data: health } = useFleetHealth()
+  const { data, loading, error: _err } = useFleetCells()
+  const cells = data?.cells ?? []
+  const [open, setOpen] = useState(false)
+  const [tenantId, setTenantId] = useState('')
+  const [image, setImage] = useState('python:3.11-slim')
+  const [creating, setCreating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const create = async () => {
+    setCreating(true); setError(null)
+    try {
+      const res = await createFleetCell({ tenant_id: tenantId.trim(), image: image.trim() || undefined })
+      if (!res.success) { setError(res.detail ?? 'Failed to create cell'); return }
+      setTenantId(''); setOpen(false)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const doStop = async (id: string) => { setBusyId(id); try { await stopFleetCell(id) } finally { setBusyId(null) } }
+  const doRemove = async (id: string) => { setBusyId(id); try { await removeFleetCell(id) } finally { setBusyId(null) } }
+
+  return (
+    <div className="rounded-xl border border-border bg-card/60 p-4">
+      <div className="mb-2.5 flex items-center gap-2">
+        <Layers className="h-4 w-4 text-primary" />
+        <h3 className="font-heading text-xs text-foreground">Fleet Cells</h3>
+        {health && (
+          <StatusPill ok={!!health.docker_available} label={health.docker_available ? `docker · ${health.containers_running ?? 0} running` : 'docker unavailable'} />
+        )}
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          disabled={!health?.docker_available}
+          className="ml-auto rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground disabled:opacity-40"
+        >
+          {open ? 'Cancel' : 'New cell'}
+        </button>
+      </div>
+
+      {health && !health.docker_available && (
+        <p className="mb-2 text-[0.5rem] text-muted-foreground">{health.error ?? 'Docker Desktop (or another Docker Engine) is not reachable from this backend.'}</p>
+      )}
+
+      {open && (
+        <div className="mb-3 flex flex-col gap-2 rounded-lg border border-border bg-secondary/20 p-3">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <input className={inputCls} placeholder="tenant_id" value={tenantId} onChange={(e) => setTenantId(e.target.value)} />
+            <input className={inputCls} placeholder="image (default python:3.11-slim)" value={image} onChange={(e) => setImage(e.target.value)} />
+          </div>
+          {error && <p className="text-[0.55rem] text-destructive">{error}</p>}
+          <PrimaryButton onClick={create} disabled={creating || !tenantId.trim()}>
+            {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Create (requires approval on your phone)
+          </PrimaryButton>
+        </div>
+      )}
+
+      {loading && cells.length === 0 ? (
+        <div className="flex items-center justify-center py-4 text-[0.55rem] text-muted-foreground"><Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…</div>
+      ) : cells.length === 0 ? (
+        <EmptyNote>No fleet cells running. This is real Docker-backed multi-tenant isolation (fleet/cell.py) -- create one to see a real container spun up with real resource limits.</EmptyNote>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {cells.map((c) => (
+            <div key={c.cell_id} className="flex items-center gap-3 rounded border border-border/50 bg-secondary/10 px-3 py-2">
+              <span className={cn('flex h-7 w-7 shrink-0 items-center justify-center rounded-full border', c.status === 'running' ? 'border-primary/50 bg-primary/10' : 'border-border/50 bg-secondary/20')}>
+                <Layers className={cn('h-3.5 w-3.5', c.status === 'running' ? 'text-primary' : 'text-muted-foreground')} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[0.62rem] text-foreground">{c.tenant_id} <span className="text-muted-foreground">· {c.image}</span></div>
+                <div className="truncate text-[0.5rem] text-muted-foreground">{c.mem_limit} · {c.nano_cpus} CPU · {c.status}</div>
+              </div>
+              <button type="button" onClick={() => doStop(c.cell_id)} disabled={busyId === c.cell_id} className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground disabled:opacity-50">
+                Stop
+              </button>
+              <button type="button" onClick={() => doRemove(c.cell_id)} disabled={busyId === c.cell_id} className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:border-destructive/60 hover:text-destructive disabled:opacity-50">
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Real LAN discovery (mdns_discovery.py) -- advertises this backend as
+ * _nancy-gateway._tcp.local. and/or browses for other instances on the
+ * network. No credential needed, local-network-only by design. */
+function LanDiscoveryCard() {
+  const { data: status } = useMdnsStatus()
+  const [busy, setBusy] = useState(false)
+  const [services, setServices] = useState<MdnsService[] | null>(null)
+  const [scanning, setScanning] = useState(false)
+
+  const toggle = async () => {
+    setBusy(true)
+    try {
+      if (status?.advertising) await mdnsStop()
+      else await mdnsAdvertise()
+    } finally {
+      setBusy(false)
+    }
+  }
+  const scan = async () => {
+    setScanning(true)
+    try {
+      const res = await mdnsDiscover()
+      setServices(res.services ?? [])
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-border bg-card/60 p-4">
+      <div className="mb-2.5 flex items-center gap-2">
+        <Radar className="h-4 w-4 text-primary" />
+        <h3 className="font-heading text-xs text-foreground">LAN Discovery</h3>
+        <StatusPill ok={!!status?.advertising} label={status?.advertising ? 'advertising' : 'not advertising'} />
+        <div className="ml-auto flex gap-1.5">
+          <button type="button" onClick={scan} disabled={scanning} className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground disabled:opacity-50">
+            {scanning ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Scan LAN'}
+          </button>
+          <button
+            type="button"
+            onClick={toggle}
+            disabled={busy}
+            className={cn('rounded border px-2 py-1 text-[0.5rem] disabled:opacity-50', status?.advertising ? 'border-destructive/50 text-destructive' : 'border-primary/50 text-primary')}
+          >
+            {status?.advertising ? 'Stop advertising' : 'Advertise'}
+          </button>
+        </div>
+      </div>
+      <p className="mb-2 text-[0.5rem] text-muted-foreground">
+        {status?.advertising ? `Advertising as ${status.name}` : 'Not currently discoverable on the LAN.'}
+      </p>
+      {services === null ? (
+        <EmptyNote>Run a scan to browse for other _nancy-gateway._tcp instances (or paired node-agents) on this network.</EmptyNote>
+      ) : services.length === 0 ? (
+        <EmptyNote>Scan found nothing on this network right now.</EmptyNote>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {services.map((s) => (
+            <div key={s.name} className="flex items-center gap-3 rounded border border-border/50 bg-secondary/10 px-3 py-2 text-[0.6rem]">
+              <Server className="h-3.5 w-3.5 shrink-0 text-primary" />
+              <span className="truncate text-foreground">{s.name}</span>
+              <span className="truncate text-muted-foreground">{s.addresses.join(', ')}:{s.port}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function InstancesPanel() {
   const { data: llm, loading } = useLlmStatus()
   const online = !!llm
@@ -300,45 +616,51 @@ export function InstancesPanel() {
   ]
 
   return (
-    <div className="mx-auto flex max-w-[760px] flex-col">
-      {/* root node */}
-      <div className="flex items-center gap-3 rounded-xl border border-border bg-card/60 px-4 py-3.5">
-        <span className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-full border', online ? 'border-primary/50 bg-primary/10' : 'border-destructive/50 bg-destructive/10')}>
-          <Server className={cn('h-5 w-5', online ? 'text-primary' : 'text-destructive')} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="font-heading text-xs text-foreground">Backend Process</div>
-          <div className="text-[0.55rem] text-muted-foreground">Single local process for one user — not a distributed gateway</div>
-        </div>
-        {loading ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" /> : <StatusPill ok={online} label={online ? 'online' : 'unreachable'} />}
-      </div>
-
-      {/* connecting rail down to the two real subsystems */}
-      <div className="ml-9 flex flex-col">
-        {nodes.map((n, i) => (
-          <div key={n.label} className="relative flex items-center gap-3 pl-6">
-            <span
-              className={cn('absolute left-0 top-0 w-px bg-border', i === nodes.length - 1 ? 'h-1/2' : 'h-full')}
-              aria-hidden
-            />
-            <span className="absolute left-0 top-1/2 h-px w-6 bg-border" aria-hidden />
-            <div className="flex flex-1 items-center gap-3 rounded-xl border border-border bg-card/50 px-4 py-3 my-1.5">
-              <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full border', n.ok ? 'border-primary/50 bg-primary/10' : 'border-border/50 bg-secondary/20')}>
-                <n.icon className={cn('h-4 w-4', n.ok ? 'text-primary' : 'text-muted-foreground')} />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="text-[0.65rem] text-foreground">{n.label}</div>
-                <div className="text-[0.5rem] text-muted-foreground">{n.sub}</div>
-              </div>
-              <StatusPill ok={n.ok} label={n.ok ? 'ready' : 'not ready'} />
-            </div>
+    <div className="mx-auto flex max-w-[900px] flex-col gap-4">
+      <div className="flex flex-col">
+        {/* root node */}
+        <div className="flex items-center gap-3 rounded-xl border border-border bg-card/60 px-4 py-3.5">
+          <span className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-full border', online ? 'border-primary/50 bg-primary/10' : 'border-destructive/50 bg-destructive/10')}>
+            <Server className={cn('h-5 w-5', online ? 'text-primary' : 'text-destructive')} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="font-heading text-xs text-foreground">Backend Process</div>
+            <div className="text-[0.55rem] text-muted-foreground">This machine's local process — the root of everything below</div>
           </div>
-        ))}
+          {loading ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" /> : <StatusPill ok={online} label={online ? 'online' : 'unreachable'} />}
+        </div>
+
+        {/* connecting rail down to the two in-process subsystems */}
+        <div className="ml-9 flex flex-col">
+          {nodes.map((n, i) => (
+            <div key={n.label} className="relative flex items-center gap-3 pl-6">
+              <span
+                className={cn('absolute left-0 top-0 w-px bg-border', i === nodes.length - 1 ? 'h-1/2' : 'h-full')}
+                aria-hidden
+              />
+              <span className="absolute left-0 top-1/2 h-px w-6 bg-border" aria-hidden />
+              <div className="flex flex-1 items-center gap-3 rounded-xl border border-border bg-card/50 px-4 py-3 my-1.5">
+                <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full border', n.ok ? 'border-primary/50 bg-primary/10' : 'border-border/50 bg-secondary/20')}>
+                  <n.icon className={cn('h-4 w-4', n.ok ? 'text-primary' : 'text-muted-foreground')} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[0.65rem] text-foreground">{n.label}</div>
+                  <div className="text-[0.5rem] text-muted-foreground">{n.sub}</div>
+                </div>
+                <StatusPill ok={n.ok} label={n.ok ? 'ready' : 'not ready'} />
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
-      <div className="mt-3">
-        <EmptyNote>Nancy runs as a single local backend process for one user — there&apos;s no multi-instance fleet to list here.</EmptyNote>
-      </div>
+      {/* Real expansion capabilities beyond this one process -- paired
+          remote nodes, Docker fleet cells, and LAN discovery all actually
+          exist in the backend (node_host.py, fleet/*.py, mdns_discovery.py)
+          and previously had zero surface on this page. */}
+      <PairedNodesCard />
+      <FleetCellsCard />
+      <LanDiscoveryCard />
     </div>
   )
 }
@@ -352,12 +674,32 @@ interface CustomCronJob {
   description: string
   hour: number
   minute: number
-  action_type: 'telegram_message' | 'agent_task'
+  action_type: 'telegram_message' | 'agent_task' | 'run_skill' | 'terminal_command' | 'run_script' | 'channel_message' | 'memory_consolidate' | 'commitment_checkin'
   action_payload: Record<string, unknown>
   enabled: boolean
   next_run: string
   last_run: string | null
   last_result: string | null
+}
+
+/** Every real ActionType cron_store.py actually accepts (see cron_store.py's
+ * ActionType Literal + the validation in POST /cron/jobs) -- the old form
+ * only ever offered 2 of these 8, silently hiding run_skill, terminal_command,
+ * run_script, channel_message, memory_consolidate, and commitment_checkin
+ * even though the backend has always accepted them. */
+type CronActionType =
+  | 'telegram_message' | 'agent_task' | 'run_skill' | 'terminal_command'
+  | 'run_script' | 'channel_message' | 'memory_consolidate' | 'commitment_checkin'
+
+const ACTION_TYPE_LABELS: Record<CronActionType, string> = {
+  telegram_message: 'Send Telegram message',
+  agent_task: 'Run an agent task',
+  run_skill: 'Run a skill',
+  terminal_command: 'Run a terminal command',
+  run_script: 'Run a backend script',
+  channel_message: 'Send to a channel',
+  memory_consolidate: 'Memory consolidation cycle',
+  commitment_checkin: 'Open commitments check-in',
 }
 
 function NewCronJobForm({ agents, onCreated }: { agents: AgentInfo[]; onCreated: () => void }) {
@@ -366,23 +708,60 @@ function NewCronJobForm({ agents, onCreated }: { agents: AgentInfo[]; onCreated:
   const [description, setDescription] = useState('')
   const [hour, setHour] = useState('9')
   const [minute, setMinute] = useState('0')
-  const [actionType, setActionType] = useState<'telegram_message' | 'agent_task'>('telegram_message')
+  const [useCronExpr, setUseCronExpr] = useState(false)
+  const [cronExpr, setCronExpr] = useState('')
+  const [actionType, setActionType] = useState<CronActionType>('telegram_message')
   const [text, setText] = useState('')
   const [agentKey, setAgentKey] = useState('')
   const [taskType, setTaskType] = useState('query')
+  const [skillName, setSkillName] = useState('')
+  const [command, setCommand] = useState('')
+  const [script, setScript] = useState('')
+  const [channelKey, setChannelKey] = useState('')
+  const [channelMessage, setChannelMessage] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { data: channelsData } = useChannelsStatus()
+  const configuredChannels = (channelsData?.channels ?? []).filter((c) => c.configured)
+
+  const actionPayload = (): Record<string, unknown> => {
+    switch (actionType) {
+      case 'telegram_message': return { text }
+      case 'agent_task': return { agent_key: agentKey, task_type: taskType, payload: {} }
+      case 'run_skill': return { skill_name: skillName }
+      case 'terminal_command': return { command }
+      case 'run_script': return { script }
+      case 'channel_message': return { channel: channelKey, message: channelMessage }
+      case 'memory_consolidate':
+      case 'commitment_checkin': return {}
+    }
+  }
+  const isValid = (): boolean => {
+    if (!name.trim()) return false
+    if (useCronExpr && !cronExpr.trim()) return false
+    switch (actionType) {
+      case 'telegram_message': return !!text.trim()
+      case 'agent_task': return !!agentKey
+      case 'run_skill': return !!skillName.trim()
+      case 'terminal_command': return !!command.trim()
+      case 'run_script': return !!script.trim()
+      case 'channel_message': return !!channelKey && !!channelMessage.trim()
+      case 'memory_consolidate':
+      case 'commitment_checkin': return true
+    }
+  }
 
   const submit = async () => {
     setSaving(true); setError(null)
     try {
-      const action_payload = actionType === 'telegram_message'
-        ? { text }
-        : { agent_key: agentKey, task_type: taskType, payload: {} }
       const res = await fetch('/api/cron/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description, hour: Number(hour), minute: Number(minute), action_type: actionType, action_payload }),
+        body: JSON.stringify({
+          name, description,
+          ...(useCronExpr ? { cron_expression: cronExpr.trim() } : { hour: Number(hour), minute: Number(minute) }),
+          action_type: actionType, action_payload: actionPayload(),
+        }),
       })
       const json = await res.json()
       if (!json.success) { setError(json.detail || 'Failed to create job'); return }
@@ -397,7 +776,7 @@ function NewCronJobForm({ agents, onCreated }: { agents: AgentInfo[]; onCreated:
 
   if (!open) {
     return (
-      <PrimaryButton onClick={() => setOpen(true)}><Plus className="h-3.5 w-3.5" /> New job</PrimaryButton>
+      <PrimaryButton onClick={() => setOpen(true)}><Plus className="h-3.5 w-3.5" /> New job (advanced)</PrimaryButton>
     )
   }
 
@@ -412,29 +791,40 @@ function NewCronJobForm({ agents, onCreated }: { agents: AgentInfo[]; onCreated:
           <FieldLabel>Description</FieldLabel>
           <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="optional" />
         </div>
-        <div className="flex gap-2">
-          <div className="flex-1">
-            <FieldLabel>Hour (0-23)</FieldLabel>
-            <input className={inputCls} type="number" min={0} max={23} value={hour} onChange={(e) => setHour(e.target.value)} />
+
+        <div className="sm:col-span-2">
+          <div className="mb-1 flex items-center justify-between">
+            <FieldLabel>When</FieldLabel>
+            <button type="button" onClick={() => setUseCronExpr((v) => !v)} className="text-[0.5rem] text-muted-foreground hover:text-primary">
+              {useCronExpr ? 'Use hour/minute instead' : 'Use a cron expression instead'}
+            </button>
           </div>
-          <div className="flex-1">
-            <FieldLabel>Minute (0-59)</FieldLabel>
-            <input className={inputCls} type="number" min={0} max={59} value={minute} onChange={(e) => setMinute(e.target.value)} />
-          </div>
+          {useCronExpr ? (
+            <input className={inputCls} value={cronExpr} onChange={(e) => setCronExpr(e.target.value)} placeholder="e.g. */30 9-17 * * 1-5" />
+          ) : (
+            <div className="flex gap-2">
+              <input className={inputCls} type="number" min={0} max={23} value={hour} onChange={(e) => setHour(e.target.value)} placeholder="hour (0-23)" />
+              <input className={inputCls} type="number" min={0} max={59} value={minute} onChange={(e) => setMinute(e.target.value)} placeholder="minute (0-59)" />
+            </div>
+          )}
         </div>
-        <div>
+
+        <div className="sm:col-span-2">
           <FieldLabel>Action</FieldLabel>
-          <select className={inputCls} value={actionType} onChange={(e) => setActionType(e.target.value as 'telegram_message' | 'agent_task')}>
-            <option value="telegram_message">Send Telegram message</option>
-            <option value="agent_task">Run an agent task</option>
+          <select className={inputCls} value={actionType} onChange={(e) => setActionType(e.target.value as CronActionType)}>
+            {(Object.keys(ACTION_TYPE_LABELS) as CronActionType[]).map((t) => (
+              <option key={t} value={t}>{ACTION_TYPE_LABELS[t]}</option>
+            ))}
           </select>
         </div>
-        {actionType === 'telegram_message' ? (
+
+        {actionType === 'telegram_message' && (
           <div className="sm:col-span-2">
             <FieldLabel>Message text</FieldLabel>
             <input className={inputCls} value={text} onChange={(e) => setText(e.target.value)} placeholder="What should Nancy send?" />
           </div>
-        ) : (
+        )}
+        {actionType === 'agent_task' && (
           <>
             <div>
               <FieldLabel>Agent</FieldLabel>
@@ -449,18 +839,187 @@ function NewCronJobForm({ agents, onCreated }: { agents: AgentInfo[]; onCreated:
             </div>
           </>
         )}
+        {actionType === 'run_skill' && (
+          <div className="sm:col-span-2">
+            <FieldLabel>Skill name</FieldLabel>
+            <input className={inputCls} value={skillName} onChange={(e) => setSkillName(e.target.value)} placeholder="e.g. system-monitoring" />
+          </div>
+        )}
+        {actionType === 'terminal_command' && (
+          <div className="sm:col-span-2">
+            <FieldLabel>Command</FieldLabel>
+            <input className={inputCls} value={command} onChange={(e) => setCommand(e.target.value)} placeholder="a real shell command, run through the same safety gate as chat" />
+          </div>
+        )}
+        {actionType === 'run_script' && (
+          <div className="sm:col-span-2">
+            <FieldLabel>Script filename</FieldLabel>
+            <input className={inputCls} value={script} onChange={(e) => setScript(e.target.value)} placeholder="e.g. disk_cleanup.py (under backend/scripts/)" />
+          </div>
+        )}
+        {actionType === 'channel_message' && (
+          <>
+            <div>
+              <FieldLabel>Channel</FieldLabel>
+              <select className={inputCls} value={channelKey} onChange={(e) => setChannelKey(e.target.value)}>
+                <option value="">Select a channel…</option>
+                {configuredChannels.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+              </select>
+              {configuredChannels.length === 0 && <p className="mt-1 text-[0.48rem] text-muted-foreground">No channels configured yet -- see the Channels page.</p>}
+            </div>
+            <div>
+              <FieldLabel>Message</FieldLabel>
+              <input className={inputCls} value={channelMessage} onChange={(e) => setChannelMessage(e.target.value)} placeholder="What should it say?" />
+            </div>
+          </>
+        )}
+        {(actionType === 'memory_consolidate' || actionType === 'commitment_checkin') && (
+          <p className="sm:col-span-2 text-[0.5rem] text-muted-foreground">No extra fields needed -- this runs the real {actionType === 'memory_consolidate' ? 'memory/dreaming.py consolidation' : 'memory/commitments.py check-in'}.</p>
+        )}
       </div>
       {error && <p className="text-[0.55rem] text-destructive">{error}</p>}
       <div className="flex gap-2">
-        <PrimaryButton
-          onClick={submit}
-          disabled={saving || !name.trim() || (actionType === 'telegram_message' ? !text.trim() : !agentKey)}
-        >
+        <PrimaryButton onClick={submit} disabled={saving || !isValid()}>
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Create job
         </PrimaryButton>
         <button type="button" onClick={() => setOpen(false)} className="rounded-lg border border-border px-3 py-1.5 text-[0.6rem] text-muted-foreground hover:text-foreground">
           Cancel
         </button>
+      </div>
+    </div>
+  )
+}
+
+const CATEGORY_LABELS: Record<string, string> = {
+  daily: 'Daily', weekly: 'Weekly', general: 'General', maintenance: 'Maintenance',
+}
+
+function BlueprintFieldInput({ field, value, onChange }: { field: BlueprintField; value: string; onChange: (v: string) => void }) {
+  if (field.type === 'time') {
+    return <input className={inputCls} type="time" value={value} onChange={(e) => onChange(e.target.value)} />
+  }
+  if (field.type === 'enum' || field.type === 'weekdays') {
+    return (
+      <select className={inputCls} value={value} onChange={(e) => onChange(e.target.value)}>
+        {field.options.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    )
+  }
+  return <input className={inputCls} type="text" value={value} onChange={(e) => onChange(e.target.value)} placeholder={field.label} />
+}
+
+/** One real automation blueprint (blueprint_catalog.py) -- the same slot
+ * schema drives this form and the real job blueprint_catalog.fill_blueprint()
+ * produces server-side, so what you fill in here is exactly what runs. */
+function BlueprintCard({ blueprint, onCreated }: { blueprint: CronBlueprint; onCreated: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(blueprint.fields.map((f) => [f.name, f.default ?? ''])),
+  )
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+
+  const submit = async () => {
+    setSaving(true); setError(null)
+    try {
+      const res = await instantiateBlueprint(blueprint.key, values)
+      if (!res.success) { setError(res.detail ?? 'Failed to create job from blueprint'); return }
+      setDone(true)
+      onCreated()
+      setTimeout(() => { setOpen(false); setDone(false) }, 1500)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/20 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="font-heading text-[0.68rem] text-foreground">{blueprint.title}</div>
+          <p className="mt-0.5 text-[0.55rem] leading-snug text-muted-foreground">{blueprint.description}</p>
+        </div>
+        <span className="shrink-0 rounded-full border border-tertiary/40 px-1.5 py-0 text-[0.45rem] uppercase tracking-wide text-tertiary">
+          {CATEGORY_LABELS[blueprint.category] ?? blueprint.category}
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5 text-[0.48rem] text-muted-foreground">
+        <CalendarClock className="h-3 w-3" /> {blueprint.scheduleHuman}
+        {blueprint.tags.map((t) => <span key={t} className="rounded-full border border-border/50 px-1.5 py-0">{t}</span>)}
+      </div>
+
+      {!open ? (
+        <PrimaryButton onClick={() => setOpen(true)} className="self-start">
+          <Plus className="h-3.5 w-3.5" /> Use this
+        </PrimaryButton>
+      ) : done ? (
+        <p className="flex items-center gap-1.5 text-[0.6rem] text-primary"><CheckCircle2 className="h-3.5 w-3.5" /> Scheduled.</p>
+      ) : (
+        <div className="flex flex-col gap-2 border-t border-border/50 pt-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {blueprint.fields.map((f) => (
+              <div key={f.name}>
+                <FieldLabel>{f.label}</FieldLabel>
+                <BlueprintFieldInput field={f} value={values[f.name] ?? ''} onChange={(v) => setValues((prev) => ({ ...prev, [f.name]: v }))} />
+                {f.help && <p className="mt-0.5 text-[0.45rem] text-muted-foreground">{f.help}</p>}
+              </div>
+            ))}
+          </div>
+          {error && <p className="text-[0.55rem] text-destructive">{error}</p>}
+          <div className="flex gap-2">
+            <PrimaryButton onClick={submit} disabled={saving}>
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Schedule it
+            </PrimaryButton>
+            <button type="button" onClick={() => setOpen(false)} className="rounded-lg border border-border px-3 py-1.5 text-[0.6rem] text-muted-foreground hover:text-foreground">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 14 real pre-built automation templates (blueprint_catalog.py) --
+ * previously fully built on the backend (real form schema, real validation,
+ * real job creation) with zero frontend surface. Filling in a few slots
+ * here is the same real path as hand-writing a cron_expression and a
+ * dispatcher-agent prompt, just without needing to know cron syntax. */
+function BlueprintGallery({ onCreated }: { onCreated: () => void }) {
+  const { data, loading } = useCronBlueprints()
+  const blueprints = data?.blueprints ?? []
+  const categories = useMemo(() => Array.from(new Set(blueprints.map((b) => b.category))), [blueprints])
+  const [category, setCategory] = useState<string | null>(null)
+  const shown = category ? blueprints.filter((b) => b.category === category) : blueprints
+
+  if (loading && blueprints.length === 0) {
+    return (
+      <div className="flex items-center justify-center rounded-xl border border-border bg-card/60 py-8 text-[0.6rem] text-muted-foreground">
+        <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading blueprints…
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-xl border border-border bg-card/60 p-4">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <Sparkles className="h-4 w-4 text-primary" />
+        <h3 className="font-heading text-xs text-foreground">Automation Blueprints</h3>
+        <span className="text-[0.5rem] text-muted-foreground">{blueprints.length} real templates -- fill in a few slots instead of hand-writing a cron job</span>
+        <div className="ml-auto flex flex-wrap gap-1.5">
+          <button type="button" onClick={() => setCategory(null)} className={cn('rounded-full border px-2 py-0.5 text-[0.5rem]', !category ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground hover:text-foreground')}>
+            All
+          </button>
+          {categories.map((c) => (
+            <button key={c} type="button" onClick={() => setCategory(c)} className={cn('rounded-full border px-2 py-0.5 text-[0.5rem]', category === c ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground hover:text-foreground')}>
+              {CATEGORY_LABELS[c] ?? c}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+        {shown.map((b) => <BlueprintCard key={b.key} blueprint={b} onCreated={onCreated} />)}
       </div>
     </div>
   )
@@ -506,16 +1065,29 @@ export function CronPanel() {
       kind: 'builtin', key: `b:${job.name}`, name: job.name, next_run: job.next_run, enabled: job.enabled,
       detail: job.description, time: job.schedule,
     }))
-    const customItems: RailItem[] = jobs.map((job) => ({
-      kind: 'custom', key: `c:${job.id}`, name: job.name, next_run: job.next_run, enabled: job.enabled,
-      detail: job.description || (job.action_type === 'telegram_message' ? 'Telegram message' : `Agent: ${job.action_payload.agent_key}`),
-      time: `${String(job.hour).padStart(2, '0')}:${String(job.minute).padStart(2, '0')} daily`, job,
-    }))
+    const customItems: RailItem[] = jobs.map((job) => {
+      const p = job.action_payload
+      const actionDetail: Record<string, string> = {
+        telegram_message: 'Telegram message',
+        agent_task: `Agent: ${p.agent_key}`,
+        run_skill: `Skill: ${p.skill_name ?? p.bundle_name}`,
+        terminal_command: `Command: ${p.command}`,
+        run_script: `Script: ${p.script}`,
+        channel_message: `Channel: ${p.channel}`,
+        memory_consolidate: 'Memory consolidation cycle',
+        commitment_checkin: 'Open commitments check-in',
+      }
+      return {
+        kind: 'custom', key: `c:${job.id}`, name: job.name, next_run: job.next_run, enabled: job.enabled,
+        detail: job.description || actionDetail[job.action_type] || job.action_type,
+        time: `${String(job.hour).padStart(2, '0')}:${String(job.minute).padStart(2, '0')} daily`, job,
+      }
+    })
     return [...builtinItems, ...customItems].sort((a, b) => new Date(a.next_run).getTime() - new Date(b.next_run).getTime())
   }, [data, jobs])
 
   return (
-    <div className="mx-auto flex max-w-[1100px] flex-col gap-4">
+    <div className="mx-auto flex max-w-[1300px] flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/60 px-4 py-3">
         <div className="flex items-center gap-2">
           <CalendarClock className="h-4 w-4 text-primary" />
@@ -524,6 +1096,8 @@ export function CronPanel() {
         </div>
         <NewCronJobForm agents={agents} onCreated={fetchJobs} />
       </div>
+
+      <BlueprintGallery onCreated={fetchJobs} />
 
       {loading && !data ? (
         <div className="flex items-center justify-center rounded-xl border border-border bg-card/60 py-8 text-[0.6rem] text-muted-foreground">
@@ -584,9 +1158,204 @@ export function CronPanel() {
   )
 }
 
-/* ═══════════════════ SKILLS — real specializations across the fleet, plus
-   real, creatable custom skill records (data/skills.json on the backend —
-   see skills_store.py) assignable to real agents ═══════════════════════ */
+/* ═══════════════════ SKILLS — the real, invokable procedure library
+   (skill_loader.py's SKILL.md files, real keyword-matched, real usage
+   stats) is the centerpiece; real bundles, real agent specializations, and
+   purely descriptive custom-skill tags are all real but categorically
+   different things, kept clearly separate rather than blurred into one
+   undifferentiated "skills" list the way the previous page did. ═════════ */
+
+/** One real, invokable skill -- archiving moves its real folder to
+ * skills/_archived/ so it stops being keyword-matched (restore brings it
+ * straight back); never deletes it outright. */
+function SkillLibraryCard({ skill }: { skill: LibrarySkill }) {
+  const [busy, setBusy] = useState(false)
+  const archive = async () => {
+    setBusy(true)
+    try { await archiveSkill(skill.name) } finally { setBusy(false) }
+  }
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/20 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <span className="font-heading text-[0.65rem] text-foreground">{skill.name}</span>
+        <button type="button" onClick={archive} disabled={busy} className="shrink-0 text-muted-foreground hover:text-destructive disabled:opacity-40" title="Archive (stops matching, doesn't delete)">
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Archive className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+      <p className="text-[0.55rem] leading-snug text-muted-foreground">{skill.description}</p>
+      <div className="flex flex-wrap gap-1">
+        {skill.trigger_keywords.slice(0, 5).map((k) => (
+          <span key={k} className="rounded-full border border-border/50 px-1.5 py-0 text-[0.45rem] text-muted-foreground">{k}</span>
+        ))}
+        {skill.trigger_keywords.length > 5 && <span className="text-[0.45rem] text-muted-foreground">+{skill.trigger_keywords.length - 5}</span>}
+      </div>
+      <div className="flex items-center justify-between text-[0.5rem] text-muted-foreground">
+        <span className={skill.match_count > 0 ? 'text-primary' : ''}>{skill.match_count} real match{skill.match_count !== 1 ? 'es' : ''}</span>
+        <span>{skill.last_matched_at ? `last: ${timeAgo(skill.last_matched_at * 1000)}` : 'never matched yet'}</span>
+      </div>
+    </div>
+  )
+}
+
+function SkillLibrarySection() {
+  const { data, loading } = useSkillLibrary()
+  const [sortByUsage, setSortByUsage] = useState(true)
+  const skills = data?.skills ?? []
+  const archived = data?.archived ?? []
+  const sorted = sortByUsage ? [...skills].sort((a, b) => b.match_count - a.match_count) : skills
+
+  // useSkillLibrary polls every 30s on its own; archive/restore just wait
+  // for the next real tick to reflect rather than faking an optimistic
+  // update ahead of what the backend actually confirms.
+  const restoreOne = async (name: string) => {
+    await restoreSkill(name)
+  }
+
+  return (
+    <div className="rounded-xl border border-primary/30 bg-card/60">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 px-4 py-2.5">
+        <div className="flex items-center gap-2">
+          <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+          <h3 className="font-heading text-[0.68rem] text-foreground">Skill Library</h3>
+          <span className="text-[0.5rem] text-muted-foreground">real, invokable, keyword-matched into live prompts</span>
+        </div>
+        <button type="button" onClick={() => setSortByUsage((v) => !v)} className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground">
+          {sortByUsage ? 'Sorted by real usage' : 'Sorted alphabetically'}
+        </button>
+      </div>
+      {loading && skills.length === 0 ? (
+        <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
+          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Reading skill library…
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-2.5 p-4 sm:grid-cols-2 lg:grid-cols-3">
+          {sorted.map((s) => <SkillLibraryCard key={s.name} skill={s} />)}
+        </div>
+      )}
+      {archived.length > 0 && (
+        <div className="border-t border-border/50 px-4 py-3">
+          <div className="mb-2 flex items-center gap-2 text-[0.55rem] text-muted-foreground">
+            <Archive className="h-3 w-3" /> Archived ({archived.length}) -- not matched while archived
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {archived.map((name) => (
+              <button
+                key={name}
+                type="button"
+                onClick={() => restoreOne(name)}
+                className="flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[0.5rem] text-muted-foreground hover:border-primary/50 hover:text-primary"
+              >
+                <ArchiveRestore className="h-2.5 w-2.5" /> {name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Real named groups of real library skills (skill_bundles.py) -- a cron or
+ * webhook run_skill action referencing bundle_name injects every named
+ * skill's real instructions together as one combined procedure. */
+function SkillBundlesSection() {
+  const { data: libData } = useSkillLibrary()
+  const { data, loading } = useSkillBundles()
+  const bundles = data?.bundles ?? []
+  const librarySkills = libData?.skills ?? []
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const toggle = (n: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(n)) next.delete(n); else next.add(n)
+      return next
+    })
+  }
+
+  const submit = async () => {
+    setSaving(true); setError(null)
+    try {
+      const res = await createSkillBundle(name.trim(), Array.from(selected), description)
+      if (!res.success) { setError(res.detail ?? 'Failed to create bundle'); return }
+      setName(''); setDescription(''); setSelected(new Set()); setOpen(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+  const remove = async (id: string) => {
+    await deleteSkillBundle(id)
+  }
+
+  return (
+    <div className="rounded-xl border border-border bg-card/60">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 px-4 py-2.5">
+        <div className="flex items-center gap-2">
+          <Package className="h-3.5 w-3.5 text-accent" />
+          <h3 className="font-heading text-[0.68rem] text-foreground">Skill Bundles</h3>
+          <span className="text-[0.5rem] text-muted-foreground">real named groups, usable in cron/webhook run_skill actions</span>
+        </div>
+        <button type="button" onClick={() => setOpen((v) => !v)} className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground">
+          {open ? 'Cancel' : '+ New bundle'}
+        </button>
+      </div>
+
+      {open && (
+        <div className="flex flex-col gap-2 border-b border-border/50 p-3">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <input className={inputCls} placeholder="Bundle name" value={name} onChange={(e) => setName(e.target.value)} />
+            <input className={inputCls} placeholder="Description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} />
+          </div>
+          <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto rounded border border-border/50 bg-background/40 p-2">
+            {librarySkills.map((s) => (
+              <button
+                key={s.name}
+                type="button"
+                onClick={() => toggle(s.name)}
+                className={cn('rounded-full border px-2 py-0.5 text-[0.5rem]', selected.has(s.name) ? 'border-primary bg-primary/15 text-primary' : 'border-border/50 text-muted-foreground hover:border-primary/40')}
+              >
+                {s.name}
+              </button>
+            ))}
+          </div>
+          {error && <p className="text-[0.55rem] text-destructive">{error}</p>}
+          <div className="flex gap-2">
+            <PrimaryButton onClick={submit} disabled={saving || !name.trim() || selected.size === 0}>
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Create bundle
+            </PrimaryButton>
+          </div>
+        </div>
+      )}
+
+      {loading && bundles.length === 0 ? (
+        <div className="flex items-center justify-center py-4 text-[0.55rem] text-muted-foreground"><Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…</div>
+      ) : bundles.length === 0 ? (
+        <div className="p-4"><EmptyNote>No bundles yet -- group a few library skills above to inject them together as one combined procedure.</EmptyNote></div>
+      ) : (
+        <ul className="divide-y divide-border/40">
+          {bundles.map((b) => (
+            <li key={b.id} className="flex items-center gap-3 px-4 py-2.5">
+              <Package className="h-3.5 w-3.5 shrink-0 text-accent" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[0.62rem] text-foreground">{b.name}</div>
+                <p className="truncate text-[0.5rem] text-muted-foreground">{b.skill_names.join(', ')}</p>
+              </div>
+              <button type="button" onClick={() => remove(b.id)} className="shrink-0 text-muted-foreground hover:text-destructive">
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 interface CustomSkill {
   id: string
   name: string
@@ -686,6 +1455,8 @@ export function SkillsPanel() {
   const [agents, setAgents] = useState<AgentInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [customSkills, setCustomSkills] = useState<CustomSkill[]>([])
+  const { data: libData } = useSkillLibrary()
+  const { data: bundleData } = useSkillBundles()
 
   const fetchCustom = useCallback(async () => {
     const res = await fetch('/api/skills/custom')
@@ -715,25 +1486,41 @@ export function SkillsPanel() {
   const skills = Array.from(skillMap.entries()).sort((a, b) => b[1].length - a[1].length)
 
   return (
-    <div className="mx-auto flex max-w-[1100px] flex-col gap-4">
-      {/* catalog header — index count + composer, no card grid */}
+    <div className="mx-auto flex max-w-[1300px] flex-col gap-4">
+      {/* catalog header — real counts across every distinct real system this
+          page surfaces: the invokable library, bundles, purely descriptive
+          custom tags, and read-only agent specializations. Previously this
+          page only ever showed the latter two -- the actual invokable skill
+          system (the thing achievements.py's "skills used" stat is even
+          about) had zero presence here. */}
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/60 px-4 py-3">
         <div className="flex items-center gap-2">
-          <Library className="h-4 w-4 text-tertiary" />
-          <span className="font-heading text-xs text-foreground">Skill Catalog</span>
-          <span className="text-[0.55rem] text-muted-foreground">{customSkills.length} custom · {skills.length} built-in</span>
+          <Library className="h-4 w-4 text-primary" />
+          <span className="font-heading text-xs text-foreground">Skills</span>
+          <span className="text-[0.55rem] text-muted-foreground">
+            {libData?.skills.length ?? '…'} library · {bundleData?.bundles.length ?? 0} bundles · {customSkills.length} custom tags · {skills.length} built-in specializations
+          </span>
         </div>
         <NewSkillForm agents={agents} onCreated={fetchCustom} />
       </div>
 
-      {/* shelf 1 — custom, creatable, deletable */}
+      <SkillLibrarySection />
+      <SkillBundlesSection />
+
+      {/* shelf — purely descriptive, user-created tags (skills_store.py).
+          Explicitly NOT invokable: nothing in the system reads agent_keys
+          or category to change real behavior -- this is a note, not a
+          procedure. Kept separate from the real library above so the two
+          "skill" concepts are never conflated the way the old single list
+          used to blur them. */}
       <div className="rounded-xl border border-tertiary/30 bg-card/60">
         <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2.5">
           <span className="h-1.5 w-1.5 rounded-full bg-tertiary" />
-          <h3 className="font-heading text-[0.68rem] text-foreground">Custom Skills</h3>
+          <h3 className="font-heading text-[0.68rem] text-foreground">Custom Skill Tags</h3>
+          <span className="text-[0.5rem] text-muted-foreground">descriptive only -- not invokable, unlike the library above</span>
         </div>
         {customSkills.length === 0 ? (
-          <div className="p-4"><EmptyNote>No custom skills yet — create one above and assign it to real agents. Persisted server-side.</EmptyNote></div>
+          <div className="p-4"><EmptyNote>No custom tags yet — create one above and assign it to real agents. Persisted server-side, purely descriptive.</EmptyNote></div>
         ) : (
           <ul className="divide-y divide-border/40">
             {customSkills.map((s) => (
@@ -802,7 +1589,7 @@ export function ModelsPanel() {
   const { data: llm, loading } = useLlmStatus()
   const backends = llm?.backends ?? []
   return (
-    <div className="mx-auto flex max-w-[720px] flex-col gap-1">
+    <div className="mx-auto flex max-w-[900px] flex-col gap-1">
       <div className="mb-2 flex items-center justify-between rounded-xl border border-border bg-card/60 px-4 py-3">
         <div className="flex items-center gap-2">
           <Layers className="h-4 w-4 text-primary" />
@@ -874,7 +1661,136 @@ export function ModelsPanel() {
         </div>
       )}
 
+      <ModelPerformanceRow />
+      <MixtureOfAgentsCard />
       <VoiceCloneCard />
+    </div>
+  )
+}
+
+/** Real per-backend call volume/latency/tokens (usage_analytics.py) --
+ * previously only shown on Overview's summary chart; this page is
+ * specifically about the model chain, so it earns a direct spot here too. */
+function ModelPerformanceRow() {
+  const [usage, setUsage] = useState<{ per_backend: Array<{ backend: string; call_count: number; success_count: number; avg_latency_s: number; tokens_per_sec: number | null }> } | null>(null)
+  useEffect(() => {
+    const load = () => fetch('/api/usage/llm').then((r) => r.json()).then((json) => { if (json.success) setUsage(json) }).catch(() => {})
+    load()
+    const t = setInterval(load, 30000)
+    return () => clearInterval(t)
+  }, [])
+  const perBackend = usage?.per_backend ?? []
+  if (perBackend.length === 0) return null
+  return (
+    <div className="mt-2 rounded-xl border border-border bg-card/60 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <BarChart3 className="h-3.5 w-3.5 text-primary" />
+        <h3 className="font-heading text-[0.65rem] text-foreground">Real Performance This Run</h3>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {perBackend.map((b) => (
+          <div key={b.backend} className="flex flex-wrap items-center justify-between gap-2 rounded border border-border/40 bg-secondary/10 px-2.5 py-1.5 text-[0.55rem]">
+            <span className="text-foreground">{b.backend}</span>
+            <span className="text-muted-foreground">{b.call_count} call{b.call_count !== 1 ? 's' : ''} · {b.success_count} ok</span>
+            <span className="text-muted-foreground">{b.avg_latency_s?.toFixed(2)}s avg</span>
+            {b.tokens_per_sec != null && <span className="text-primary">{b.tokens_per_sec} tok/s</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Real Mixture-of-Agents (moa.py) -- calls several distinct, actually-
+ * configured LLM backends on the same prompt in parallel, then has the
+ * best-performing one critically synthesize their answers. Previously
+ * fully built (a real endpoint) with zero frontend surface. */
+interface MoaReference { backend: string; text: string }
+interface MoaResult {
+  success: boolean
+  response?: string
+  references?: MoaReference[]
+  aggregated?: boolean
+  aggregation_error?: string
+  error?: string
+}
+function MixtureOfAgentsCard() {
+  const [prompt, setPrompt] = useState('')
+  const [referenceCount, setReferenceCount] = useState(3)
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<MoaResult | null>(null)
+
+  const run = async () => {
+    if (!prompt.trim()) return
+    setRunning(true); setResult(null)
+    try {
+      const res = await fetch('/api/llm/moa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt.trim(), reference_count: referenceCount }),
+      })
+      const json = await res.json()
+      setResult(json)
+    } catch (e) {
+      setResult({ success: false, error: String(e) })
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="mt-2 rounded-xl border border-primary/30 bg-card/60 p-4">
+      <div className="mb-2.5 flex items-center gap-2">
+        <GitMerge className="h-4 w-4 text-primary" />
+        <h3 className="font-heading text-xs text-foreground">Mixture-of-Agents</h3>
+        <span className="text-[0.5rem] text-muted-foreground">real parallel reference models, critically synthesized</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        <textarea
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="Ask something and see how the real configured models compare…"
+          rows={2}
+          className="w-full resize-none rounded border border-border bg-background/60 px-2.5 py-1.5 text-[0.62rem] text-foreground outline-none focus:border-primary/60"
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[0.55rem] text-muted-foreground">References</span>
+          <select value={referenceCount} onChange={(e) => setReferenceCount(Number(e.target.value))} className="rounded border border-border bg-background/60 px-2 py-1 text-[0.55rem] text-foreground outline-none focus:border-primary/60">
+            {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+          <PrimaryButton onClick={run} disabled={running || !prompt.trim()} className="ml-auto">
+            {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />} Run
+          </PrimaryButton>
+        </div>
+      </div>
+
+      {result && (
+        <div className="mt-3 flex flex-col gap-2 border-t border-border/50 pt-3">
+          {!result.success ? (
+            <p className="text-[0.6rem] text-destructive">{result.error}</p>
+          ) : (
+            <>
+              {result.references && result.references.length > 1 && (
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {result.references.map((r) => (
+                    <div key={r.backend} className="rounded border border-border/50 bg-secondary/10 p-2">
+                      <div className="mb-1 flex items-center gap-1.5 text-[0.5rem] text-muted-foreground"><Cpu className="h-3 w-3 text-primary" /> {r.backend}</div>
+                      <p className="line-clamp-4 text-[0.58rem] leading-relaxed text-muted-foreground">{r.text}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="rounded-lg border border-primary/40 bg-primary/5 p-3">
+                <div className="mb-1.5 flex items-center gap-1.5 text-[0.55rem] text-primary">
+                  <GitMerge className="h-3.5 w-3.5" /> {result.aggregated ? 'Synthesized answer' : 'Best single answer'}
+                  {result.aggregation_error && <span className="text-muted-foreground">(synthesis failed: {result.aggregation_error})</span>}
+                </div>
+                <p className="whitespace-pre-wrap text-[0.65rem] leading-relaxed text-foreground">{result.response}</p>
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }
