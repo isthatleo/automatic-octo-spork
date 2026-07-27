@@ -18,7 +18,7 @@ import { CanvasPanel } from '@/components/nancy/canvas-panel'
 import {
   SessionsPanel, ChannelsPanel, InstancesPanel, CronPanel, SkillsPanel, ModelsPanel,
   KeysPanel, ConfigPanel, UsagePanel, PairingPanel, ProfilesPanel, PluginsPanel,
-  McpPanel, WebhooksPanel, DocsPanel, MemoryInsightsPanel,
+  McpPanel, WebhooksPanel, DocsPanel, MemoryInsightsPanel, AchievementsPanel, ThemingPanel,
 } from '@/components/nancy/admin-panels'
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
@@ -34,7 +34,7 @@ import {
   Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, Newspaper, Kanban, X, Mic, MicOff,
   Keyboard, ChevronDown, MessageSquare, PanelLeftClose, PanelLeftOpen, Send, Server, Clock3,
   FileClock, Sparkles, Cpu, Key, Settings2, BarChart3, Link2, User, PlugZap, Wrench, Webhook, BookOpen,
-  StickyNote,
+  StickyNote, Award, Palette,
 } from 'lucide-react'
 
 import { DocsHelpPanel } from '@/components/nancy/docs-panel'
@@ -61,12 +61,14 @@ const NAV_GROUPS: { group: string; items: { key: PanelKey; label: string; icon: 
     { key: 'skills', label: 'Skills', icon: Sparkles },
     { key: 'models', label: 'Models', icon: Cpu },
     { key: 'memory-insights', label: 'Memory Insights', icon: Brain },
+    { key: 'achievements', label: 'Achievements', icon: Award },
   ] },
   { group: 'Settings', items: [
     { key: 'system', label: 'Command Layer', icon: TerminalSquare },
     { key: 'config', label: 'Config', icon: Settings2 },
     { key: 'keys', label: 'Keys', icon: Key },
     { key: 'usage', label: 'Usage', icon: BarChart3 },
+    { key: 'theming', label: 'Theming', icon: Palette },
     { key: 'profiles', label: 'Profiles', icon: User },
     { key: 'pairing', label: 'Pairing', icon: Link2 },
     { key: 'plugins', label: 'Plugins', icon: PlugZap },
@@ -90,6 +92,9 @@ const ORB_QUICK_NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
 let logSeq = 0
 
 export default function Page() {
+  useEffect(() => {
+    import('@/lib/nancy/theme').then(({ applyStoredTheme }) => applyStoredTheme())
+  }, [])
   const [booting, setBooting] = useState(true)
   // `null` = voice-first hero mode (no panel visible). Anything else opens the workspace.
   const [panel, setPanel] = useState<PanelKey | null>(null)
@@ -1022,6 +1027,8 @@ function WorkspaceLayout({
               {panel === 'mcp' && <McpPanel onNavigate={() => onNav('core')} />}
               {panel === 'webhooks' && <WebhooksPanel />}
               {panel === 'memory-insights' && <MemoryInsightsPanel />}
+              {panel === 'achievements' && <AchievementsPanel />}
+              {panel === 'theming' && <ThemingPanel />}
               {panel === 'canvas' && <CanvasPanel />}
               {panel === 'docs' && <DocsHelpPanel />}
             </div>

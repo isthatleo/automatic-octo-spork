@@ -86,6 +86,8 @@ import node_host
 import approval_policy
 import egress_proxy
 import coverage_proxy
+import usage_analytics
+import achievements_store
 
 NODE_TOOLS = [
     {
@@ -183,6 +185,7 @@ import time as _time
 from collections import defaultdict, deque
 
 _BACKEND_AUTH_TOKEN = os.getenv("BACKEND_AUTH_TOKEN", "").strip()
+_PROCESS_START_TIME = _time.time()  # real wall-clock start, for achievements_store's uptime check
 
 
 async def require_auth(request: Request) -> None:
@@ -2973,6 +2976,57 @@ async def enable_coverage_route():
 @app.get("/egress-proxy/coverage/report", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def coverage_report_route():
     return coverage_proxy.generate_coverage_report()
+
+
+# ---------------------------------------------------------------------------
+# LLM usage analytics -- see usage_analytics.py.
+# ---------------------------------------------------------------------------
+@app.get("/usage/llm", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def llm_usage_route():
+    return {"success": True, **usage_analytics.get_usage_summary()}
+
+
+# ---------------------------------------------------------------------------
+# Achievements -- see achievements_store.py. Badges computed live from real
+# already-persisted activity, not a separate incrementing counter system.
+# ---------------------------------------------------------------------------
+def _gather_activity_stats() -> Dict[str, Any]:
+    from memory import dreaming
+
+    agent_stats = agent_service.get_service_stats() if agent_service.is_ready() else {}
+    evidence = evidence_ledger.query_evidence(limit=10_000)
+    terminal_commands = sum(1 for e in evidence if e["kind"] == "terminal_command")
+    file_writes = sum(1 for e in evidence if e["kind"] == "write_file")
+
+    skill_usage = skill_loader._USAGE
+    distinct_skills_used = sum(1 for u in skill_usage.values() if u.get("match_count", 0) > 0)
+
+    return {
+        "total_tasks": agent_stats.get("total_tasks", 0),
+        "failed_tasks": agent_stats.get("failed_tasks", 0),
+        "terminal_commands": terminal_commands,
+        "file_writes": file_writes,
+        "distinct_skills_used": distinct_skills_used,
+        "total_skills": len(skill_loader.list_skills()),
+        "total_memories": len(getattr(memory_manager.graph, "nodes", {})),
+        "wiki_pages": len(wiki_store.list_pages()),
+        "dream_cycles": len(dreaming.get_dream_diary(limit=10_000)),
+        "uptime_hours": (_time.time() - _PROCESS_START_TIME) / 3600.0,
+    }
+
+
+@app.get("/achievements", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_achievements_route():
+    activity = _gather_activity_stats()
+    unlocked = achievements_store.compute_unlocked(activity)
+    unlocked_keys = {a["key"] for a in unlocked}
+    all_ach = achievements_store.all_achievements()
+    return {
+        "success": True,
+        "unlocked": unlocked,
+        "locked": [a for a in all_ach if a["key"] not in unlocked_keys],
+        "activity": activity,
+    }
 
 
 # ---------------------------------------------------------------------------

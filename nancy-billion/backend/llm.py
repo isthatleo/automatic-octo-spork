@@ -4,11 +4,13 @@ import asyncio
 import json
 import random
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable, Dict, List
 
 from tool_args import coerce_tool_input
 from retry_util import retry_async, is_transient_llm_error
+import usage_analytics
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,7 @@ class OllamaLLM(LLMBackend):
     def __init__(self, model: str | None = None):
         self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         self.model = model or os.getenv("OLLAMA_MODEL", "llama2")
+        self._last_usage: dict | None = None
         logger.info(f"OllamaLLM initialized with base_url={self.base_url}, model={self.model}")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -102,6 +105,16 @@ class OllamaLLM(LLMBackend):
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     result = await resp.json()
+                    # Ollama's real response reports exact token counts AND a
+                    # real prompt-eval (prefill)/eval (decode) time split, in
+                    # nanoseconds -- one of the few backends with both.
+                    if "prompt_eval_count" in result or "eval_count" in result:
+                        self._last_usage = {
+                            "prompt_tokens": result.get("prompt_eval_count"),
+                            "completion_tokens": result.get("eval_count"),
+                            "prompt_time_s": result.get("prompt_eval_duration", 0) / 1e9 if result.get("prompt_eval_duration") else None,
+                            "decode_time_s": result.get("eval_duration", 0) / 1e9 if result.get("eval_duration") else None,
+                        }
                     return result.get("response", "")
                 else:
                     text = await resp.text()
@@ -122,6 +135,7 @@ class AnthropicLLM(LLMBackend):
             logger.warning("ANTHROPIC_API_KEY not set; Anthropic LLM will not function")
         self.model = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
         self._client = None
+        self._last_usage: dict | None = None
         logger.info(f"AnthropicLLM initialized with model={self.model}")
 
     def _get_client(self):
@@ -151,6 +165,14 @@ class AnthropicLLM(LLMBackend):
             response = await client.messages.create(**kwargs)
         except Exception as e:
             raise Exception(f"Anthropic error: {e}")
+        # Real, exact provider-reported token counts -- Anthropic doesn't
+        # expose a prompt-processing/decode time split, so only tokens are
+        # populated here (prompt_time_s/decode_time_s stay unset).
+        if getattr(response, "usage", None) is not None:
+            self._last_usage = {
+                "prompt_tokens": response.usage.input_tokens,
+                "completion_tokens": response.usage.output_tokens,
+            }
         for block in response.content:
             if block.type == "text":
                 return block.text
@@ -263,6 +285,7 @@ class OpenAILLM(LLMBackend):
         if not self.api_key:
             logger.warning("OPENAI_API_KEY not set; OpenAI LLM will not function")
         self.model = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+        self._last_usage: dict | None = None
         logger.info(f"OpenAILLM initialized with model={self.model}")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -285,6 +308,9 @@ class OpenAILLM(LLMBackend):
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     result = await resp.json()
+                    usage = result.get("usage")
+                    if usage:
+                        self._last_usage = {"prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens")}
                     return result["choices"][0]["message"]["content"]
                 else:
                     text = await resp.text()
@@ -296,6 +322,7 @@ class GeminiLLM(LLMBackend):
         if not self.api_key:
             logger.warning("GEMINI_API_KEY not set; Gemini LLM will not function")
         self.model = os.getenv("GEMINI_MODEL", "gemini-pro")
+        self._last_usage: dict | None = None
         logger.info(f"GeminiLLM initialized with model={self.model}")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -319,6 +346,12 @@ class GeminiLLM(LLMBackend):
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     result = await resp.json()
+                    usage = result.get("usageMetadata")
+                    if usage:
+                        self._last_usage = {
+                            "prompt_tokens": usage.get("promptTokenCount"),
+                            "completion_tokens": usage.get("candidatesTokenCount"),
+                        }
                     return result["candidates"][0]["content"]["parts"][0]["text"]
                 else:
                     text = await resp.text()
@@ -330,6 +363,7 @@ class OpenRouterLLM(LLMBackend):
         if not self.api_key:
             logger.warning("OPENROUTER_API_KEY not set; OpenRouter LLM will not function")
         self.model = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
+        self._last_usage: dict | None = None
         logger.info(f"OpenRouterLLM initialized with model={self.model}")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -352,6 +386,9 @@ class OpenRouterLLM(LLMBackend):
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     result = await resp.json()
+                    usage = result.get("usage")
+                    if usage:
+                        self._last_usage = {"prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens")}
                     return result["choices"][0]["message"]["content"]
                 else:
                     text = await resp.text()
@@ -363,6 +400,7 @@ class GroqLLM(LLMBackend):
         if not self.api_key:
             logger.warning("GROQ_API_KEY not set; Groq LLM will not function")
         self.model = os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
+        self._last_usage: dict | None = None
         logger.info(f"GroqLLM initialized with model={self.model}")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -385,6 +423,17 @@ class GroqLLM(LLMBackend):
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     result = await resp.json()
+                    # Groq is one of the few providers that reports a real
+                    # prompt-processing/decode time split (under x_groq.usage),
+                    # not just token counts -- both captured when present.
+                    usage = result.get("usage") or result.get("x_groq", {}).get("usage")
+                    if usage:
+                        self._last_usage = {
+                            "prompt_tokens": usage.get("prompt_tokens"),
+                            "completion_tokens": usage.get("completion_tokens"),
+                            "prompt_time_s": usage.get("prompt_time"),
+                            "decode_time_s": usage.get("completion_time"),
+                        }
                     return result["choices"][0]["message"]["content"]
                 else:
                     text = await resp.text()
@@ -406,6 +455,7 @@ class OpenCodeLLM(LLMBackend):
         if not self.api_key:
             logger.warning("OPENCODE_API_KEY not set; OpenCode Zen LLM will not function")
         self.model = os.getenv("OPENCODE_MODEL", "big-pickle")
+        self._last_usage: dict | None = None
         logger.info(f"OpenCodeLLM initialized with model={self.model}")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -429,6 +479,9 @@ class OpenCodeLLM(LLMBackend):
                     text = await resp.text()
                     raise Exception(f"OpenCode Zen error: {resp.status} - {text}")
                 result = await resp.json()
+                usage = result.get("usage")
+                if usage:
+                    self._last_usage = {"prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens")}
                 content = result["choices"][0]["message"].get("content")
                 if not content:
                     # Reasoning models (e.g. big-pickle) can spend the whole
@@ -454,6 +507,7 @@ class ClawRouterLLM(LLMBackend):
             logger.warning("CLAWROUTER_API_KEY not set; ClawRouter LLM will not function")
         self.model = os.getenv("CLAWROUTER_MODEL", "auto")
         self.base_url = os.getenv("CLAWROUTER_BASE_URL", "https://api.clawrouter.com/v1")
+        self._last_usage: dict | None = None
         logger.info(f"ClawRouterLLM initialized with model={self.model}")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -472,6 +526,9 @@ class ClawRouterLLM(LLMBackend):
                     text = await resp.text()
                     raise Exception(f"ClawRouter error: {resp.status} - {text}")
                 result = await resp.json()
+                usage = result.get("usage")
+                if usage:
+                    self._last_usage = {"prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens")}
                 content = result["choices"][0]["message"].get("content")
                 if not content:
                     raise Exception("ClawRouter returned no content")
@@ -530,6 +587,7 @@ class OllamaAutoModelsLLM(LLMBackend):
 
     def __init__(self):
         self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self._last_usage: dict | None = None
         logger.info(f"OllamaAutoModelsLLM initialized with base_url={self.base_url}")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -545,6 +603,7 @@ class OllamaAutoModelsLLM(LLMBackend):
                 ollama = OllamaLLM(model=model)
                 result = await ollama.generate(prompt, max_tokens=max_tokens, temperature=temperature)
                 logger.info(f"Ollama model succeeded: {model}")
+                self._last_usage = ollama._last_usage
                 return result
             except Exception as e:
                 logger.warning(f"Ollama model failed: {model} - {e}")
@@ -620,6 +679,7 @@ class FallbackLLM(LLMBackend):
             if hasattr(backend, "api_key") and not backend.api_key:
                 logger.info(f"Skipping LLM backend {backend.__class__.__name__}: no API key configured")
                 continue
+            call_start = time.monotonic()
             try:
                 logger.info(f"Trying LLM backend: {backend.__class__.__name__}")
                 # One real, fast retry for a genuinely transient failure
@@ -639,15 +699,31 @@ class FallbackLLM(LLMBackend):
                     timeout=self.BACKEND_TIMEOUT_S,
                 )
                 logger.info(f"LLM backend {backend.__class__.__name__} succeeded")
+                # Backends that can extract real provider-reported usage from
+                # their own raw API response stash it on self._last_usage
+                # (see e.g. AnthropicLLM/GroqLLM.generate) -- picked up here
+                # so real exact tokens/prompt-decode timing flow into the
+                # SAME analytics record as the estimate fallback, with no
+                # double-counting.
+                real_usage = getattr(backend, "_last_usage", None) or {}
+                usage_analytics.record_call(
+                    backend.__class__.__name__, time.monotonic() - call_start, prompt, result, True,
+                    prompt_tokens=real_usage.get("prompt_tokens"),
+                    completion_tokens=real_usage.get("completion_tokens"),
+                    prompt_time_s=real_usage.get("prompt_time_s"),
+                    decode_time_s=real_usage.get("decode_time_s"),
+                )
                 return result
             except asyncio.TimeoutError:
                 logger.warning(
                     f"LLM backend {backend.__class__.__name__} timed out after {self.BACKEND_TIMEOUT_S}s"
                 )
+                usage_analytics.record_call(backend.__class__.__name__, time.monotonic() - call_start, prompt, "", False)
                 last_exception = TimeoutError(f"{backend.__class__.__name__} timed out")
                 continue
             except Exception as e:
                 logger.warning(f"LLM backend {backend.__class__.__name__} failed: {e}")
+                usage_analytics.record_call(backend.__class__.__name__, time.monotonic() - call_start, prompt, "", False)
                 last_exception = e
                 continue
         # If all backends failed, raise the last exception

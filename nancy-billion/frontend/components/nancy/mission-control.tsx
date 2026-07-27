@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { AgentTaskModal } from './agent-task-modal'
+import { PetdexWidget } from './petdex-widget'
 import { listAgents, autoRouteAgent, summarizeResult, type AgentListResponse } from '@/lib/nancy/agent-client'
 import { onDomainEvent } from '@/lib/nancy/ws-client'
 import type { AgentInfo } from '@/lib/nancy/types'
@@ -91,6 +92,7 @@ export function MissionControlPanel() {
             Agents <span style={{ color: ACCENT }}>{stats?.agents_online ?? '—'}</span><span className="text-white/30">/{total || '—'}</span>
           </h1>
         </div>
+        <PetdexWidget background={GLASS_BG} border={BORDER_IDLE} />
         <div className="flex items-center gap-2.5">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-white/40" />

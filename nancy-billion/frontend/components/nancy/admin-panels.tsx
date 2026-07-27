@@ -14,7 +14,7 @@ import {
   Radar, ChevronRight, Lock, ShieldCheck,
   CalendarClock, Library, ArrowRight, FileCode2,
   Fingerprint, Layers, MessageCircle, SendHorizonal, Upload, Mic,
-  Moon, CheckSquare, Network,
+  Moon, CheckSquare, Network, Award,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
@@ -1148,7 +1148,11 @@ export function ConfigPanel() {
    ledger-style stat list. Same single fetch-on-mount as before. ═══════ */
 export function UsagePanel() {
   const [stats, setStats] = useState<{ agents_online: number; total_tasks: number; failed_tasks: number; success_rate: number } | null>(null)
+  const [llmUsage, setLlmUsage] = useState<{ overall_calls: number; overall_success: number; overall_tokens: number; per_backend: any[]; note: string } | null>(null)
   useEffect(() => { listAgents().then((r) => r.success && setStats(r.stats)) }, [])
+  useEffect(() => {
+    fetch('/api/usage/llm').then((r) => r.json()).then((json) => { if (json.success) setLlmUsage(json) }).catch(() => {})
+  }, [])
 
   const succeeded = stats ? Math.max(0, stats.total_tasks - stats.failed_tasks) : 0
   const successPct = stats && stats.total_tasks > 0 ? (succeeded / stats.total_tasks) * 100 : 0
@@ -1201,9 +1205,48 @@ export function UsagePanel() {
         ))}
       </div>
 
-      <p className="text-[0.55rem] text-muted-foreground">
-        Nancy doesn&apos;t meter LLM token spend per-request yet, so cost/usage-by-provider isn&apos;t shown here — this reflects real agent task volume only.
-      </p>
+      {llmUsage && llmUsage.overall_calls > 0 ? (
+        <div className="rounded-xl border border-border bg-card/60">
+          <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">
+            Real per-backend LLM metrics — {llmUsage.note}
+          </p>
+          <ul className="divide-y divide-border/40">
+            {llmUsage.per_backend.map((b) => (
+              <li key={b.backend} className="px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[0.65rem] text-foreground">{b.backend}</span>
+                  <span className="text-[0.55rem] text-muted-foreground">{b.call_count}x · {b.success_count} ok · {b.avg_latency_s}s avg latency</span>
+                </div>
+                <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 text-[0.55rem] text-muted-foreground sm:grid-cols-4">
+                  <div>
+                    <span className="text-muted-foreground/70">Prompt tok{b.tokens_exact ? '' : ' (est.)'}: </span>
+                    <span className="text-foreground">{b.prompt_tokens}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground/70">Completion tok{b.tokens_exact ? '' : ' (est.)'}: </span>
+                    <span className="text-foreground">{b.completion_tokens}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground/70">Prompt proc.: </span>
+                    <span className="text-foreground">{b.avg_prompt_time_s !== null ? `${b.avg_prompt_time_s}s` : 'n/a'}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground/70">Decode: </span>
+                    <span className="text-foreground">{b.avg_decode_time_s !== null ? `${b.avg_decode_time_s}s` : 'n/a'}</span>
+                  </div>
+                </div>
+                {b.tokens_per_sec !== null && (
+                  <div className="mt-1 text-[0.55rem] text-primary">{b.tokens_per_sec} tok/s inference speed</div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <p className="text-[0.55rem] text-muted-foreground">
+          No LLM calls recorded yet this run — usage_analytics.py tracks real call volume/latency/tokens/inference speed per backend as they happen.
+        </p>
+      )}
     </div>
   )
 }
@@ -1964,3 +2007,137 @@ export function MemoryInsightsPanel() {
     </div>
   )
 }
+
+/* ═══════════════════ ACHIEVEMENTS — real badges computed from real activity
+   (achievements_store.py), no fake incrementing counters. ═══════════════ */
+const TIER_COLOR: Record<string, string> = {
+  copper: 'text-[#b87333]', bronze: 'text-[#cd7f32]', silver: 'text-slate-300',
+  gold: 'text-gold', olympian: 'text-primary',
+}
+
+export function AchievementsPanel() {
+  const [data, setData] = useState<{ unlocked: any[]; locked: any[] } | null>(null)
+  useEffect(() => {
+    fetch('/api/achievements').then((r) => r.json()).then((json) => { if (json.success) setData(json) }).catch(() => {})
+  }, [])
+
+  return (
+    <div className="mx-auto flex max-w-[900px] flex-col gap-4">
+      <div className="flex items-center gap-2 rounded-xl border border-border bg-card/60 px-4 py-3">
+        <Award className="h-4 w-4 text-primary" />
+        <span className="font-heading text-xs text-foreground">Achievements</span>
+        {data && <span className="ml-auto text-[0.55rem] text-muted-foreground">{data.unlocked.length}/{data.unlocked.length + data.locked.length} unlocked</span>}
+      </div>
+
+      {!data ? (
+        <div className="flex items-center justify-center py-8 text-[0.6rem] text-muted-foreground">
+          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {data.unlocked.map((a) => (
+            <div key={a.key} className="flex items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-3.5 py-3">
+              <Award className={cn('h-5 w-5 shrink-0', TIER_COLOR[a.tier] ?? 'text-primary')} />
+              <div className="min-w-0">
+                <div className="text-[0.65rem] text-foreground">{a.title}</div>
+                <div className="text-[0.55rem] text-muted-foreground">{a.description}</div>
+              </div>
+            </div>
+          ))}
+          {data.locked.map((a) => (
+            <div key={a.key} className="flex items-center gap-3 rounded-xl border border-border/50 bg-secondary/10 px-3.5 py-3 opacity-60">
+              <Lock className="h-5 w-5 shrink-0 text-muted-foreground" />
+              <div className="min-w-0">
+                <div className="text-[0.65rem] text-foreground">{a.title}</div>
+                <div className="text-[0.55rem] text-muted-foreground">{a.description}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════ THEMING — live CSS-variable overrides, persisted to
+   localStorage (lib/nancy/theme.ts). Real values applied immediately via
+   document.documentElement.style, not a preview-only mock. ═══════════════ */
+export function ThemingPanel() {
+  const [overrides, setOverrides] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    import('@/lib/nancy/theme').then(({ getThemeOverrides }) => setOverrides(getThemeOverrides()))
+  }, [])
+
+  const currentValue = (key: string) => {
+    if (overrides[key]) return overrides[key]
+    if (typeof window === 'undefined') return '#888888'
+    const computed = getComputedStyle(document.documentElement).getPropertyValue(key).trim()
+    return computed || '#888888'
+  }
+
+  const handleChange = async (key: string, value: string) => {
+    const { setThemeOverride } = await import('@/lib/nancy/theme')
+    setThemeOverride(key, value)
+    setOverrides((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const handleReset = async (key: string) => {
+    const { resetThemeVar } = await import('@/lib/nancy/theme')
+    resetThemeVar(key)
+    setOverrides((prev) => { const next = { ...prev }; delete next[key]; return next })
+  }
+
+  const handleResetAll = async () => {
+    const { resetAllTheme } = await import('@/lib/nancy/theme')
+    resetAllTheme()
+    setOverrides({})
+  }
+
+  return (
+    <div className="mx-auto flex max-w-[700px] flex-col gap-4">
+      <div className="flex items-center justify-between gap-2 rounded-xl border border-border bg-card/60 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Sparkles className="h-4 w-4 text-primary" />
+          <span className="font-heading text-xs text-foreground">Theme</span>
+        </div>
+        <button type="button" onClick={handleResetAll} className="text-[0.55rem] text-muted-foreground hover:text-foreground">
+          Reset all to defaults
+        </button>
+      </div>
+
+      <div className="divide-y divide-border/40 rounded-xl border border-border bg-card/60">
+        {THEMEABLE_VARS_META.map(({ key, label, description }) => (
+          <div key={key} className="flex items-center gap-3 px-4 py-3">
+            <input
+              type="color"
+              value={/^#/.test(currentValue(key)) ? currentValue(key) : '#888888'}
+              onChange={(e) => handleChange(key, e.target.value)}
+              className="h-8 w-8 shrink-0 cursor-pointer rounded border border-border bg-transparent"
+            />
+            <div className="min-w-0 flex-1">
+              <div className="text-[0.62rem] text-foreground">{label}</div>
+              <div className="text-[0.5rem] text-muted-foreground">{description}</div>
+            </div>
+            {overrides[key] && (
+              <button type="button" onClick={() => handleReset(key)} className="text-[0.5rem] text-muted-foreground hover:text-destructive">
+                Reset
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      <p className="text-[0.55rem] text-muted-foreground">
+        Base colors use oklch() for perceptual consistency; a picked color here overrides that variable directly (valid CSS, applied immediately) and persists across reloads until reset.
+      </p>
+    </div>
+  )
+}
+
+const THEMEABLE_VARS_META = [
+  { key: '--primary', label: 'Primary (Ember)', description: 'The one confident accent — active states, primary actions.' },
+  { key: '--gold', label: 'Gold', description: 'Secondary accent, used sparingly.' },
+  { key: '--accent', label: 'Accent (Slate)', description: 'Quiet informational color — links, secondary emphasis.' },
+  { key: '--tertiary', label: 'Tertiary', description: 'Special-moments-only accent.' },
+  { key: '--magenta', label: 'Magenta', description: 'Rarely-used warm rose-red accent.' },
+]
