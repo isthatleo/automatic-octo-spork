@@ -3039,6 +3039,14 @@ async def channel_test(name: str, req: ChannelTestRequest):
     return {"success": ok}
 
 
+@app.get("/telegram/pair/bot")
+async def telegram_pair_bot():
+    """Real bot username (Telegram getMe), so the Pairing page can render a
+    clickable https://t.me/<username> link instead of just saying "message
+    this code to your bot" with no indication of which bot that is."""
+    return await telegram_pairing.get_bot_username()
+
+
 @app.post("/telegram/pair/start")
 async def telegram_pair_start():
     """Real pairing flow (see telegram_pairing.py) -- generates a one-time
@@ -3662,9 +3670,12 @@ async def list_achievements_route():
     activity = _gather_activity_stats()
     unlocked = achievements_store.compute_unlocked(activity)
     unlocked_keys = {a["key"] for a in unlocked}
-    unlock_times = achievements_store.record_unlocks(list(unlocked_keys))
+    unlock_times, newly_unlocked = achievements_store.record_unlocks(list(unlocked_keys))
     for a in unlocked:
         a["unlocked_at"] = unlock_times.get(a["key"])
+    for a in unlocked:
+        if a["key"] in newly_unlocked:
+            await _fire_webhooks("achievement_unlocked", {"key": a["key"], "title": a["title"], "tier": a["tier"]})
     all_ach = achievements_store.all_achievements(activity)
     return {
         "success": True,

@@ -19,7 +19,7 @@ import { CanvasPanel } from '@/components/nancy/canvas-panel'
 import {
   SessionsPanel, ChannelsPanel, InstancesPanel, CronPanel, SkillsPanel, ModelsPanel,
   KeysPanel, ConfigPanel, UsagePanel, PairingPanel, ProfilesPanel, PluginsPanel,
-  McpPanel, WebhooksPanel, DocsPanel, MemoryInsightsPanel, AchievementsPanel, ThemingPanel,
+  WebhooksPanel, MemoryInsightsPanel, AchievementsPanel, ThemingPanel,
 } from '@/components/nancy/admin-panels'
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
@@ -34,7 +34,7 @@ import { sfx, unlockSfx, duckSfx } from '@/lib/nancy/sfx'
 import {
   Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, Newspaper, Kanban, X, Mic, MicOff,
   Keyboard, ChevronDown, MessageSquare, PanelLeftClose, PanelLeftOpen, Send, Server, Clock3,
-  FileClock, Sparkles, Cpu, Key, Settings2, BarChart3, Link2, User, PlugZap, Wrench, Webhook, BookOpen,
+  FileClock, Sparkles, Cpu, Key, Settings2, BarChart3, Link2, User, PlugZap, Webhook, BookOpen,
   StickyNote, Award, Palette, CandlestickChart,
 } from 'lucide-react'
 
@@ -73,8 +73,7 @@ const NAV_GROUPS: { group: string; items: { key: PanelKey; label: string; icon: 
     { key: 'theming', label: 'Theming', icon: Palette },
     { key: 'profiles', label: 'Profiles', icon: User },
     { key: 'pairing', label: 'Pairing', icon: Link2 },
-    { key: 'plugins', label: 'Plugins', icon: PlugZap },
-    { key: 'mcp', label: 'MCP', icon: Wrench },
+    { key: 'plugins', label: 'Plugins (MCP)', icon: PlugZap },
     { key: 'webhooks', label: 'Webhooks', icon: Webhook },
   ] },
   { group: 'Resources', items: [
@@ -905,8 +904,7 @@ function WorkspaceLayout({
     usage: 'Usage',
     profiles: 'Profiles',
     pairing: 'Pairing',
-    plugins: 'Plugins',
-    mcp: 'MCP Servers',
+    plugins: 'Plugins (MCP)',
     webhooks: 'Webhooks',
     docs: 'Docs',
   }
@@ -1030,8 +1028,7 @@ function WorkspaceLayout({
               {panel === 'usage' && <UsagePanel />}
               {panel === 'profiles' && <ProfilesPanel />}
               {panel === 'pairing' && <PairingPanel />}
-              {panel === 'plugins' && <PluginsPanel onNavigate={() => onNav('agents')} />}
-              {panel === 'mcp' && <McpPanel onNavigate={() => onNav('core')} />}
+              {panel === 'plugins' && <PluginsPanel />}
               {panel === 'webhooks' && <WebhooksPanel />}
               {panel === 'memory-insights' && <MemoryInsightsPanel />}
               {panel === 'achievements' && <AchievementsPanel />}

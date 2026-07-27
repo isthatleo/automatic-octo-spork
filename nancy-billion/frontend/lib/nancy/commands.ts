@@ -58,10 +58,55 @@ const PANEL_WORDS: Record<string, PanelKey> = {
   profiles: 'profiles',
   pairing: 'pairing',
   plugins: 'plugins',
-  mcp: 'mcp',
+  mcp: 'plugins',
   webhooks: 'webhooks',
   docs: 'docs',
+  theming: 'theming',
+  theme: 'theming',
+  canvas: 'canvas',
+  achievements: 'achievements',
+  // Deliberately not "memory" -- /memory is already an explicit slash
+  // command below that opens Sessions (real conversation history), and
+  // reusing the same word for a different panel here would make "/memory"
+  // and "open memory" navigate two different places for no obvious reason.
+  journey: 'memory-insights',
+  dreams: 'memory-insights',
+  wiki: 'memory-insights',
+  galaxy: 'memory-insights',
 }
+
+// Real, canonical panel keywords for the "open <word>" pattern below --
+// exported so docs-client.ts's command reference can be generated from this
+// single source instead of hand-maintaining a second, easily-stale list of
+// what's actually navigable (PANEL_WORDS has several synonyms per panel --
+// e.g. "home"/"dashboard" both mean 'overview' -- so this picks one
+// canonical keyword per real target panel).
+export const NAVIGABLE_PANELS: { keyword: string; panel: PanelKey }[] = [
+  { keyword: 'overview', panel: 'overview' },
+  { keyword: 'map', panel: 'map' },
+  { keyword: 'core', panel: 'core' },
+  { keyword: 'agents', panel: 'agents' },
+  { keyword: 'system', panel: 'system' },
+  { keyword: 'kanban', panel: 'kanban' },
+  { keyword: 'channels', panel: 'channels' },
+  { keyword: 'instances', panel: 'instances' },
+  { keyword: 'sessions', panel: 'sessions' },
+  { keyword: 'cron', panel: 'cron' },
+  { keyword: 'skills', panel: 'skills' },
+  { keyword: 'models', panel: 'models' },
+  { keyword: 'config', panel: 'config' },
+  { keyword: 'keys', panel: 'keys' },
+  { keyword: 'usage', panel: 'usage' },
+  { keyword: 'theming', panel: 'theming' },
+  { keyword: 'profiles', panel: 'profiles' },
+  { keyword: 'pairing', panel: 'pairing' },
+  { keyword: 'plugins', panel: 'plugins' },
+  { keyword: 'webhooks', panel: 'webhooks' },
+  { keyword: 'canvas', panel: 'canvas' },
+  { keyword: 'journey', panel: 'memory-insights' },
+  { keyword: 'achievements', panel: 'achievements' },
+  { keyword: 'docs', panel: 'docs' },
+]
 
 const LAUNCH_TARGETS = [
   'terminal',

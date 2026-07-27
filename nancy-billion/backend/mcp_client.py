@@ -43,7 +43,16 @@ class PluginServerConfig:
     enabled: bool = True
 
     def to_public_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        """asdict() alone would put real env var *values* (tokens, API keys
+        passed at server-creation time) straight into the /plugins response
+        -- every other credential surface in this app (Keys, Config
+        capabilities) is careful to only ever report whether something is
+        set, never the value itself. This keeps that same guarantee: key
+        names survive (so the UI can show which env vars a server has),
+        values don't."""
+        data = asdict(self)
+        data["env"] = {k: "set" for k in self.env}
+        return data
 
 
 class PluginStore:

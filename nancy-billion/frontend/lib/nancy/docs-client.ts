@@ -5,6 +5,8 @@
  * honest docs instead of hardcoded strings.
  */
 
+import { NAVIGABLE_PANELS } from './commands'
+
 const DEFAULT_BASE = typeof window !== 'undefined' ? '' : 'http://localhost:8000'
 
 export interface DocsCommand {
@@ -36,18 +38,42 @@ export interface DocsMemoryHint {
   note: string
 }
 
-const SLASH_COMMANDS: DocsCommand[] = [
+// Explicit slash commands -- these are the ones lib/nancy/commands.ts
+// intercepts locally by exact prefix match, each with its own distinct
+// reply, before anything reaches the backend.
+const EXPLICIT_COMMANDS: DocsCommand[] = [
   { command: '/skills', category: 'agent', description: 'Open Skills and view attached agents.', example: '/skills' },
-  { command: '/memory', category: 'memory', description: 'Open memory, session history, and recall tools.', example: '/memory' },
-  { command: '/agents', category: 'agent', description: 'Open agent command and specialist roster.', example: '/agents' },
-  { command: '/terminal', category: 'system', description: 'Open Command Layer terminal and runtime control.', example: '/terminal' },
-  { command: '/status', category: 'help', description: 'Show current system status summary.', example: '/status' },
-  { command: '/help', category: 'help', description: 'List available slash commands.', example: '/help' },
+  { command: '/memory', category: 'memory', description: 'Open Sessions (real conversation history and recall tools). Aliases: /remember, /recall.', example: '/memory' },
+  { command: '/agents', category: 'agent', description: 'Open agent command and specialist roster. Aliases: /subagents, /orb, /boot.', example: '/agents' },
+  { command: '/terminal', category: 'system', description: 'Open Command Layer terminal and runtime control. Aliases: /console, /command layer.', example: '/terminal' },
   { command: '/new', category: 'system', description: 'Start a fresh session/chat.', example: '/new' },
+  { command: '/status', category: 'help', description: "Not a local intercept -- sent to Nancy directly, who has live system context to answer with.", example: '/status' },
+  { command: '/help', category: 'help', description: "Not a local intercept -- sent to Nancy directly, who has live system context to answer with.", example: '/help' },
 ]
 
-export function listSlashCommands() {
-  return SLASH_COMMANDS
+// Panels covered by one of the explicit commands above already, so the
+// generated "open X" rows below don't show a near-duplicate entry for them.
+const EXPLICIT_PANELS = new Set(['skills', 'sessions', 'agents', 'system'])
+
+/** Every other real panel reachable by saying/typing "open <word>" (see
+ * commands.ts's launchMatch handling + NAVIGABLE_PANELS) -- generated from
+ * that same exported list instead of a second hand-maintained array, so a
+ * newly-navigable panel can't silently go undocumented here the way the
+ * previous 7-entry hardcoded list did (it hadn't been touched since well
+ * before this session's page-by-page revamp added a dozen more panels). */
+function navigationCommands(): DocsCommand[] {
+  return NAVIGABLE_PANELS
+    .filter((p) => !EXPLICIT_PANELS.has(p.panel))
+    .map((p) => ({
+      command: `open ${p.keyword}`,
+      category: 'navigation' as const,
+      description: `Opens the ${p.keyword} panel.`,
+      example: `open ${p.keyword}`,
+    }))
+}
+
+export function listSlashCommands(): DocsCommand[] {
+  return [...EXPLICIT_COMMANDS, ...navigationCommands()]
 }
 
 export interface DocsFetchResult<T> {

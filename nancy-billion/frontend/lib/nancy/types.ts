@@ -8,9 +8,9 @@ export interface LogEntry {
 }
 
 export type PanelKey =
-  | 'overview' | 'map' | 'core' | 'agents' | 'system' | 'projects' | 'market' | 'news' | 'media' | 'kanban'
+  | 'overview' | 'map' | 'core' | 'agents' | 'system' | 'market' | 'news' | 'kanban'
   | 'sessions' | 'channels' | 'instances' | 'cron' | 'skills' | 'models' | 'keys' | 'config' | 'usage'
-  | 'pairing' | 'profiles' | 'plugins' | 'mcp' | 'webhooks' | 'docs' | 'canvas' | 'memory-insights'
+  | 'pairing' | 'profiles' | 'plugins' | 'webhooks' | 'docs' | 'canvas' | 'memory-insights'
   | 'achievements' | 'theming'
 
 export interface AgentInfo {

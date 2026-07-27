@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 STORE_PATH = Path(__file__).parent / "data" / "webhooks.json"
 
-WebhookEvent = Literal["cron_job_ran", "agent_task_completed"]
-VALID_EVENTS: set[str] = {"cron_job_ran", "agent_task_completed"}
+WebhookEvent = Literal["cron_job_ran", "agent_task_completed", "achievement_unlocked"]
+VALID_EVENTS: set[str] = {"cron_job_ran", "agent_task_completed", "achievement_unlocked"}
 
 
 @dataclass

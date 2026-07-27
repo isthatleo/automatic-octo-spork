@@ -1,7 +1,22 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
+import { BookOpen, Loader2, Bot, Brain, TerminalSquare, HelpCircle, Compass, FileText, FileCode2 } from 'lucide-react'
+
+const QUICK_REFERENCE = [
+  { title: 'What Nancy actually is', body: 'A voice-first personal assistant: real STT/TTS, a multi-provider LLM fallback chain, dozens of specialized agents, Telegram remote control, and gated file access — see AI Core and Agents for live status.', isPath: false },
+  { title: 'Backend source', body: 'nancy-billion/backend/main_new.py is the FastAPI entrypoint; llm.py holds the reasoning fallback chain; agents/specialized/ holds the real agent roster.', isPath: true },
+  { title: 'Frontend source', body: 'nancy-billion/frontend/app/page.tsx is the shell; components/nancy/ holds every panel in this sidebar.', isPath: true },
+]
+
+const CATEGORY_META: Record<string, { label: string; icon: typeof BookOpen }> = {
+  navigation: { label: 'Navigation', icon: Compass },
+  agent: { label: 'Agents', icon: Bot },
+  memory: { label: 'Memory', icon: Brain },
+  system: { label: 'System', icon: TerminalSquare },
+  help: { label: 'Help', icon: HelpCircle },
+}
 
 export function DocsHelpPanel() {
   const [commands, setCommands] = useState<{ command: string; category: string; description: string; example: string }[]>([])
@@ -59,36 +74,76 @@ export function DocsHelpPanel() {
   }, [commands])
 
   return (
-    <div className="space-y-4">
-      <section className="rounded-lg border border-border bg-card/60 p-4">
-        <h2 className="font-heading text-sm font-semibold">Nancy Command Reference</h2>
-        <p className="mt-1 text-xs text-muted-foreground">Slash commands, navigations, and runtime surfaces.</p>
-        {loading ? (
-          <p className="mt-3 text-xs text-muted-foreground">Loading docs…</p>
-        ) : error ? (
-          <p className="mt-3 text-xs text-destructive">Docs unavailable: {error}</p>
-        ) : (
-          <div className="mt-3 grid gap-2">
-            {Array.from(grouped.entries()).map(([category, items]) => (
-              <div key={String(category)} className="rounded-md border border-border bg-background/60 p-2">
-                <p className="text-[0.65rem] font-heading uppercase tracking-wide text-muted-foreground">{String(category)}</p>
-                <ul className="mt-2 space-y-1">
+    <div className="mx-auto flex max-w-[820px] flex-col gap-4">
+      <div className="flex items-center gap-2 rounded-xl border border-border bg-card/60 px-4 py-3">
+        <BookOpen className="h-4 w-4 text-primary" />
+        <span className="font-heading text-xs text-foreground">Nancy Command Reference</span>
+        <span className="text-[0.55rem] text-muted-foreground">
+          {commands.length} real commands — slash intercepts and every panel reachable by saying &ldquo;open &lt;name&gt;&rdquo;
+        </span>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center rounded-xl border border-border bg-card/60 py-8 text-[0.6rem] text-muted-foreground">
+          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…
+        </div>
+      ) : error ? (
+        <p className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-[0.6rem] text-destructive">
+          Docs unavailable: {error} — showing a minimal fallback list below.
+        </p>
+      ) : null}
+
+      {!loading && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {Array.from(grouped.entries()).map(([category, items]) => {
+            const meta = CATEGORY_META[category]
+            const Icon = meta?.icon ?? FileText
+            return (
+              <div key={category} className="overflow-hidden rounded-xl border border-border bg-card/60">
+                <div className="flex items-center gap-2 border-b border-border/50 bg-secondary/10 px-3.5 py-2">
+                  <Icon className="h-3.5 w-3.5 text-primary" />
+                  <h3 className="font-heading text-[0.65rem] text-foreground">{meta?.label ?? category}</h3>
+                  <span className="ml-auto text-[0.5rem] text-muted-foreground">{items.length}</span>
+                </div>
+                <ul className="divide-y divide-border/30">
                   {items.map((item) => (
-                    <li key={item.command} className="flex items-baseline justify-between gap-3">
-                      <span className="font-mono text-xs text-foreground">{item.command}</span>
-                      <span className="text-right text-[0.65rem] text-muted-foreground">{item.description}</span>
+                    <li key={item.command} className="flex items-baseline justify-between gap-3 px-3.5 py-2">
+                      <span className="shrink-0 font-mono text-[0.6rem] text-primary">{item.command}</span>
+                      <span className="min-w-0 text-right text-[0.55rem] leading-relaxed text-muted-foreground">{item.description}</span>
                     </li>
                   ))}
                 </ul>
               </div>
-            ))}
-          </div>
-        )}
-      </section>
-      <section className="rounded-lg border border-border bg-card/60 p-4">
-        <h2 className="font-heading text-sm font-semibold">Model Reference</h2>
-        <div className={cn('mt-2 text-xs text-muted-foreground whitespace-pre-wrap font-mono')}>{modelMarkdown}</div>
-      </section>
+            )
+          })}
+        </div>
+      )}
+
+      {modelMarkdown && (
+        <div className="rounded-xl border border-border bg-card/60 p-4">
+          <h3 className="mb-2 flex items-center gap-2 font-heading text-[0.68rem] text-foreground">
+            <Brain className="h-3.5 w-3.5 text-primary" /> Model Reference
+          </h3>
+          <div className={cn('whitespace-pre-wrap font-mono text-[0.55rem] leading-relaxed text-muted-foreground')}>{modelMarkdown}</div>
+        </div>
+      )}
+
+      <ol className="divide-y divide-border/40 rounded-xl border border-border bg-card/60">
+        {QUICK_REFERENCE.map((e, i) => (
+          <li key={e.title} className="flex gap-3 px-4 py-3.5">
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border/50 font-mono text-[0.55rem] text-muted-foreground">
+              {String(i + 1).padStart(2, '0')}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                {e.isPath ? <FileCode2 className="h-3 w-3 text-tertiary" /> : <BookOpen className="h-3 w-3 text-primary" />}
+                <h3 className="font-heading text-[0.68rem] text-foreground">{e.title}</h3>
+              </div>
+              <p className={cn('mt-1 text-[0.6rem] leading-relaxed text-muted-foreground', e.isPath && 'font-mono')}>{e.body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
     </div>
   )
 }

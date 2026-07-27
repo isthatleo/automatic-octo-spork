@@ -102,21 +102,25 @@ def _save_unlock_times(times: Dict[str, float]) -> None:
         logger.warning("achievements_store: failed saving unlock times: %s", e)
 
 
-def record_unlocks(unlocked_keys: List[str]) -> Dict[str, float]:
+def record_unlocks(unlocked_keys: List[str]) -> tuple[Dict[str, float], List[str]]:
     """Persist the first moment each badge went true -- badges are
     recomputed live from current stats every call, so without this the
     exact unlock time is lost the instant the underlying stat changes
-    again. Returns the full key -> unix-timestamp map."""
+    again. Returns (full key -> unix-timestamp map, keys newly unlocked on
+    *this* call) -- the second lets a caller fire a real "just happened"
+    event (e.g. an achievement_unlocked webhook) exactly once per badge,
+    on whichever poll first observes it, rather than re-firing on every
+    subsequent call now that the badge is persisted as unlocked."""
     times = _load_unlock_times()
-    changed = False
+    newly: List[str] = []
     now = time.time()
     for key in unlocked_keys:
         if key not in times:
             times[key] = now
-            changed = True
-    if changed:
+            newly.append(key)
+    if newly:
         _save_unlock_times(times)
-    return times
+    return times, newly
 
 
 def compute_unlocked(activity: Dict[str, Any]) -> List[Dict[str, Any]]:

@@ -40,6 +40,30 @@ class _PairingSession:
 
 
 _session = _PairingSession()
+_bot_username_cache: Optional[str] = None
+
+
+async def _get_bot_username(token: str) -> Optional[str]:
+    """Real getMe call so the Pairing page can render a clickable
+    https://t.me/<username> link -- previously the UI just said "message
+    this code to your bot" with no indication of which bot or how to find
+    it. Cached for the process lifetime since a bot's username essentially
+    never changes; never raises -- an unreachable Telegram API just means
+    no deep link, not a failed pairing."""
+    global _bot_username_cache
+    if _bot_username_cache:
+        return _bot_username_cache
+    try:
+        async with httpx.AsyncClient(base_url=f"{TELEGRAM_API}/bot{token}", timeout=10.0) as client:
+            resp = await client.get("/getMe")
+            data = resp.json()
+        username = data.get("result", {}).get("username")
+        if username:
+            _bot_username_cache = username
+        return username
+    except Exception as e:
+        logger.warning("Failed to fetch bot username for pairing deep link: %s", e)
+        return None
 
 
 def start_pairing() -> dict:
@@ -51,6 +75,14 @@ def start_pairing() -> dict:
     _session.started_at = time.time()
     _session.result_chat_id = None
     return {"success": True, "code": code, "expires_in": PAIRING_TTL_S}
+
+
+async def get_bot_username() -> dict:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        return {"success": False, "username": None}
+    username = await _get_bot_username(token)
+    return {"success": True, "username": username}
 
 
 async def check_pairing() -> dict:

@@ -19,17 +19,18 @@ import type { AgentInfo, LogEntry } from '@/lib/nancy/types'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/nancy/time'
 import { THEMEABLE_VARS, type ThemeableVar } from '@/lib/nancy/theme'
+import { motion } from 'framer-motion'
 import {
   Send, MessagesSquare, Hash, Phone, Globe2, CheckCircle2, XCircle,
   Wrench, Sparkles, Cpu, Waves, Eye, EyeOff, Key, User, Server,
   BookOpen, BarChart3, PlugZap, Webhook, Link2, Loader2,
   Plus, Trash2, Save, Bot, ToggleLeft, ToggleRight,
   Radar, ChevronRight, Lock, ShieldCheck,
-  CalendarClock, Library, ArrowRight, FileCode2,
+  CalendarClock, Library, ArrowRight,
   Fingerprint, Layers, MessageCircle, SendHorizonal, Upload, Mic,
   Moon, CheckSquare, Network, Award, Bell, Home, PhoneCall, MessageSquare,
   Archive, ArchiveRestore, Package, GitMerge, Search, AlertTriangle, FileText,
-  Orbit, RotateCcw, X,
+  Orbit, RotateCcw, X, TrendingUp,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
@@ -2418,6 +2419,14 @@ function PairingFlow() {
   const [status, setStatus] = useState<'idle' | 'starting' | 'waiting' | 'paired' | 'expired' | 'error'>('idle')
   const [chatId, setChatId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [botUsername, setBotUsername] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch('/api/telegram/pair/bot')
+      .then((res) => res.json())
+      .then((json) => { if (json.success && json.username) setBotUsername(json.username) })
+      .catch(() => {})
+  }, [])
 
   const start = async () => {
     setStatus('starting'); setError(null)
@@ -2498,6 +2507,16 @@ function PairingFlow() {
           <div className="text-center">
             <p className="text-[0.55rem] text-muted-foreground">Message this code to your bot on Telegram:</p>
             <p className="mt-1 font-display text-3xl tracking-[0.3em] text-tertiary">{code}</p>
+            {botUsername && (
+              <a
+                href={`https://t.me/${botUsername}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-tertiary/40 bg-tertiary/10 px-3 py-1.5 text-[0.55rem] text-tertiary hover:bg-tertiary/20"
+              >
+                <SendHorizonal className="h-3 w-3" /> Open @{botUsername} on Telegram
+              </a>
+            )}
             <p className="mt-2 flex items-center justify-center gap-1.5 text-[0.55rem] text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Waiting for your message…</p>
           </div>
         )}
@@ -2554,6 +2573,92 @@ export function PairingPanel() {
    actually sound like without switching to each one first. ═══════════════ */
 const PERSONAS = ['nancy', 'billion', 'jarvis'] as const
 type PersonaPreview = { boot: string; ready: string; accent: string }
+const PERSONA_ICON: Record<string, React.ElementType> = { nancy: User, billion: TrendingUp, jarvis: Bot }
+
+/* Same glass-module design language as mission-control.tsx's AgentGlassCard
+   (frosted glass, monochrome icon, accent bar, hover lift+bloom) so persona
+   cards read as part of the same visual system instead of a one-off style.
+   The one deliberate difference: an agent's accent bar/glow reflects a real
+   transient signal (isExecuting); a persona's active state is not
+   transient, so the active card's glow is persistent, not just on hover. */
+const PROFILE_GLASS_BG = 'color-mix(in oklch, var(--card) 78%, transparent)'
+const PROFILE_BORDER_IDLE = 'color-mix(in oklch, var(--primary) 20%, transparent)'
+const PROFILE_BORDER_HOVER = 'color-mix(in oklch, var(--primary) 65%, transparent)'
+const PROFILE_GLOW_SOFT = 'color-mix(in oklch, var(--primary) 16%, transparent)'
+const PROFILE_GLOW_STRONG = 'color-mix(in oklch, var(--primary) 55%, transparent)'
+
+function PersonaGlassCard({
+  persona, isActive, isSwitching, preview, onSelect,
+}: { persona: string; isActive: boolean; isSwitching: boolean; preview?: PersonaPreview; onSelect: () => void }) {
+  const [hovered, setHovered] = useState(false)
+  const Icon = PERSONA_ICON[persona] ?? User
+
+  return (
+    <motion.button
+      type="button"
+      onClick={onSelect}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      disabled={isSwitching}
+      whileHover={{ y: -4, scale: 1.02 }}
+      whileTap={{ scale: 0.99 }}
+      transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+      className="relative flex h-[230px] w-[270px] shrink-0 flex-col overflow-hidden p-[18px] text-left disabled:cursor-wait"
+      style={{
+        borderRadius: 16,
+        background: PROFILE_GLASS_BG,
+        backdropFilter: 'blur(22px)',
+        WebkitBackdropFilter: 'blur(22px)',
+        border: `1px solid ${hovered || isActive ? PROFILE_BORDER_HOVER : PROFILE_BORDER_IDLE}`,
+        boxShadow: hovered ? `0 0 30px ${PROFILE_GLOW_SOFT}` : isActive ? `0 0 22px ${PROFILE_GLOW_STRONG}` : 'none',
+        transition: 'border-color 0.25s ease, box-shadow 0.25s ease',
+      }}
+    >
+      {/* left accent bar — persistently breathes for the active profile */}
+      <motion.span
+        className="absolute inset-y-0 left-0 w-[2px]"
+        style={{ background: 'var(--primary)' }}
+        animate={isActive
+          ? { opacity: [0.55, 1, 0.55], boxShadow: [`0 0 4px ${PROFILE_GLOW_SOFT}`, `0 0 16px ${PROFILE_GLOW_STRONG}`, `0 0 4px ${PROFILE_GLOW_SOFT}`] }
+          : { opacity: hovered ? 0.85 : 0.35, boxShadow: `0 0 6px ${PROFILE_GLOW_SOFT}` }}
+        transition={isActive ? { duration: 2.5, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.2 }}
+      />
+
+      <div className="flex items-start justify-between">
+        <Icon className="h-[20px] w-[20px] text-white/80" strokeWidth={1.5} />
+        <span
+          className="flex h-5 items-center gap-1 rounded-full px-2 text-[10px] uppercase tracking-[1.5px]"
+          style={{ border: `1px solid ${PROFILE_BORDER_HOVER}`, color: 'var(--primary)' }}
+        >
+          {isSwitching ? (
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+          ) : (
+            <>
+              <span className="h-1 w-1 rounded-full" style={{ background: 'var(--primary)' }} />
+              {isActive ? 'ACTIVE' : 'STANDBY'}
+            </>
+          )}
+        </span>
+      </div>
+
+      <h3 className="mt-3 truncate text-[18px] font-semibold uppercase tracking-wide text-white">{persona}</h3>
+      <p className="mt-1.5 line-clamp-2 text-[12px] leading-relaxed text-white/65">
+        {preview ? preview.ready : ' '}
+      </p>
+
+      <div className="mt-auto flex items-center justify-between pt-2">
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-[1.5px] text-white/40">Tone</div>
+          <div className="truncate text-[11px] text-white" style={{ maxWidth: 150 }}>{preview?.accent ?? '—'}</div>
+        </div>
+        <div className="text-right">
+          <div className="text-[9px] uppercase tracking-[1.5px] text-white/40">Session</div>
+          <div className="text-[13px]" style={{ color: 'var(--gold)' }}>{isActive ? 'active' : 'standby'}</div>
+        </div>
+      </div>
+    </motion.button>
+  )
+}
 
 export function ProfilesPanel() {
   const [active, setActive] = useState<string>('nancy')
@@ -2592,57 +2697,17 @@ export function ProfilesPanel() {
         </span>
       </div>
 
-      {/* ID-badge rack — a row of credential cards, not a settings list */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        {PERSONAS.map((p) => {
-          const isActive = active === p
-          const isSwitching = switching === p
-          const preview = previews[p]
-          return (
-            <button
-              key={p}
-              type="button"
-              onClick={() => switchPersona(p)}
-              disabled={isSwitching}
-              className={cn(
-                'group relative flex flex-col overflow-hidden rounded-2xl border text-left transition-all',
-                isActive ? 'glow-ring border-transparent bg-secondary/40' : 'border-border/50 bg-card/60 hover:border-primary/40',
-              )}
-            >
-              {/* card top strip — badge photo area */}
-              <div className="flex items-center justify-between px-4 pt-4">
-                <span className="font-mono text-[0.5rem] uppercase tracking-widest text-muted-foreground">Nancy/Billion ID</span>
-                {isSwitching ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-                ) : isActive ? (
-                  <span className="flex items-center gap-1 text-[0.5rem] text-primary"><CheckCircle2 className="h-3 w-3" /> ACTIVE</span>
-                ) : (
-                  <span className="text-[0.5rem] text-muted-foreground">tap to set</span>
-                )}
-              </div>
-              <div className="flex flex-col items-center gap-2 px-4 py-5">
-                <span className={cn(
-                  'flex h-16 w-16 items-center justify-center rounded-full border-2 font-display text-2xl',
-                  isActive ? 'border-primary text-primary' : 'border-border/60 text-muted-foreground',
-                )}>
-                  {p.charAt(0).toUpperCase()}
-                </span>
-                <span className="font-heading text-sm capitalize text-foreground">{p}</span>
-                {preview && (
-                  <>
-                    <p className="text-center text-[0.55rem] italic leading-relaxed text-muted-foreground">&ldquo;{preview.ready}&rdquo;</p>
-                    <span className="text-[0.48rem] uppercase tracking-wide text-muted-foreground/70">{preview.accent}</span>
-                  </>
-                )}
-              </div>
-              {/* card bottom strip — signature/id bar */}
-              <div className={cn('mt-auto flex items-center justify-between border-t px-4 py-2 font-mono text-[0.5rem]', isActive ? 'border-primary/30 text-primary' : 'border-border/40 text-muted-foreground')}>
-                <span>ID/{p.toUpperCase().slice(0, 3)}-01</span>
-                <span>{isActive ? 'in session' : 'standby'}</span>
-              </div>
-            </button>
-          )
-        })}
+      <div className="flex flex-wrap gap-4">
+        {PERSONAS.map((p) => (
+          <PersonaGlassCard
+            key={p}
+            persona={p}
+            isActive={active === p}
+            isSwitching={switching === p}
+            preview={previews[p]}
+            onSelect={() => switchPersona(p)}
+          />
+        ))}
       </div>
     </div>
   )
@@ -2665,15 +2730,38 @@ interface PluginServer {
   tools: string[]
 }
 
-export function PluginsPanel(_props: { onNavigate?: () => void } = {}) {
+// Real, well-known MCP servers (official/community npm packages) offered as
+// one-click prefills -- the form previously required already knowing an
+// exact package name and arg syntax from scratch, with only one example in
+// the help text. envHint documents which env vars a server needs (the form
+// below now actually has an env field to put them in); [] means it needs no
+// credentials at all.
+const MCP_CATALOG: { label: string; command: string; args: string[]; envHint: string[] }[] = [
+  { label: 'Filesystem', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', 'C:\\path\\to\\allow'], envHint: [] },
+  { label: 'GitHub', command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], envHint: ['GITHUB_PERSONAL_ACCESS_TOKEN'] },
+  { label: 'Brave Search', command: 'npx', args: ['-y', '@modelcontextprotocol/server-brave-search'], envHint: ['BRAVE_API_KEY'] },
+  { label: 'Puppeteer', command: 'npx', args: ['-y', '@modelcontextprotocol/server-puppeteer'], envHint: [] },
+  { label: 'Postgres', command: 'npx', args: ['-y', '@modelcontextprotocol/server-postgres', 'postgresql://host/db'], envHint: [] },
+  { label: 'Slack', command: 'npx', args: ['-y', '@modelcontextprotocol/server-slack'], envHint: ['SLACK_BOT_TOKEN', 'SLACK_TEAM_ID'] },
+]
+
+export function PluginsPanel() {
   const [servers, setServers] = useState<PluginServer[]>([])
   const [loading, setLoading] = useState(true)
   const [name, setName] = useState('')
   const [command, setCommand] = useState('npx')
   const [argsInput, setArgsInput] = useState('')
+  const [envInput, setEnvInput] = useState('')
   const [creating, setCreating] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
+
+  const applyPreset = (preset: (typeof MCP_CATALOG)[number]) => {
+    setName(preset.label.toLowerCase().replace(/\s+/g, '-'))
+    setCommand(preset.command)
+    setArgsInput(preset.args.join(' '))
+    setEnvInput(preset.envHint.map((k) => `${k}=`).join('\n'))
+  }
 
   const fetchServers = useCallback(async () => {
     try {
@@ -2695,14 +2783,22 @@ export function PluginsPanel(_props: { onNavigate?: () => void } = {}) {
     if (!name.trim() || !command.trim()) return
     setCreating(true); setFormError(null)
     try {
+      const env: Record<string, string> = {}
+      for (const line of envInput.split('\n')) {
+        const eq = line.indexOf('=')
+        if (eq <= 0) continue
+        const key = line.slice(0, eq).trim()
+        const value = line.slice(eq + 1).trim()
+        if (key) env[key] = value
+      }
       const res = await fetch('/api/plugins', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), command: command.trim(), args: argsInput.trim().split(/\s+/).filter(Boolean) }),
+        body: JSON.stringify({ name: name.trim(), command: command.trim(), args: argsInput.trim().split(/\s+/).filter(Boolean), env }),
       })
       const json = await res.json()
       if (!json.success) { setFormError(json.detail || 'Failed to register server (approval denied or timed out)'); return }
-      setName(''); setArgsInput('')
+      setName(''); setArgsInput(''); setEnvInput('')
       fetchServers()
     } catch (e) {
       setFormError(String(e))
@@ -2739,6 +2835,19 @@ export function PluginsPanel(_props: { onNavigate?: () => void } = {}) {
         <p className="mb-2.5 text-[0.55rem] text-muted-foreground">
           Registers a real local subprocess (e.g. <code>npx -y @modelcontextprotocol/server-filesystem C:\path</code>) — Nancy asks for Telegram approval before spawning it, the same gate as running any other command.
         </p>
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {MCP_CATALOG.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              onClick={() => applyPreset(preset)}
+              className="rounded-full border border-border/60 bg-secondary/20 px-2.5 py-1 text-[0.55rem] text-muted-foreground hover:border-primary/40 hover:text-foreground"
+              title={preset.envHint.length > 0 ? `Needs: ${preset.envHint.join(', ')}` : 'No credentials needed'}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-[160px_120px_1fr_auto]">
           <div>
             <FieldLabel>Name</FieldLabel>
@@ -2757,6 +2866,16 @@ export function PluginsPanel(_props: { onNavigate?: () => void } = {}) {
               {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} {creating ? 'Awaiting approval…' : 'Connect'}
             </PrimaryButton>
           </div>
+        </div>
+        <div className="mt-2.5">
+          <FieldLabel>Environment variables (optional, one KEY=value per line)</FieldLabel>
+          <textarea
+            value={envInput}
+            onChange={(e) => setEnvInput(e.target.value)}
+            rows={2}
+            className={cn(inputCls, 'resize-y font-mono')}
+            placeholder={'GITHUB_PERSONAL_ACCESS_TOKEN=ghp_...'}
+          />
         </div>
         {formError && <p className="mt-2 text-[0.55rem] text-destructive">{formError}</p>}
       </div>
@@ -2783,6 +2902,7 @@ export function PluginsPanel(_props: { onNavigate?: () => void } = {}) {
                     <div className="truncate text-[0.62rem] text-foreground">{s.name}</div>
                     <div className="truncate text-[0.5rem] text-muted-foreground">
                       {s.command} {s.args.join(' ')} · {s.connected ? `${s.tools.length} tool${s.tools.length !== 1 ? 's' : ''}` : (s.error ? `error: ${s.error}` : 'disconnected')}
+                      {Object.keys(s.env).length > 0 && <> · env: {Object.keys(s.env).join(', ')}</>}
                     </div>
                   </div>
                   {s.connected && s.tools.length > 0 && (
@@ -2812,9 +2932,6 @@ export function PluginsPanel(_props: { onNavigate?: () => void } = {}) {
     </div>
   )
 }
-export function McpPanel(props: { onNavigate?: () => void } = {}) {
-  return <PluginsPanel {...props} />
-}
 /* ═══════════════════ WEBHOOKS — real outbound HTTP delivery ═══════════
    A genuine subscription system: POST /webhooks stores a real (url, event)
    pair, and _fire_webhooks in main_new.py actually POSTs to it when the
@@ -2834,6 +2951,7 @@ interface WebhookRecord {
 const WEBHOOK_EVENT_LABELS: Record<string, string> = {
   cron_job_ran: 'Cron job ran',
   agent_task_completed: 'Agent task completed',
+  achievement_unlocked: 'Achievement unlocked',
 }
 
 export function WebhooksPanel() {
@@ -2981,44 +3099,6 @@ export function WebhooksPanel() {
           </ul>
         )}
       </div>
-    </div>
-  )
-}
-
-/* ═══════════════════ DOCS — real, local, no fabricated links ═══════════ */
-/* ═══════════════════ DOCS — a real doc-index, lighter touch since it's
-   static real content with no fabrication risk. Numbered reference rows
-   instead of a two-column card grid; entries pointing at real source files
-   get a file icon, everything else gets a book icon. ═══════════════════ */
-export function DocsPanel() {
-  const entries = [
-    { title: 'What Nancy actually is', body: 'A voice-first personal assistant: real STT/TTS, a multi-provider LLM fallback chain, 29 specialized agents, Telegram remote control, and gated file access — see AI Core and Agents for live status.', isPath: false },
-    { title: 'Backend source', body: 'nancy-billion/backend/main_new.py is the FastAPI entrypoint; llm.py holds the reasoning fallback chain; agents/specialized/ holds the real agent roster.', isPath: true },
-    { title: 'Frontend source', body: 'nancy-billion/frontend/app/page.tsx is the shell; components/nancy/ holds every panel in this sidebar.', isPath: true },
-    { title: 'No hosted docs site', body: "This is a personal single-user build with no public documentation site — this page just points at the real files instead of linking somewhere that may not exist.", isPath: false },
-  ]
-  return (
-    <div className="mx-auto flex max-w-[820px] flex-col gap-3">
-      <div className="flex items-center gap-2 rounded-xl border border-border bg-card/60 px-4 py-3">
-        <BookOpen className="h-4 w-4 text-primary" />
-        <span className="font-heading text-xs text-foreground">Reference Index</span>
-      </div>
-      <ol className="divide-y divide-border/40 rounded-xl border border-border bg-card/60">
-        {entries.map((e, i) => (
-          <li key={e.title} className="flex gap-3 px-4 py-3.5">
-            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border/50 font-mono text-[0.55rem] text-muted-foreground">
-              {String(i + 1).padStart(2, '0')}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                {e.isPath ? <FileCode2 className="h-3 w-3 text-tertiary" /> : <BookOpen className="h-3 w-3 text-primary" />}
-                <h3 className="font-heading text-[0.68rem] text-foreground">{e.title}</h3>
-              </div>
-              <p className={cn('mt-1 text-[0.6rem] leading-relaxed text-muted-foreground', e.isPath && 'font-mono')}>{e.body}</p>
-            </div>
-          </li>
-        ))}
-      </ol>
     </div>
   )
 }
