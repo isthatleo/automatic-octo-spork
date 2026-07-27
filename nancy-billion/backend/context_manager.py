@@ -80,10 +80,31 @@ class ContextManager:
         logger.debug(f"Active topics: {self.active_topics}")
 
     def clear_old_history(self, max_age_hours: int = 24):
-        """Remove old messages (cleanup)"""
-        # Keep last 100 messages or messages from last 24 hours
-        if len(self.conversation_history) > 100:
-            self.conversation_history = self.conversation_history[-100:]
+        """Remove old messages (cleanup) -- delegates to the pluggable
+        compaction strategy (context_engine/base.py); default behavior is
+        unchanged (keep last 100 messages), CONTEXT_ENGINE_STRATEGY=summarize
+        opts into LLM-based summarization instead of plain truncation."""
+        from context_engine.base import create_strategy
+        strategy = create_strategy()
+        if strategy.should_compact(self.conversation_history):
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Called from sync code inside an already-running loop
+                    # (e.g. a request handler) -- schedule it rather than
+                    # blocking; the plain truncate path below covers the
+                    # immediate synchronous case correctly either way.
+                    asyncio.create_task(self._compact_async(strategy))
+                else:
+                    self.conversation_history = loop.run_until_complete(strategy.compact(self.conversation_history))
+            except RuntimeError:
+                # No event loop in this thread -- fall back to the always-
+                # correct synchronous default rather than failing the caller.
+                self.conversation_history = self.conversation_history[-100:]
+
+    async def _compact_async(self, strategy) -> None:
+        self.conversation_history = await strategy.compact(self.conversation_history)
 
 
 class IntentClassifier:

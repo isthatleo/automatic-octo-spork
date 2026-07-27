@@ -136,3 +136,14 @@ lancedb>=0.15
 
 # Real local TLS-intercepting egress proxy (egress_proxy.py / coverage_proxy.py).
 mitmproxy>=11.0
+
+# Real Language Server Protocol client (lsp_client.py) -- [all] pulls in the
+# actual diagnostics-producing plugins (pyflakes, pycodestyle, mccabe); the
+# bare package alone only gets jedi-based completion/hover/definition with
+# no diagnostics output at all (confirmed live this session -- publishDiagnostics
+# came back empty until pyflakes/pycodestyle were installed).
+python-lsp-server[all]>=1.14.0
+
+# Real Word document text extraction (doc_extraction.py) -- pypdf (PDF) is
+# already a dependency via other tooling; python-docx is the .docx equivalent.
+python-docx>=1.2.0

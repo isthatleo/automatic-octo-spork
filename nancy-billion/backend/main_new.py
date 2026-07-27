@@ -81,6 +81,11 @@ from providers.spotify_tool import SPOTIFY_TOOLS, handle_spotify_tool
 from memory import wiki_store, commitments
 import evidence_ledger
 import lifecycle_hooks
+import lsp_client
+from diff_render import post_diff_to_canvas
+import doc_extraction
+import config_migration
+import workflow_engine
 from debug_share import share_debug_report
 import node_host
 import approval_policy
@@ -88,6 +93,22 @@ import egress_proxy
 import coverage_proxy
 import usage_analytics
 import achievements_store
+
+DIFF_TOOLS = [
+    {
+        "name": "show_diff",
+        "description": "Render a real unified diff between two versions of text/code and post it to the shared canvas with syntax highlighting.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+                "title": {"type": "string"},
+            },
+            "required": ["old_text", "new_text", "title"],
+        },
+    },
+]
 
 NODE_TOOLS = [
     {
@@ -856,6 +877,12 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             tool_input.get("node_id", ""), tool_input.get("command", ""), cwd=tool_input.get("cwd"),
         )
 
+    if name == "show_diff":
+        return await post_diff_to_canvas(tool_input.get("old_text", ""), tool_input.get("new_text", ""), tool_input.get("title", "Diff"))
+
+    if name == "extract_document_text":
+        return doc_extraction.extract_document(tool_input.get("path", ""))
+
     if name in ("take_screenshot", "get_screen_size"):
         loop = asyncio.get_event_loop()
         fn = computer_use_tool.take_screenshot if name == "take_screenshot" else computer_use_tool.get_screen_size
@@ -916,8 +943,20 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         return file_access.list_directory(tool_input["path"])
     if name == "write_file":
         await lifecycle_hooks.fire_hook("pre_write", {"path": str(resolved_write_path)})
+        old_content_result = file_access.read_file(str(resolved_write_path))
+        old_content = old_content_result.get("content") if old_content_result.get("success") else None
         result = file_access.write_file(str(resolved_write_path), tool_input["content"])
         evidence_ledger.record_evidence("write_file", str(resolved_write_path), result.get("success", False))
+        if result.get("success"):
+            try:
+                diag_result = await asyncio.wait_for(
+                    lsp_client.diagnostics_before_after_write(str(resolved_write_path), old_content, tool_input["content"]),
+                    timeout=15.0,
+                )
+                if diag_result.get("success") and not diag_result.get("unsupported") and diag_result.get("new_diagnostics"):
+                    result["new_diagnostics"] = diag_result["new_diagnostics"]
+            except Exception as e:
+                logger.info("lsp_client diagnostics check skipped: %s", e)
         return result
     if name == "delete_file":
         result = file_access.delete_file(tool_input["path"])
@@ -1055,7 +1094,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             resp = await asyncio.wait_for(
                 claude.generate_with_tools(
                     prompt,
-                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS,
+                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS,
                     _file_tool_executor,
                     max_tokens=1024,
                 ),
@@ -3015,6 +3054,83 @@ def _gather_activity_stats() -> Dict[str, Any]:
     }
 
 
+@app.post("/documents/extract", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def extract_document_route(path: str):
+    return doc_extraction.extract_document(path)
+
+
+class MemoryImportPlanRequest(BaseModel):
+    json_path: str
+
+
+class SkillImportPlanRequest(BaseModel):
+    source_dir: str
+
+
+class SkillImportApplyRequest(BaseModel):
+    source_dir: str
+    skill_names: Optional[List[str]] = None
+
+
+@app.post("/config-migration/memory/plan", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def plan_memory_import_route(req: MemoryImportPlanRequest):
+    return config_migration.plan_memory_import(req.json_path)
+
+
+@app.post("/config-migration/memory/apply", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def apply_memory_import_route(req: MemoryImportPlanRequest):
+    approved = await telegram_notifier.request_approval(f"Nancy wants to import memories from {req.json_path}", timeout=120.0)
+    if not approved:
+        raise HTTPException(status_code=403, detail="User did not approve this memory import.")
+    return await config_migration.apply_memory_import(req.json_path, memory_manager.graph)
+
+
+@app.post("/config-migration/skills/plan", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def plan_skill_import_route(req: SkillImportPlanRequest):
+    return config_migration.plan_skill_import(req.source_dir)
+
+
+@app.post("/config-migration/skills/apply", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def apply_skill_import_route(req: SkillImportApplyRequest):
+    approved = await telegram_notifier.request_approval(f"Nancy wants to import skills from {req.source_dir}", timeout=120.0)
+    if not approved:
+        raise HTTPException(status_code=403, detail="User did not approve this skill import.")
+    return config_migration.apply_skill_import(req.source_dir, req.skill_names)
+
+
+class WorkflowRunRequest(BaseModel):
+    key: str
+    title: str
+    steps: List[Dict[str, Any]]
+
+
+@app.post("/workflows/run", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def run_workflow_route(req: WorkflowRunRequest):
+    template = workflow_engine.WorkflowTemplate(
+        key=req.key, title=req.title,
+        steps=[workflow_engine.WorkflowStep(name=s["name"], type=s["type"], payload=s.get("payload", {})) for s in req.steps],
+    )
+    return await workflow_engine.run_workflow(template)
+
+
+@app.post("/workflows/runs/{run_id}/resume", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def resume_workflow_route(run_id: str):
+    return await workflow_engine.resume_run(run_id)
+
+
+@app.get("/workflows/runs", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_workflow_runs_route():
+    return {"success": True, "runs": workflow_engine.list_runs()}
+
+
+@app.get("/workflows/runs/{run_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def get_workflow_run_route(run_id: str):
+    run = workflow_engine.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return {"success": True, "run": run}
+
+
 @app.get("/achievements", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def list_achievements_route():
     activity = _gather_activity_stats()
@@ -3674,7 +3790,7 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
     claude = AnthropicLLM()
     resp = await asyncio.wait_for(
         claude.generate_with_tools(
-            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS, _execute_file_tool, max_tokens=1024
+            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS, _execute_file_tool, max_tokens=1024
         ),
         timeout=120.0,
     )
