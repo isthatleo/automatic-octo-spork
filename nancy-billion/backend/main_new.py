@@ -1768,6 +1768,32 @@ async def get_trades():
     }
 
 
+@app.get("/memory/graph")
+async def get_memory_graph():
+    """Full memory graph for the Memory Galaxy view -- every node Nancy has
+    ever stored, plus its precomputed links (memory/graph.py's add_memory
+    finds and links the most similar existing memories at write time, and
+    lancedb_store.py's backend does the same -- both expose the same
+    .nodes dict, so this works regardless of MEMORY_BACKEND). Embeddings
+    are stripped -- large vectors, zero UI use."""
+    nodes = memory_manager.graph.nodes
+    return {
+        "success": True,
+        "nodes": [
+            {
+                "id": n.id,
+                "type": n.type.value,
+                "content": n.content,
+                "metadata": n.metadata,
+                "links": n.links,
+                "importance": n.importance,
+                "created_at": n.created_at,
+            }
+            for n in nodes.values()
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Trading Intelligence API endpoints
 # ---------------------------------------------------------------------------
@@ -3136,6 +3162,69 @@ async def list_evidence(limit: int = 50, kind: Optional[str] = None):
 
 
 # ---------------------------------------------------------------------------
+# Command Layer -- direct, human-initiated entry points into the exact same
+# real terminal/file/web tools Claude's tool-use loop already calls, gated by
+# the exact same safety rules (safe-prefix-or-approval for commands, Telegram
+# approval + the security linter for writes). This replaces what used to be
+# a fully simulated "app launcher" (random fake PIDs, no real backend call).
+# ---------------------------------------------------------------------------
+class TerminalExecuteRequest(BaseModel):
+    command: str
+    cwd: Optional[str] = None
+
+
+@app.post("/terminal/execute", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def terminal_execute_route(req: TerminalExecuteRequest):
+    if not req.command.strip():
+        raise HTTPException(status_code=400, detail="command is required")
+    if not terminal_tool._is_safe_command(req.command) and not arm_switch.is_armed():
+        approved = await telegram_notifier.request_approval(
+            f"Command Layer wants to run a command:\n\n{req.command}", timeout=120.0
+        )
+        if not approved:
+            return {"success": False, "error": "User did not approve this command."}
+    return await terminal_tool.execute_command(req.command, cwd=req.cwd)
+
+
+@app.get("/files/browse", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def files_browse_route(path: str = "."):
+    return file_access.list_directory(path)
+
+
+@app.get("/files/read", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def files_read_route(path: str):
+    return file_access.read_file(path)
+
+
+class FileWriteRequest(BaseModel):
+    path: str
+    content: str
+
+
+@app.post("/files/write", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def files_write_route(req: FileWriteRequest):
+    if not arm_switch.is_armed():
+        description = f"Write to file: {req.path}"
+        lint_findings = security_lint.lint_content(req.content)
+        description += security_lint.format_findings(lint_findings)
+        approved = await telegram_notifier.request_approval(f"Command Layer wants to: {description}", timeout=120.0)
+        if not approved:
+            return {"success": False, "error": "User did not approve this file write."}
+    result = file_access.write_file(req.path, req.content)
+    evidence_ledger.record_evidence("write_file", req.path, result.get("success", False))
+    return result
+
+
+class WebFetchRequest(BaseModel):
+    url: str
+
+
+@app.post("/web/fetch", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def web_fetch_route(req: WebFetchRequest):
+    return await fetch_url(req.url)
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle hooks -- see lifecycle_hooks.py.
 # ---------------------------------------------------------------------------
 @app.get("/hooks", dependencies=[Depends(require_auth), Depends(rate_limit)])
@@ -3441,7 +3530,10 @@ async def list_achievements_route():
     activity = _gather_activity_stats()
     unlocked = achievements_store.compute_unlocked(activity)
     unlocked_keys = {a["key"] for a in unlocked}
-    all_ach = achievements_store.all_achievements()
+    unlock_times = achievements_store.record_unlocks(list(unlocked_keys))
+    for a in unlocked:
+        a["unlocked_at"] = unlock_times.get(a["key"])
+    all_ach = achievements_store.all_achievements(activity)
     return {
         "success": True,
         "unlocked": unlocked,

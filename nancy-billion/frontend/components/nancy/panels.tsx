@@ -5,7 +5,7 @@ import type { ElementType, ReactNode } from 'react'
 import { HudPanel, RadialGauge, StatBar, AnimatedNumber } from './hud-bits'
 import type { AgentInfo, PanelKey } from '@/lib/nancy/types'
 import { listAgents, type AgentListResponse } from '@/lib/nancy/agent-client'
-import { useSystemHealth, useTradeHistory, useLlmStatus, useCronStatus, useTelegramStatus } from '@/hooks/useSystemData'
+import { useSystemHealth, useTradeHistory, useLlmStatus, useCronStatus, useTelegramStatus, captureScreenContextNow } from '@/hooks/useSystemData'
 import {
   Area,
   AreaChart,
@@ -26,11 +26,8 @@ import {
   Terminal,
   Folder,
   Globe2,
-  Music,
-  Mail,
   Camera,
   Calculator,
-  Code2,
   RefreshCw,
   Zap,
   Waves,
@@ -45,6 +42,7 @@ import {
   ArrowRight,
   TrendingUp,
   AlertTriangle,
+  Save,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -1140,18 +1138,325 @@ function NeuralPipelineFlow({ llm, loading }: { llm: ReturnType<typeof useLlmSta
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   SYSTEM — Command layer with app launcher + live terminal + diagnostics
+   SYSTEM — Command layer with a real app launcher + live diagnostics.
+   Every tile below calls a real backend endpoint (terminal_tool.py,
+   file_access.py, web_tool.py, screen_context.py, evidence_ledger.py) --
+   this used to print a fake "process spawned [pid ####]" line for any
+   tile regardless of which one was clicked. Commands outside the
+   read-only safe-prefix allowlist and file writes still go through the
+   exact same Telegram-approval gate Claude's own tool-use loop uses.
    ═══════════════════════════════════════════════════════════════ */
-const APPS = [
+type AppKey = 'terminal' | 'browser' | 'files' | 'capture' | 'calculator' | 'evidence'
+const APPS: { icon: ElementType; label: string; key: AppKey }[] = [
   { icon: Terminal, label: 'Terminal', key: 'terminal' },
   { icon: Globe2, label: 'Browser', key: 'browser' },
   { icon: Folder, label: 'Files', key: 'files' },
-  { icon: Code2, label: 'Editor', key: 'editor' },
-  { icon: Music, label: 'Music', key: 'music' },
-  { icon: Mail, label: 'Mail', key: 'mail' },
-  { icon: Camera, label: 'Camera', key: 'camera' },
-  { icon: Calculator, label: 'Calc', key: 'calculator' },
+  { icon: Camera, label: 'Screen Capture', key: 'capture' },
+  { icon: Calculator, label: 'Calculator', key: 'calculator' },
+  { icon: FileClock, label: 'Evidence Log', key: 'evidence' },
 ]
+
+const cmdInputCls = 'rounded border border-border bg-background/60 px-2 py-1.5 text-[0.6rem] text-foreground outline-none focus:border-primary/60'
+const cmdRunBtnCls = 'flex items-center justify-center gap-1.5 rounded border border-primary bg-primary/15 px-3 py-1.5 text-[0.6rem] text-primary transition-colors hover:bg-primary/25 disabled:cursor-not-allowed disabled:opacity-40'
+
+function TerminalApp() {
+  const [command, setCommand] = useState('')
+  const [cwd, setCwd] = useState('')
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<any>(null)
+
+  const run = async () => {
+    if (!command.trim() || running) return
+    setRunning(true)
+    setResult(null)
+    try {
+      const res = await fetch('/api/terminal/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: command.trim(), cwd: cwd.trim() || undefined }),
+      })
+      setResult(await res.json().catch(() => ({ success: false, error: 'request failed' })))
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[0.55rem] text-muted-foreground">
+        Real shell execution. Commands outside the safe read-only allowlist wait for your approval in Telegram before running.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <input value={command} onChange={(e) => setCommand(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()}
+          placeholder="git status" className={cn(cmdInputCls, 'min-w-[200px] flex-1 font-mono')} />
+        <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="cwd (optional)" className={cn(cmdInputCls, 'w-40 font-mono')} />
+        <button type="button" onClick={run} disabled={running || !command.trim()} className={cmdRunBtnCls}>
+          {running ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Terminal className="h-3.5 w-3.5" />}
+          {running ? 'Waiting…' : 'Run'}
+        </button>
+      </div>
+      {result && (
+        <div className="rounded border border-border/40 bg-background/50 p-2 font-mono text-[0.6rem]">
+          {result.error && <div className="text-accent">{result.error}</div>}
+          {result.stdout && <pre className="whitespace-pre-wrap text-foreground">{result.stdout}</pre>}
+          {result.stderr && <pre className="whitespace-pre-wrap text-accent">{result.stderr}</pre>}
+          {result.exit_code !== undefined && <div className="mt-1 text-[0.5rem] text-muted-foreground">exit code {result.exit_code}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BrowserApp() {
+  const [url, setUrl] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<any>(null)
+
+  const go = async () => {
+    if (!url.trim() || loading) return
+    setLoading(true)
+    setResult(null)
+    try {
+      const res = await fetch('/api/web/fetch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: url.trim() }),
+      })
+      setResult(await res.json().catch(() => ({ success: false, error: 'request failed' })))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[0.55rem] text-muted-foreground">Real page fetch — title and readable text; internal/private addresses are refused.</p>
+      <div className="flex gap-2">
+        <input value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && go()}
+          placeholder="https://example.com" className={cn(cmdInputCls, 'flex-1 font-mono')} />
+        <button type="button" onClick={go} disabled={loading || !url.trim()} className={cmdRunBtnCls}>
+          {loading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Globe2 className="h-3.5 w-3.5" />} Fetch
+        </button>
+      </div>
+      {result && (
+        result.success ? (
+          <div className="rounded border border-border/40 bg-background/50 p-2 text-[0.6rem]">
+            {result.title && <div className="mb-1 text-foreground">{result.title}</div>}
+            <p className="text-muted-foreground">{(result.text ?? '').slice(0, 800)}</p>
+          </div>
+        ) : (
+          <p className="text-[0.55rem] text-accent">{result.error}</p>
+        )
+      )}
+    </div>
+  )
+}
+
+function FilesApp() {
+  const [path, setPath] = useState('.')
+  const [entries, setEntries] = useState<any[] | null>(null)
+  const [dirError, setDirError] = useState('')
+  const [openFile, setOpenFile] = useState<string | null>(null)
+  const [content, setContent] = useState('')
+  const [dirty, setDirty] = useState(false)
+  const [browsing, setBrowsing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveMsg, setSaveMsg] = useState('')
+
+  const browse = useCallback(async (p: string) => {
+    setBrowsing(true)
+    setDirError('')
+    try {
+      const res = await fetch(`/api/files/browse?path=${encodeURIComponent(p)}`)
+      const json = await res.json().catch(() => ({ success: false }))
+      if (json.success) { setEntries(json.entries); setPath(json.path); setOpenFile(null) }
+      else { setEntries(null); setDirError(json.error ?? 'failed to browse') }
+    } finally {
+      setBrowsing(false)
+    }
+  }, [])
+
+  useEffect(() => { browse('.') }, [browse])
+
+  const openEntry = async (name: string, isDir: boolean) => {
+    const next = path.endsWith('\\') || path.endsWith('/') ? `${path}${name}` : `${path}/${name}`
+    if (isDir) { browse(next); return }
+    setBrowsing(true)
+    try {
+      const res = await fetch(`/api/files/read?path=${encodeURIComponent(next)}`)
+      const json = await res.json().catch(() => ({ success: false }))
+      if (json.success) { setOpenFile(json.path); setContent(json.content); setDirty(false); setSaveMsg('') }
+      else setSaveMsg(json.error ?? 'failed to read file')
+    } finally {
+      setBrowsing(false)
+    }
+  }
+
+  const save = async () => {
+    if (!openFile || saving) return
+    setSaving(true)
+    setSaveMsg('Waiting for approval…')
+    try {
+      const res = await fetch('/api/files/write', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: openFile, content }),
+      })
+      const json = await res.json().catch(() => ({ success: false }))
+      setSaveMsg(json.success ? 'Saved.' : (json.error ?? 'Save failed.'))
+      if (json.success) setDirty(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[0.55rem] text-muted-foreground">Real filesystem, unrestricted path access. Writes wait for your approval in Telegram before saving.</p>
+      <div className="flex gap-2">
+        <input value={path} onChange={(e) => setPath(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && browse(path)}
+          className={cn(cmdInputCls, 'flex-1 font-mono')} />
+        <button type="button" onClick={() => browse(path)} className="rounded border border-border px-3 py-1.5 text-[0.6rem] text-muted-foreground hover:text-foreground">
+          Go
+        </button>
+      </div>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <div className="max-h-56 overflow-y-auto rounded border border-border/40 bg-background/50">
+          {browsing && !entries ? (
+            <div className="p-3 text-[0.55rem] text-muted-foreground">Loading…</div>
+          ) : dirError ? (
+            <div className="p-3 text-[0.55rem] text-accent">{dirError}</div>
+          ) : (entries ?? []).length === 0 ? (
+            <div className="p-3 text-[0.55rem] text-muted-foreground">Empty directory.</div>
+          ) : (
+            (entries ?? []).map((e) => (
+              <button key={e.name} type="button" onClick={() => openEntry(e.name, e.is_dir)}
+                className="flex w-full items-center gap-2 border-b border-border/20 px-2 py-1.5 text-left text-[0.58rem] text-foreground last:border-none hover:bg-secondary/20">
+                {e.is_dir ? <Folder className="h-3.5 w-3.5 shrink-0 text-primary" /> : <FileClock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+                <span className="truncate">{e.name}</span>
+              </button>
+            ))
+          )}
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <textarea value={content} onChange={(e) => { setContent(e.target.value); setDirty(true) }} disabled={!openFile}
+            rows={9} className={cn(cmdInputCls, 'resize-y font-mono disabled:opacity-40')}
+            placeholder={openFile ? '' : 'Select a file to view or edit'} />
+          {openFile && (
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={save} disabled={saving || !dirty}
+                className="flex items-center gap-1.5 rounded border border-primary bg-primary/15 px-2.5 py-1 text-[0.55rem] text-primary hover:bg-primary/25 disabled:opacity-40">
+                {saving ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} Save
+              </button>
+              <span className="truncate text-[0.5rem] text-muted-foreground">{openFile}</span>
+              {saveMsg && <span className="text-[0.5rem] text-muted-foreground">{saveMsg}</span>}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CaptureApp() {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ success: boolean; summary?: string; error?: string } | null>(null)
+
+  const capture = async () => {
+    if (busy) return
+    setBusy(true)
+    setResult(null)
+    try {
+      setResult(await captureScreenContextNow())
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[0.55rem] text-muted-foreground">Real on-demand screen capture and description, independent of ambient screen awareness.</p>
+      <button type="button" onClick={capture} disabled={busy} className={cn(cmdRunBtnCls, 'w-fit')}>
+        {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Camera className="h-3.5 w-3.5" />} Capture now
+      </button>
+      {result && (
+        result.success ? (
+          <p className="rounded border border-border/40 bg-background/50 p-2 text-[0.6rem] text-foreground">{result.summary}</p>
+        ) : (
+          <p className="text-[0.55rem] text-accent">{result.error ?? 'Capture failed.'}</p>
+        )
+      )}
+    </div>
+  )
+}
+
+const CALCULATOR_KEYS = ['7', '8', '9', '/', '4', '5', '6', '*', '1', '2', '3', '-', '0', '.', '=', '+']
+
+function CalculatorApp() {
+  const [expr, setExpr] = useState('')
+  const [result, setResult] = useState<string | null>(null)
+
+  const evaluate = () => {
+    if (!expr.trim()) return
+    if (!/^[0-9+\-*/().\s]+$/.test(expr)) { setResult('Invalid expression'); return }
+    try {
+      // eslint-disable-next-line no-new-func -- character set is pre-validated above, arithmetic only
+      const value = Function(`"use strict"; return (${expr})`)()
+      setResult(String(value))
+    } catch {
+      setResult('Error')
+    }
+  }
+
+  return (
+    <div className="flex max-w-[220px] flex-col gap-2">
+      <input value={expr} onChange={(e) => { setExpr(e.target.value); setResult(null) }} onKeyDown={(e) => e.key === 'Enter' && evaluate()}
+        className={cn(cmdInputCls, 'text-right font-mono text-[0.75rem]')} placeholder="0" />
+      {result !== null && <div className="text-right font-mono text-[0.7rem] text-primary">{result}</div>}
+      <div className="grid grid-cols-4 gap-1.5">
+        {CALCULATOR_KEYS.map((k) => (
+          <button key={k} type="button" onClick={() => (k === '=' ? evaluate() : setExpr((e) => e + k))}
+            className="rounded border border-border/50 bg-secondary/20 py-2 font-mono text-[0.65rem] text-foreground hover:bg-secondary/40">
+            {k}
+          </button>
+        ))}
+        <button type="button" onClick={() => { setExpr(''); setResult(null) }}
+          className="col-span-4 rounded border border-border/50 py-1.5 text-[0.55rem] text-muted-foreground hover:text-foreground">
+          Clear
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function EvidenceApp() {
+  const [items, setItems] = useState<any[] | null>(null)
+  useEffect(() => {
+    fetch('/api/evidence?limit=15').then((r) => r.json()).then((json) => { if (json.success) setItems(json.evidence) }).catch(() => setItems([]))
+  }, [])
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[0.55rem] text-muted-foreground">Real recent activity — every terminal command and file write, whether run here or by Nancy in chat.</p>
+      {!items ? (
+        <div className="flex items-center gap-2 text-[0.55rem] text-muted-foreground"><RefreshCw className="h-3 w-3 animate-spin" /> Loading…</div>
+      ) : items.length === 0 ? (
+        <p className="text-[0.55rem] text-muted-foreground">No activity recorded yet.</p>
+      ) : (
+        <ul className="max-h-56 divide-y divide-border/20 overflow-y-auto rounded border border-border/40 bg-background/50">
+          {items.map((e) => (
+            <li key={e.id} className="flex items-start gap-2 px-2 py-1.5 text-[0.55rem]">
+              <span className={cn('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', e.success ? 'bg-primary' : 'bg-accent')} />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 text-muted-foreground">
+                  <span className="uppercase">{e.kind}</span>
+                  <span>{new Date(e.timestamp * 1000).toLocaleTimeString('en-GB')}</span>
+                </div>
+                <div className="truncate font-mono text-foreground">{e.action}</div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
 
 export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) => void; launched: string | null }) {
   const tick = useTick(700)
@@ -1163,6 +1468,11 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
   const { stats: agentStats } = useAgentsBrief()
   const { data: llm } = useLlmStatus()
   const uptime = useSessionUptime()
+
+  const [activeApp, setActiveApp] = useState<AppKey | null>(null)
+  useEffect(() => {
+    if (launched && APPS.some((a) => a.key === launched)) setActiveApp(launched as AppKey)
+  }, [launched])
 
   // Real derived log -- each line reflects the actual currently-polled
   // system values (see useSystemHealth), not a canned random-phrase pool.
@@ -1184,26 +1494,31 @@ export function SystemPanel({ onLaunch, launched }: { onLaunch: (key: string) =>
           beside a column of gauges. ── */}
       <HudPanel hero title="Command Layer · Apps" className="col-span-12">
         <p className="mb-3 text-[0.6rem] leading-relaxed text-muted-foreground">
-          Simulated OS bridge. Say <span className="text-primary">&ldquo;Nancy, open terminal&rdquo;</span> or tap an app.
+          Real backend tools, not a simulation. Say <span className="text-primary">&ldquo;Nancy, open terminal&rdquo;</span> or tap an app.
         </p>
-        <div className="grid grid-cols-4 gap-2 md:grid-cols-8">
+        <div className="grid grid-cols-3 gap-2 md:grid-cols-6">
           {APPS.map(({ icon: Icon, label, key }) => (
-            <button key={key} type="button" onClick={() => onLaunch(key)}
+            <button key={key} type="button" onClick={() => { onLaunch(key); setActiveApp(key) }}
               className={cn(
                 'group flex flex-col items-center gap-1.5 rounded border p-3 transition-all',
-                launched === key
+                activeApp === key
                   ? 'border-primary bg-primary/15 shadow-[0_0_16px_var(--hud)]'
                   : 'border-border bg-secondary/20 hover:border-primary/60 hover:bg-secondary/40',
               )}>
               <Icon className={cn('h-6 w-6 transition-transform group-hover:scale-110',
-                launched === key ? 'text-primary' : 'text-foreground')} />
+                activeApp === key ? 'text-primary' : 'text-foreground')} />
               <span className="text-[0.5rem] text-muted-foreground">{label}</span>
             </button>
           ))}
         </div>
-        {launched && (
-          <div className="mt-3 rounded border border-primary/40 bg-background/60 p-2 font-mono text-[0.6rem] text-primary">
-            {'>'} launching <span className="uppercase">{launched}</span>… process spawned [pid {Math.floor(1000 + Math.random() * 8000)}]
+        {activeApp && (
+          <div className="mt-3 rounded border border-primary/30 bg-background/40 p-3">
+            {activeApp === 'terminal' && <TerminalApp />}
+            {activeApp === 'browser' && <BrowserApp />}
+            {activeApp === 'files' && <FilesApp />}
+            {activeApp === 'capture' && <CaptureApp />}
+            {activeApp === 'calculator' && <CalculatorApp />}
+            {activeApp === 'evidence' && <EvidenceApp />}
           </div>
         )}
       </HudPanel>

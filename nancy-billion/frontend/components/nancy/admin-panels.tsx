@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { HudPanel } from './hud-bits'
 import { listAgents } from '@/lib/nancy/agent-client'
 import {
@@ -27,7 +27,8 @@ import {
   CalendarClock, Library, ArrowRight, FileCode2,
   Fingerprint, Layers, MessageCircle, SendHorizonal, Upload, Mic,
   Moon, CheckSquare, Network, Award, Bell, Home, PhoneCall, MessageSquare,
-  Archive, ArchiveRestore, Package, GitMerge,
+  Archive, ArchiveRestore, Package, GitMerge, Search, AlertTriangle, FileText,
+  Orbit, RotateCcw, X,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
@@ -2906,7 +2907,611 @@ export function DocsPanel() {
    journey.py, memory/dreaming.py, memory/commitments.py, memory/wiki_store.py).
    One panel, tabbed, matching the lighter-touch DOCS treatment above rather
    than a full CRUD form since three of these four surfaces are read-mostly. ═══ */
-type MemoryTab = 'journey' | 'dreams' | 'commitments' | 'wiki'
+type MemoryTab = 'journey' | 'dreams' | 'commitments' | 'wiki' | 'galaxy'
+
+type GraphNode = {
+  id: string
+  type: string
+  content: string
+  metadata: Record<string, any>
+  links: string[]
+  importance: number
+  created_at: string
+}
+
+type SimNode = GraphNode & { x: number; y: number; vx: number; vy: number }
+
+const GALAXY_TYPE_STYLE: Record<string, { color: string; icon: typeof MessageCircle }> = {
+  conversation: { color: '#7dd3fc', icon: MessageCircle },
+  project: { color: '#a78bfa', icon: Layers },
+  decision: { color: '#fbbf24', icon: CheckCircle2 },
+  fact: { color: '#34d399', icon: FileText },
+  trade: { color: '#f472b6', icon: BarChart3 },
+  insight: { color: '#f97316', icon: Sparkles },
+  person: { color: '#60a5fa', icon: User },
+  event: { color: '#facc15', icon: CalendarClock },
+}
+const GALAXY_FALLBACK_COLOR = '#94a3b8'
+
+/* ═══════════════════ MEMORY GALAXY — a real force-directed graph over every
+   node in memory/graph.py's MemoryGraph (or lancedb_store.py's equivalent),
+   rendered on canvas with no external graph library. Nodes repel each other,
+   precomputed `links` (memory/graph.py add_memory's top-k similarity match)
+   pull linked pairs together, and everything settles toward the canvas
+   center -- pan/zoom/drag are hand-rolled canvas interactions, not a
+   third-party dependency. Clicking a node opens the detail panel with its
+   full content/metadata and its interconnections, each also clickable. ═══ */
+function MemoryGalaxyView() {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const simRef = useRef<Map<string, SimNode>>(new Map())
+  const viewRef = useRef({ x: 0, y: 0, scale: 1 })
+  const dprRef = useRef(1)
+  const hoveredIdRef = useRef<string | null>(null)
+  const selectedIdRef = useRef<string | null>(null)
+  const hiddenTypesRef = useRef<Set<string>>(new Set())
+  const dragRef = useRef<{ mode: 'pan' | 'node'; id?: string; startX: number; startY: number; moved: boolean } | null>(null)
+
+  const [nodes, setNodes] = useState<GraphNode[]>([])
+  const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState<GraphNode | null>(null)
+  const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set())
+  const [, forceTick] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/memory/graph')
+      .then((r) => r.json())
+      .then((json) => { if (!cancelled && json?.success) setNodes(json.nodes) })
+      .finally(() => !cancelled && setLoading(false))
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => { selectedIdRef.current = selected?.id ?? null }, [selected])
+  useEffect(() => { hiddenTypesRef.current = hiddenTypes }, [hiddenTypes])
+
+  const seedLayout = useCallback(() => {
+    const map = simRef.current
+    const w = containerRef.current?.clientWidth ?? 800
+    const h = containerRef.current?.clientHeight ?? 500
+    const list = Array.from(map.values())
+    list.forEach((n, i) => {
+      const angle = (i / Math.max(list.length, 1)) * Math.PI * 2
+      const r = 100 + Math.random() * 100
+      n.x = w / 2 + Math.cos(angle) * r
+      n.y = h / 2 + Math.sin(angle) * r
+      n.vx = 0
+      n.vy = 0
+    })
+    viewRef.current = { x: 0, y: 0, scale: 1 }
+  }, [])
+
+  // Merge fresh node data into the live simulation map, preserving existing
+  // positions so a refetch doesn't reshuffle the whole layout.
+  useEffect(() => {
+    const map = simRef.current
+    const w = containerRef.current?.clientWidth ?? 800
+    const h = containerRef.current?.clientHeight ?? 500
+    const seenIds = new Set(nodes.map((n) => n.id))
+    for (const id of Array.from(map.keys())) {
+      if (!seenIds.has(id)) map.delete(id)
+    }
+    nodes.forEach((n, i) => {
+      const existing = map.get(n.id)
+      if (existing) {
+        Object.assign(existing, n)
+      } else {
+        const angle = (i / Math.max(nodes.length, 1)) * Math.PI * 2
+        const r = 100 + Math.random() * 100
+        map.set(n.id, { ...n, x: w / 2 + Math.cos(angle) * r, y: h / 2 + Math.sin(angle) * r, vx: 0, vy: 0 })
+      }
+    })
+  }, [nodes])
+
+  // Canvas sizing (device-pixel-ratio aware).
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const container = containerRef.current
+    if (!canvas || !container) return
+    const resize = () => {
+      const rect = container.getBoundingClientRect()
+      const dpr = window.devicePixelRatio || 1
+      dprRef.current = dpr
+      canvas.width = Math.max(1, Math.round(rect.width * dpr))
+      canvas.height = Math.max(1, Math.round(rect.height * dpr))
+      canvas.style.width = `${rect.width}px`
+      canvas.style.height = `${rect.height}px`
+    }
+    resize()
+    const ro = new ResizeObserver(resize)
+    ro.observe(container)
+    return () => ro.disconnect()
+  }, [])
+
+  // The simulation + draw loop. Runs once; everything it reads lives in
+  // refs so state changes (selection, filters) never restart the loop.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    let raf = 0
+
+    const tick = () => {
+      const map = simRef.current
+      const list = Array.from(map.values())
+      const dragging = dragRef.current
+      const w = canvas.width / dprRef.current
+      const h = canvas.height / dprRef.current
+
+      for (let i = 0; i < list.length; i++) {
+        const a = list[i]
+        for (let j = i + 1; j < list.length; j++) {
+          const b = list[j]
+          let dx = a.x - b.x
+          let dy = a.y - b.y
+          let distSq = dx * dx + dy * dy
+          if (distSq < 1) distSq = 1
+          const dist = Math.sqrt(distSq)
+          const force = 2200 / distSq
+          const fx = (dx / dist) * force
+          const fy = (dy / dist) * force
+          a.vx += fx; a.vy += fy
+          b.vx -= fx; b.vy -= fy
+        }
+      }
+      for (const a of list) {
+        for (const linkId of a.links) {
+          const b = map.get(linkId)
+          if (!b) continue
+          const dx = b.x - a.x
+          const dy = b.y - a.y
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1
+          const force = (dist - 150) * 0.02
+          a.vx += (dx / dist) * force
+          a.vy += (dy / dist) * force
+        }
+      }
+      const cx = w / 2, cy = h / 2
+      for (const a of list) {
+        a.vx += (cx - a.x) * 0.0012
+        a.vy += (cy - a.y) * 0.0012
+        a.vx *= 0.86
+        a.vy *= 0.86
+        const isDraggedNode = dragging?.mode === 'node' && dragging.id === a.id
+        if (!isDraggedNode) {
+          a.x += a.vx
+          a.y += a.vy
+        }
+      }
+
+      const view = viewRef.current
+      const hiddenTypes = hiddenTypesRef.current
+      const selectedId = selectedIdRef.current
+      const hoveredId = hoveredIdRef.current
+
+      ctx.setTransform(dprRef.current, 0, 0, dprRef.current, 0, 0)
+      ctx.clearRect(0, 0, w, h)
+      ctx.save()
+      ctx.translate(view.x, view.y)
+      ctx.scale(view.scale, view.scale)
+
+      const visible = (n: SimNode) => !hiddenTypes.has(n.type)
+      const selectedNode = selectedId ? map.get(selectedId) : null
+
+      const drawnPairs = new Set<string>()
+      ctx.lineWidth = 1 / view.scale
+      for (const a of list) {
+        if (!visible(a)) continue
+        for (const linkId of a.links) {
+          const b = map.get(linkId)
+          if (!b || !visible(b)) continue
+          const key = a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`
+          if (drawnPairs.has(key)) continue
+          drawnPairs.add(key)
+          const isFocused = selectedNode && (a.id === selectedNode.id || b.id === selectedNode.id)
+          ctx.strokeStyle = isFocused ? 'rgba(167, 139, 250, 0.75)' : 'rgba(148, 163, 184, 0.18)'
+          ctx.beginPath()
+          ctx.moveTo(a.x, a.y)
+          ctx.lineTo(b.x, b.y)
+          ctx.stroke()
+        }
+      }
+
+      for (const n of list) {
+        if (!visible(n)) continue
+        const style = GALAXY_TYPE_STYLE[n.type]
+        const color = style?.color ?? GALAXY_FALLBACK_COLOR
+        const radius = 4 + (n.importance ?? 0.5) * 7
+        const isSelected = n.id === selectedId
+        const isNeighbor = !!selectedNode && (selectedNode.links.includes(n.id) || n.links.includes(selectedNode.id))
+        const isHovered = n.id === hoveredId
+        const dimmed = !!selectedNode && !isSelected && !isNeighbor
+
+        ctx.beginPath()
+        ctx.arc(n.x, n.y, radius, 0, Math.PI * 2)
+        ctx.fillStyle = color
+        ctx.globalAlpha = dimmed ? 0.25 : 1
+        ctx.fill()
+        if (isSelected || isHovered) {
+          ctx.lineWidth = 2 / view.scale
+          ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(255,255,255,0.6)'
+          ctx.stroke()
+        }
+        ctx.globalAlpha = 1
+      }
+      ctx.restore()
+
+      raf = requestAnimationFrame(tick)
+    }
+
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  const nodeAt = useCallback((clientX: number, clientY: number): SimNode | null => {
+    const canvas = canvasRef.current
+    if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    const view = viewRef.current
+    const sx = clientX - rect.left
+    const sy = clientY - rect.top
+    const wx = (sx - view.x) / view.scale
+    const wy = (sy - view.y) / view.scale
+    let best: SimNode | null = null
+    let bestDist = Infinity
+    for (const n of simRef.current.values()) {
+      if (hiddenTypesRef.current.has(n.type)) continue
+      const radius = Math.max(8, 4 + (n.importance ?? 0.5) * 7)
+      const dx = n.x - wx, dy = n.y - wy
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      if (dist <= radius + 4 && dist < bestDist) { best = n; bestDist = dist }
+    }
+    return best
+  }, [])
+
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const hit = nodeAt(e.clientX, e.clientY)
+    dragRef.current = hit
+      ? { mode: 'node', id: hit.id, startX: e.clientX, startY: e.clientY, moved: false }
+      : { mode: 'pan', startX: e.clientX, startY: e.clientY, moved: false }
+    ;(e.target as HTMLCanvasElement).setPointerCapture(e.pointerId)
+  }
+
+  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current
+    if (!drag) {
+      const hit = nodeAt(e.clientX, e.clientY)
+      const newId = hit?.id ?? null
+      if (hoveredIdRef.current !== newId) {
+        hoveredIdRef.current = newId
+        if (canvasRef.current) canvasRef.current.style.cursor = newId ? 'pointer' : 'grab'
+      }
+      return
+    }
+    const dx = e.clientX - drag.startX
+    const dy = e.clientY - drag.startY
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) drag.moved = true
+    if (drag.mode === 'pan') {
+      viewRef.current = { ...viewRef.current, x: viewRef.current.x + e.movementX, y: viewRef.current.y + e.movementY }
+    } else if (drag.mode === 'node' && drag.id) {
+      const node = simRef.current.get(drag.id)
+      if (node) {
+        const view = viewRef.current
+        node.x += e.movementX / view.scale
+        node.y += e.movementY / view.scale
+        node.vx = 0
+        node.vy = 0
+      }
+    }
+  }
+
+  const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current
+    dragRef.current = null
+    if (drag && !drag.moved) {
+      const hit = nodeAt(e.clientX, e.clientY)
+      if (hit) {
+        const { x, y, vx, vy, ...plain } = hit
+        setSelected(plain)
+      } else {
+        setSelected(null)
+      }
+    }
+  }
+
+  const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault()
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const view = viewRef.current
+    const sx = e.clientX - rect.left
+    const sy = e.clientY - rect.top
+    const wx = (sx - view.x) / view.scale
+    const wy = (sy - view.y) / view.scale
+    const delta = e.deltaY > 0 ? 0.9 : 1.1
+    const newScale = Math.min(Math.max(view.scale * delta, 0.15), 5)
+    viewRef.current = { x: sx - wx * newScale, y: sy - wy * newScale, scale: newScale }
+  }
+
+  const toggleType = (t: string) => {
+    setHiddenTypes((prev) => {
+      const next = new Set(prev)
+      if (next.has(t)) next.delete(t); else next.add(t)
+      return next
+    })
+  }
+
+  const jumpTo = (id: string) => {
+    const node = simRef.current.get(id)
+    if (!node) return
+    const { x, y, vx, vy, ...plain } = node
+    setSelected(plain)
+  }
+
+  const typeCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const n of nodes) counts[n.type] = (counts[n.type] ?? 0) + 1
+    return counts
+  }, [nodes])
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-border bg-card/60 px-3 py-2">
+        {Object.keys(typeCounts).sort().map((t) => {
+          const style = GALAXY_TYPE_STYLE[t]
+          const active = !hiddenTypes.has(t)
+          return (
+            <button
+              key={t}
+              type="button"
+              onClick={() => toggleType(t)}
+              className={cn(
+                'flex items-center gap-1.5 rounded-full border px-2 py-1 text-[0.55rem] capitalize transition-opacity',
+                active ? 'border-border/60 opacity-100' : 'border-border/30 opacity-40',
+              )}
+            >
+              <span className="h-2 w-2 rounded-full" style={{ background: style?.color ?? GALAXY_FALLBACK_COLOR }} />
+              {t} <span className="text-muted-foreground">{typeCounts[t]}</span>
+            </button>
+          )
+        })}
+        <button
+          type="button"
+          onClick={() => { seedLayout(); forceTick((v) => v + 1) }}
+          className="ml-auto flex items-center gap-1.5 rounded-lg px-2 py-1 text-[0.55rem] text-muted-foreground hover:text-foreground"
+        >
+          <RotateCcw className="h-3 w-3" /> Reset layout
+        </button>
+      </div>
+
+      <div className="flex gap-2.5">
+        <div
+          ref={containerRef}
+          className="relative h-[480px] flex-1 overflow-hidden rounded-xl border border-border bg-card/40"
+        >
+          {loading ? (
+            <div className="flex h-full items-center justify-center text-[0.6rem] text-muted-foreground">
+              <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading memory graph…
+            </div>
+          ) : nodes.length === 0 ? (
+            <div className="flex h-full items-center justify-center px-6 text-center text-[0.6rem] text-muted-foreground">
+              No memories in the graph yet — they&rsquo;ll appear here as Nancy stores conversations, facts, and insights.
+            </div>
+          ) : (
+            <canvas
+              ref={canvasRef}
+              className="h-full w-full cursor-grab touch-none"
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerLeave={() => { hoveredIdRef.current = null }}
+              onWheel={onWheel}
+            />
+          )}
+        </div>
+
+        {selected && (
+          <div className="flex w-64 shrink-0 flex-col gap-2 rounded-xl border border-border bg-card/60 p-3">
+            <div className="flex items-start gap-2">
+              <span
+                className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full"
+                style={{ background: GALAXY_TYPE_STYLE[selected.type]?.color ?? GALAXY_FALLBACK_COLOR }}
+              />
+              <span className="text-[0.55rem] uppercase text-muted-foreground">{selected.type}</span>
+              <button type="button" onClick={() => setSelected(null)} className="ml-auto text-muted-foreground hover:text-foreground">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <p className="text-[0.65rem] leading-relaxed text-foreground">{selected.content}</p>
+            <div className="text-[0.5rem] text-muted-foreground">
+              importance {Math.round((selected.importance ?? 0) * 100)}% · {new Date(selected.created_at).toLocaleString()}
+            </div>
+            {Object.keys(selected.metadata ?? {}).length > 0 && (
+              <div className="flex flex-col gap-0.5 border-t border-border/50 pt-2">
+                {Object.entries(selected.metadata).map(([k, v]) => (
+                  <div key={k} className="flex gap-1 text-[0.52rem] text-muted-foreground">
+                    <span className="text-foreground/70">{k}:</span> <span className="truncate">{String(v)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="border-t border-border/50 pt-2">
+              <div className="mb-1 text-[0.5rem] uppercase text-muted-foreground">
+                Interconnected ({selected.links.length})
+              </div>
+              {selected.links.length === 0 ? (
+                <p className="text-[0.52rem] text-muted-foreground">No linked memories.</p>
+              ) : (
+                <ul className="flex flex-col gap-1">
+                  {selected.links.map((linkId) => {
+                    const linked = simRef.current.get(linkId)
+                    if (!linked) return null
+                    return (
+                      <li key={linkId}>
+                        <button
+                          type="button"
+                          onClick={() => jumpTo(linkId)}
+                          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[0.55rem] text-muted-foreground hover:bg-secondary/20 hover:text-foreground"
+                        >
+                          <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: GALAXY_TYPE_STYLE[linked.type]?.color ?? GALAXY_FALLBACK_COLOR }} />
+                          <span className="truncate">{linked.content.slice(0, 60)}</span>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function MemorySearchBar() {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<any[] | null>(null)
+  const [searching, setSearching] = useState(false)
+
+  const run = async () => {
+    const q = query.trim()
+    if (!q) { setResults(null); return }
+    setSearching(true)
+    try {
+      const res = await fetch(`/api/memory/search?q=${encodeURIComponent(q)}&top_k=10`)
+      const json = await res.json().catch(() => null)
+      setResults(json?.success ? json.results : [])
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-border bg-card/60 p-3">
+      <div className="flex items-center gap-2">
+        <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && run()}
+          placeholder="Search everything Nancy remembers — real semantic search across the whole memory graph"
+          className="h-7 flex-1 bg-transparent text-[0.62rem] text-foreground outline-none placeholder:text-muted-foreground/60"
+        />
+        <PrimaryButton onClick={run} disabled={searching || !query.trim()}>
+          {searching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />} Search
+        </PrimaryButton>
+      </div>
+      {results !== null && (
+        <div className="mt-2.5 flex flex-col gap-1.5 border-t border-border/50 pt-2.5">
+          {results.length === 0 ? (
+            <p className="px-0.5 text-[0.55rem] text-muted-foreground">No real memories matched &ldquo;{query}&rdquo;.</p>
+          ) : (
+            results.map((r: any, i: number) => (
+              <div key={i} className="rounded border border-border/50 bg-secondary/10 px-2.5 py-2">
+                <div className="mb-1 flex items-center gap-2 text-[0.48rem] text-muted-foreground">
+                  {r.memory_type && <span className="rounded-full border border-border/50 px-1.5 py-0 uppercase">{r.memory_type}</span>}
+                  <span>relevance {Math.round((r.relevance_score ?? 0) * 100)}%</span>
+                  {r.source && <span>· {r.source}</span>}
+                </div>
+                <p className="text-[0.6rem] leading-relaxed text-foreground">{r.content}</p>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function WikiComposer({ pages, onCreated }: { pages: any[]; onCreated: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [title, setTitle] = useState('')
+  const [claim, setClaim] = useState('')
+  const [evidence, setEvidence] = useState('')
+  const [provenance, setProvenance] = useState('conversation')
+  const [contradictionOf, setContradictionOf] = useState('')
+  const [body, setBody] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const submit = async () => {
+    if (!title.trim() || !claim.trim()) return
+    setSaving(true)
+    try {
+      await fetch('/api/memory/wiki', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: title.trim(),
+          claim: claim.trim(),
+          evidence: evidence.split('\n').map((l) => l.trim()).filter(Boolean),
+          provenance: provenance.trim() || 'conversation',
+          contradiction_of: contradictionOf || null,
+          body,
+        }),
+      })
+      setTitle(''); setClaim(''); setEvidence(''); setContradictionOf(''); setBody('')
+      setOpen(false)
+      onCreated()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="flex items-center gap-1.5 border-b border-border/50 px-4 py-2 text-[0.58rem] text-primary hover:text-primary/80"
+      >
+        <Plus className="h-3.5 w-3.5" /> New wiki page
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-2 border-b border-border/50 px-4 py-3">
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <FieldLabel>Title</FieldLabel>
+          <input value={title} onChange={(e) => setTitle(e.target.value)} className={inputCls} placeholder="e.g. Preferred deploy target" />
+        </div>
+        <div>
+          <FieldLabel>Provenance</FieldLabel>
+          <input value={provenance} onChange={(e) => setProvenance(e.target.value)} className={inputCls} placeholder="conversation" />
+        </div>
+      </div>
+      <div>
+        <FieldLabel>Claim</FieldLabel>
+        <input value={claim} onChange={(e) => setClaim(e.target.value)} className={inputCls} placeholder="The assertion this page records" />
+      </div>
+      <div>
+        <FieldLabel>Evidence (one per line)</FieldLabel>
+        <textarea value={evidence} onChange={(e) => setEvidence(e.target.value)} rows={2} className={cn(inputCls, 'resize-y')} />
+      </div>
+      <div>
+        <FieldLabel>Body</FieldLabel>
+        <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={3} className={cn(inputCls, 'resize-y')} />
+      </div>
+      <div>
+        <FieldLabel>Contradicts (optional slug)</FieldLabel>
+        <select value={contradictionOf} onChange={(e) => setContradictionOf(e.target.value)} className={inputCls}>
+          <option value="">None</option>
+          {pages.map((p: any) => <option key={p.slug} value={p.slug}>{p.title}</option>)}
+        </select>
+      </div>
+      <div className="flex items-center gap-2">
+        <PrimaryButton onClick={submit} disabled={saving || !title.trim() || !claim.trim()}>
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Create page
+        </PrimaryButton>
+        <button type="button" onClick={() => setOpen(false)} className="text-[0.58rem] text-muted-foreground hover:text-foreground">Cancel</button>
+      </div>
+    </div>
+  )
+}
 
 export function MemoryInsightsPanel() {
   const [tab, setTab] = useState<MemoryTab>('journey')
@@ -2914,20 +3519,26 @@ export function MemoryInsightsPanel() {
   const [dreams, setDreams] = useState<any[]>([])
   const [openCommitments, setOpenCommitments] = useState<any[]>([])
   const [wikiPages, setWikiPages] = useState<any[]>([])
+  const [contradictions, setContradictions] = useState<any[]>([])
+  const [expandedSlug, setExpandedSlug] = useState<string | null>(null)
+  const [expandedPage, setExpandedPage] = useState<any | null>(null)
+  const [expandedLoading, setExpandedLoading] = useState(false)
   const [loading, setLoading] = useState(true)
 
   const fetchAll = useCallback(async () => {
     try {
-      const [j, d, c, w] = await Promise.all([
+      const [j, d, c, w, k] = await Promise.all([
         fetch('/api/memory/journey').then((r) => r.json()).catch(() => null),
         fetch('/api/memory/dream-diary').then((r) => r.json()).catch(() => null),
         fetch('/api/memory/commitments').then((r) => r.json()).catch(() => null),
         fetch('/api/memory/wiki').then((r) => r.json()).catch(() => null),
+        fetch('/api/memory/wiki/contradictions').then((r) => r.json()).catch(() => null),
       ])
       if (j?.success) setJourney({ timeline: j.timeline, stats: j.stats })
       if (d?.success) setDreams(d.entries)
       if (c?.success) setOpenCommitments(c.commitments)
       if (w?.success) setWikiPages(w.pages)
+      if (k?.success) setContradictions(k.contradictions)
     } finally {
       setLoading(false)
     }
@@ -2944,11 +3555,30 @@ export function MemoryInsightsPanel() {
     fetchAll()
   }
 
+  const toggleWikiDetail = async (slug: string) => {
+    if (expandedSlug === slug) {
+      setExpandedSlug(null)
+      setExpandedPage(null)
+      return
+    }
+    setExpandedSlug(slug)
+    setExpandedPage(null)
+    setExpandedLoading(true)
+    try {
+      const res = await fetch(`/api/memory/wiki/${encodeURIComponent(slug)}`)
+      const json = await res.json().catch(() => null)
+      if (json?.success) setExpandedPage(json.page)
+    } finally {
+      setExpandedLoading(false)
+    }
+  }
+
   const tabs: { key: MemoryTab; label: string; icon: typeof CalendarClock }[] = [
     { key: 'journey', label: 'Journey', icon: CalendarClock },
     { key: 'dreams', label: 'Dream Diary', icon: Moon },
     { key: 'commitments', label: 'Commitments', icon: CheckSquare },
     { key: 'wiki', label: 'Memory Wiki', icon: Network },
+    { key: 'galaxy', label: 'Memory Galaxy', icon: Orbit },
   ]
 
   return (
@@ -2968,6 +3598,8 @@ export function MemoryInsightsPanel() {
           </button>
         ))}
       </div>
+
+      <MemorySearchBar />
 
       {loading ? (
         <div className="flex items-center justify-center py-8 text-[0.6rem] text-muted-foreground">
@@ -3045,23 +3677,73 @@ export function MemoryInsightsPanel() {
             </ul>
           )}
         </div>
+      ) : tab === 'galaxy' ? (
+        <MemoryGalaxyView />
       ) : (
         <div className="rounded-xl border border-border bg-card/60">
           <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">
             Real Markdown pages with structured claim/evidence/provenance metadata — Obsidian-compatible files under backend/data/memory_wiki/.
           </p>
+          <WikiComposer pages={wikiPages} onCreated={fetchAll} />
+          {contradictions.length > 0 && (
+            <div className="border-b border-border/50 bg-destructive/5 px-4 py-2.5">
+              <div className="mb-1.5 flex items-center gap-1.5 text-[0.55rem] text-destructive">
+                <AlertTriangle className="h-3.5 w-3.5" /> {contradictions.length} contradiction{contradictions.length === 1 ? '' : 's'} found
+              </div>
+              <ul className="flex flex-col gap-1">
+                {contradictions.map((pair: any, i: number) => (
+                  <li key={i} className="text-[0.55rem] text-muted-foreground">
+                    <span className="text-foreground">{pair.a.title}</span> ↔ <span className="text-foreground">{pair.b.title}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {wikiPages.length === 0 ? (
             <EmptyNote>No wiki pages yet.</EmptyNote>
           ) : (
             <ul className="divide-y divide-border/40">
               {wikiPages.map((p: any) => (
                 <li key={p.slug} className="px-4 py-3">
-                  <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => toggleWikiDetail(p.slug)}
+                    className="flex w-full items-center gap-2 text-left"
+                  >
                     <Library className="h-3.5 w-3.5 shrink-0 text-primary" />
                     <span className="text-[0.65rem] text-foreground">{p.title}</span>
                     {p.contradiction_of && <span className="rounded bg-destructive/15 px-1.5 py-0.5 text-[0.5rem] text-destructive">contradicts {p.contradiction_of}</span>}
-                  </div>
+                    <ChevronRight className={cn('ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform', expandedSlug === p.slug && 'rotate-90')} />
+                  </button>
                   <p className="mt-1 pl-5.5 text-[0.6rem] text-muted-foreground">{p.claim}</p>
+                  {expandedSlug === p.slug && (
+                    <div className="mt-2 ml-5.5 rounded border border-border/50 bg-secondary/10 px-3 py-2.5">
+                      {expandedLoading ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                      ) : !expandedPage ? (
+                        <p className="text-[0.55rem] text-muted-foreground">Failed to load page detail.</p>
+                      ) : (
+                        <>
+                          {expandedPage.body && (
+                            <p className="whitespace-pre-wrap text-[0.62rem] leading-relaxed text-foreground">{expandedPage.body}</p>
+                          )}
+                          {expandedPage.evidence?.length > 0 && (
+                            <div className={expandedPage.body ? 'mt-2' : ''}>
+                              <div className="mb-1 flex items-center gap-1 text-[0.5rem] uppercase text-muted-foreground">
+                                <FileText className="h-3 w-3" /> Evidence
+                              </div>
+                              <ul className="flex flex-col gap-0.5 pl-3.5 text-[0.58rem] text-muted-foreground">
+                                {expandedPage.evidence.map((e: string, i: number) => <li key={i} className="list-disc">{e}</li>)}
+                              </ul>
+                            </div>
+                          )}
+                          <div className="mt-2 text-[0.5rem] text-muted-foreground">
+                            {expandedPage.provenance} · {new Date(expandedPage.created_at * 1000).toLocaleString()}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -3078,12 +3760,40 @@ const TIER_COLOR: Record<string, string> = {
   copper: 'text-[#b87333]', bronze: 'text-[#cd7f32]', silver: 'text-slate-300',
   gold: 'text-gold', olympian: 'text-primary',
 }
+const TIER_BORDER: Record<string, string> = {
+  copper: 'border-[#b87333]/40', bronze: 'border-[#cd7f32]/40', silver: 'border-slate-300/40',
+  gold: 'border-gold/40', olympian: 'border-primary/40',
+}
+const TIER_ORDER = ['copper', 'bronze', 'silver', 'gold', 'olympian']
+
+const ACTIVITY_STATS: { key: string; label: string; suffix?: string; decimals?: number }[] = [
+  { key: 'total_tasks', label: 'Agent tasks' },
+  { key: 'terminal_commands', label: 'Terminal commands' },
+  { key: 'file_writes', label: 'File writes' },
+  { key: 'distinct_skills_used', label: 'Skills used' },
+  { key: 'total_memories', label: 'Memories' },
+  { key: 'wiki_pages', label: 'Wiki pages' },
+  { key: 'dream_cycles', label: 'Dream cycles' },
+  { key: 'uptime_hours', label: 'Uptime', suffix: 'h', decimals: 1 },
+]
 
 export function AchievementsPanel() {
-  const [data, setData] = useState<{ unlocked: any[]; locked: any[] } | null>(null)
+  const [data, setData] = useState<{ unlocked: any[]; locked: any[]; activity: Record<string, number> } | null>(null)
   useEffect(() => {
-    fetch('/api/achievements').then((r) => r.json()).then((json) => { if (json.success) setData(json) }).catch(() => {})
+    const load = () => fetch('/api/achievements').then((r) => r.json()).then((json) => { if (json.success) setData(json) }).catch(() => {})
+    load()
+    const t = setInterval(load, 60_000)
+    return () => clearInterval(t)
   }, [])
+
+  const sortedUnlocked = useMemo(
+    () => data ? [...data.unlocked].sort((a, b) => TIER_ORDER.indexOf(b.tier) - TIER_ORDER.indexOf(a.tier)) : [],
+    [data],
+  )
+  const sortedLocked = useMemo(
+    () => data ? [...data.locked].sort((a, b) => TIER_ORDER.indexOf(a.tier) - TIER_ORDER.indexOf(b.tier)) : [],
+    [data],
+  )
 
   return (
     <div className="mx-auto flex max-w-[900px] flex-col gap-4">
@@ -3098,26 +3808,61 @@ export function AchievementsPanel() {
           <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-          {data.unlocked.map((a) => (
-            <div key={a.key} className="flex items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-3.5 py-3">
-              <Award className={cn('h-5 w-5 shrink-0', TIER_COLOR[a.tier] ?? 'text-primary')} />
-              <div className="min-w-0">
-                <div className="text-[0.65rem] text-foreground">{a.title}</div>
-                <div className="text-[0.55rem] text-muted-foreground">{a.description}</div>
+        <>
+          <div className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-card/60 px-4 py-3 sm:grid-cols-4">
+            {ACTIVITY_STATS.map((s) => (
+              <div key={s.key} className="flex flex-col">
+                <span className="text-[0.9rem] text-foreground">
+                  {(s.decimals ? (data.activity[s.key] ?? 0).toFixed(s.decimals) : Math.floor(data.activity[s.key] ?? 0))}{s.suffix ?? ''}
+                </span>
+                <span className="text-[0.5rem] text-muted-foreground">{s.label}</span>
               </div>
-            </div>
-          ))}
-          {data.locked.map((a) => (
-            <div key={a.key} className="flex items-center gap-3 rounded-xl border border-border/50 bg-secondary/10 px-3.5 py-3 opacity-60">
-              <Lock className="h-5 w-5 shrink-0 text-muted-foreground" />
-              <div className="min-w-0">
-                <div className="text-[0.65rem] text-foreground">{a.title}</div>
-                <div className="text-[0.55rem] text-muted-foreground">{a.description}</div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+            {sortedUnlocked.map((a) => (
+              <div key={a.key} className={cn('flex items-center gap-3 rounded-xl border bg-primary/5 px-3.5 py-3', TIER_BORDER[a.tier] ?? 'border-primary/30')}>
+                <Award className={cn('h-5 w-5 shrink-0', TIER_COLOR[a.tier] ?? 'text-primary')} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[0.65rem] text-foreground">{a.title}</span>
+                    <span className={cn('rounded-full border px-1.5 py-0 text-[0.45rem] uppercase', TIER_BORDER[a.tier], TIER_COLOR[a.tier])}>{a.tier}</span>
+                  </div>
+                  <div className="text-[0.55rem] text-muted-foreground">{a.description}</div>
+                  {a.unlocked_at && <div className="mt-0.5 text-[0.48rem] text-muted-foreground/70">Unlocked {timeAgo(a.unlocked_at * 1000)}</div>}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+            {sortedLocked.map((a) => {
+              const pct = a.progress ? Math.min(100, (a.progress.current / a.progress.target) * 100) : null
+              return (
+                <div key={a.key} className="flex flex-col gap-2 rounded-xl border border-border/50 bg-secondary/10 px-3.5 py-3">
+                  <div className="flex items-center gap-3">
+                    <Lock className="h-5 w-5 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[0.65rem] text-foreground/80">{a.title}</span>
+                        <span className="rounded-full border border-border/50 px-1.5 py-0 text-[0.45rem] uppercase text-muted-foreground">{a.tier}</span>
+                      </div>
+                      <div className="text-[0.55rem] text-muted-foreground">{a.description}</div>
+                    </div>
+                  </div>
+                  {pct !== null && (
+                    <div className="pl-8">
+                      <div className="h-1 overflow-hidden rounded-full bg-border/40">
+                        <div className="h-full rounded-full bg-primary/50" style={{ width: `${pct}%` }} />
+                      </div>
+                      <div className="mt-0.5 text-[0.48rem] text-muted-foreground">
+                        {Math.min(a.progress.current, a.progress.target)}/{a.progress.target}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </>
       )}
     </div>
   )

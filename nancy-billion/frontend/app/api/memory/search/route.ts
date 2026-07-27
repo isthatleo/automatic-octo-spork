@@ -2,34 +2,23 @@ import { NextResponse } from 'next/server'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
-export async function GET() {
+// Real semantic search over the whole memory graph (memory/extensions.py's
+// search_memories, itself a thin wrapper over MemoryGraph's real embedding
+// query). Previously this proxy called a POST route the backend never had
+// and never forwarded the query string on GET either -- fixed to match the
+// real backend contract: GET /memory/search?q=&top_k=.
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url)
+  const q = searchParams.get('q') ?? ''
+  const topK = searchParams.get('top_k') ?? '10'
   try {
-    const res = await fetch(`${BACKEND}/memory/search`, {
-      headers: { Accept: 'application/json' },
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const json = await res.json()
-    return NextResponse.json({ ok: true, backend: json })
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'memory search unavailable' }, { status: 502 })
-  }
-}
-
-export async function POST(request: Request) {
-  try {
-    const body = await request.json()
-    const res = await fetch(`${BACKEND}/memory/search`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        text: String(body?.text ?? ''),
-        top_k: Number(body?.top_k ?? 10),
-      }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const json = await res.json()
-    return NextResponse.json({ ok: true, results: json?.results || [], backend: json })
+    const url = new URL(`${BACKEND}/memory/search`)
+    url.searchParams.set('q', q)
+    url.searchParams.set('top_k', topK)
+    const res = await fetch(url.toString(), { cache: 'no-store' })
+    if (!res.ok) return NextResponse.json({ success: false, results: [] }, { status: res.status })
+    return NextResponse.json(await res.json())
   } catch {
-    return NextResponse.json({ ok: false, results: [], error: 'Memory search failed' }, { status: 502 })
+    return NextResponse.json({ success: false, results: [] }, { status: 502 })
   }
 }
