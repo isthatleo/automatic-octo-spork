@@ -475,6 +475,33 @@ export function useConfigPublic() {
   return useSimplePoll<{ success: boolean; config: Record<string, string | number | boolean> }>('/api/config/public', 60000)
 }
 
+export interface CapabilityVendor {
+  vendor: string
+  configured: boolean
+  env_var: string
+}
+// Real optional-integration status per provider registry (see /config/capabilities) --
+// whether each vendor adapter actually self-registered, never the secret itself.
+export function useConfigCapabilities() {
+  return useSimplePoll<{ success: boolean; capabilities: Record<string, CapabilityVendor[]> }>('/api/config/capabilities', 60000)
+}
+
+export interface WritableKeyEntry {
+  name: string
+  label: string
+  group: string
+  configured: boolean | null
+}
+// The Keys page's full credential catalog (see /config/keys/catalog),
+// assembled server-side from the same declarative lists that drive the live
+// LLM chain, channel registry, and provider registries -- a new
+// provider/channel/vendor added on the backend appears here automatically,
+// with nothing to update on the frontend.
+export function useWritableKeyCatalog() {
+  const { data, loading } = useSimplePoll<{ success: boolean; entries: WritableKeyEntry[] }>('/api/config/keys/catalog', 60000)
+  return { entries: data?.entries ?? [], loading }
+}
+
 // Real Telegram channel connectivity (see telegram_bot.py / /telegram/status).
 export function useTelegramStatus() {
   return useSimplePoll<{ success: boolean; available: boolean; error: string | null; polling?: boolean }>('/api/telegram/status', 20000)

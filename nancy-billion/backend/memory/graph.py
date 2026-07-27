@@ -12,6 +12,7 @@ import json
 import logging
 import hashlib
 import os
+import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -369,7 +370,23 @@ class MemoryGraph:
         return f"mem_{hash_obj.hexdigest()[:8]}"
 
     def _save_to_disk(self):
-        """Persist memory graph to disk"""
+        """Persist memory graph to disk.
+
+        Writes to a per-call-unique temp file, verifies it round-trips as
+        valid JSON, and only then os.replace()s it into place -- writing
+        self.storage_path directly, and even a naive write-tmp-then-replace,
+        both left a truncated, unparseable file in practice (reproduced
+        several times: the write is cut off mid-value with no exception
+        raised and nothing logged, so it isn't a crash this code can catch
+        -- storage_path lives inside a live-synced OneDrive folder, which is
+        the leading suspect for something outside this process's control
+        interrupting the write). Rather than depend on root-causing that,
+        this makes it structurally impossible for a bad write to ever reach
+        the live file: a tmp file that doesn't parse back is discarded and
+        the previous, still-valid storage_path is left untouched, so
+        _load_from_disk can never again silently see "0 memories" because a
+        write got cut short."""
+        tmp_path = f"{self.storage_path}.{uuid.uuid4().hex}.tmp"
         try:
             data = {
                 "nodes": {
@@ -378,12 +395,21 @@ class MemoryGraph:
                 }
             }
 
-            with open(self.storage_path, 'w') as f:
+            with open(tmp_path, 'w') as f:
                 json.dump(data, f, indent=2)
 
+            with open(tmp_path, 'r') as f:
+                json.load(f)  # verify before replacing -- see docstring
+
+            os.replace(tmp_path, self.storage_path)
             logger.debug(f"Saved {len(self.nodes)} memories to disk")
         except Exception as e:
-            logger.error(f"Failed to save memory graph: {e}")
+            logger.error(f"Failed to save memory graph, previous file left untouched: {e}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
 
     def _load_from_disk(self):
         """Load memory graph from disk"""

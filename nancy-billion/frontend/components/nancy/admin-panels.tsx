@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { HudPanel } from './hud-bits'
 import { listAgents } from '@/lib/nancy/agent-client'
 import {
-  useCronStatus, useConfigPublic, useTelegramStatus, useLlmStatus,
+  useCronStatus, useConfigPublic, useConfigCapabilities, useWritableKeyCatalog, type WritableKeyEntry, useTelegramStatus, useLlmStatus,
   useScreenContextStatus, setScreenContextEnabled, captureScreenContextNow,
   useChannelsStatus, sendChannelTest, type ChannelStatus,
   useNodes, registerNode, removeNode, checkNodeHealth,
@@ -18,6 +18,7 @@ import {
 import type { AgentInfo, LogEntry } from '@/lib/nancy/types'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/nancy/time'
+import { THEMEABLE_VARS, type ThemeableVar } from '@/lib/nancy/theme'
 import {
   Send, MessagesSquare, Hash, Phone, Globe2, CheckCircle2, XCircle,
   Wrench, Sparkles, Cpu, Waves, Eye, EyeOff, Key, User, Server,
@@ -1896,19 +1897,29 @@ function ArrowDownConnector() {
   )
 }
 
-/* ═══════════════════ KEYS — real per-provider configured state ═════════ */
-const WRITABLE_KEYS = [
-  { name: 'ANTHROPIC_API_KEY', label: 'Anthropic (Claude)' },
-  { name: 'GROQ_API_KEY', label: 'Groq' },
-  { name: 'GEMINI_API_KEY', label: 'Gemini' },
-  { name: 'OPENROUTER_API_KEY', label: 'OpenRouter' },
-  { name: 'OPENCODE_API_KEY', label: 'OpenCode Zen' },
-  { name: 'TELEGRAM_BOT_TOKEN', label: 'Telegram bot token' },
-  { name: 'TELEGRAM_CHAT_ID', label: 'Telegram chat ID' },
-]
+/* ═══════════════════ KEYS — a real, comprehensive credential vault covering
+   every writable secret this app has a use for, rendered entirely from
+   useWritableKeyCatalog (see hooks/useSystemData.ts) which fetches
+   /config/keys/catalog -- a real list main_new.py assembles server-side
+   from the exact same declarative lists that drive the live LLM chain, the
+   channel registry, and the provider registries. Adding a new
+   provider/channel/vendor on the backend makes it appear here
+   automatically -- there is no separate frontend list to keep in sync. ═══ */
+type KeyEntry = WritableKeyEntry
+const KEY_GROUP_ORDER = ['Reasoning', 'Messaging', 'Channels', 'Web Search', 'Media & Voice', 'External Memory', 'Sandbox', 'Other']
 
-function AddKeyForm() {
-  const [name, setName] = useState(WRITABLE_KEYS[0].name)
+function AddKeyForm({ catalog }: { catalog: KeyEntry[] }) {
+  const [name, setName] = useState('')
+  useEffect(() => { if (!name && catalog.length > 0) setName(catalog[0].name) }, [catalog, name])
+  const groupedCatalog = useMemo(() => {
+    const groups = new Map<string, KeyEntry[]>()
+    for (const g of KEY_GROUP_ORDER) groups.set(g, [])
+    for (const entry of catalog) {
+      if (!groups.has(entry.group)) groups.set(entry.group, [])
+      groups.get(entry.group)!.push(entry)
+    }
+    return Array.from(groups.entries()).filter(([, entries]) => entries.length > 0)
+  }, [catalog])
   const [value, setValue] = useState('')
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null)
@@ -1938,7 +1949,11 @@ function AddKeyForm() {
         <div>
           <FieldLabel>Key</FieldLabel>
           <select className={inputCls} value={name} onChange={(e) => setName(e.target.value)}>
-            {WRITABLE_KEYS.map((k) => <option key={k.name} value={k.name}>{k.label}</option>)}
+            {groupedCatalog.map(([group, entries]) => (
+              <optgroup key={group} label={group}>
+                {entries.map((k) => <option key={k.name} value={k.name}>{k.label}</option>)}
+              </optgroup>
+            ))}
           </select>
         </div>
         <div>
@@ -1965,21 +1980,25 @@ function AddKeyForm() {
 /** A vault row: masked dots by default, click reveal to swap them for the
  * one honest thing there is to show — the real configured-state, since the
  * actual secret value is never sent to the browser and never will be. No
- * fabricated key material is ever rendered here. */
-function VaultRow({ label, ok }: { label: string; ok: boolean }) {
+ * fabricated key material is ever rendered here. `ok` is `undefined` for the
+ * handful of real integrations with no live status endpoint yet -- shown as
+ * "status unknown" rather than guessing "not set" for something that might
+ * genuinely already be configured server-side. */
+function VaultRow({ label, ok }: { label: string; ok?: boolean }) {
   const [revealed, setRevealed] = useState(false)
+  const known = ok !== undefined
   return (
     <li className="flex items-center gap-3 px-4 py-2.5">
       <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full border', ok ? 'border-primary/40 bg-primary/10' : 'border-border/50 bg-secondary/20')}>
         <Lock className={cn('h-3.5 w-3.5', ok ? 'text-primary' : 'text-muted-foreground')} />
       </span>
       <div className="min-w-0 flex-1">
-        <div className="text-[0.62rem] text-foreground">{label}</div>
+        <div className="truncate text-[0.62rem] text-foreground">{label}</div>
         <div className="font-mono text-[0.58rem] text-muted-foreground">
-          {!ok ? '— not set —' : revealed ? 'configured · value stored server-side only, never sent to the browser' : '••••••••••••••••'}
+          {!known ? 'status unknown — no live check for this one yet' : !ok ? '— not set —' : revealed ? 'configured · value stored server-side only, never sent to the browser' : '••••••••••••••••'}
         </div>
       </div>
-      <StatusPill ok={ok} label={ok ? 'configured' : 'not set'} />
+      <StatusPill ok={!!ok} label={!known ? 'unknown' : ok ? 'configured' : 'not set'} />
       <button
         type="button"
         onClick={() => setRevealed((v) => !v)}
@@ -1994,48 +2013,63 @@ function VaultRow({ label, ok }: { label: string; ok: boolean }) {
 }
 
 export function KeysPanel() {
-  const { data: llm, loading } = useLlmStatus()
-  const configuredNames = new Set((llm?.backends ?? []).map((b) => b.name))
-  const providers = [
-    { name: 'AnthropicLLM', label: 'Anthropic (Claude)' },
-    { name: 'GroqLLM', label: 'Groq' },
-    { name: 'GeminiLLM', label: 'Gemini' },
-    { name: 'OpenRouterLLM', label: 'OpenRouter' },
-    { name: 'OpenCodeLLM', label: 'OpenCode Zen' },
-  ]
-  const configuredCount = providers.filter((p) => configuredNames.has(p.name)).length
+  const { entries, loading } = useWritableKeyCatalog()
+  const configuredCount = entries.filter((e) => e.configured).length
+
+  const groups = useMemo(() => {
+    const map = new Map<string, KeyEntry[]>()
+    for (const e of entries) {
+      if (!map.has(e.group)) map.set(e.group, [])
+      map.get(e.group)!.push(e)
+    }
+    return KEY_GROUP_ORDER
+      .map((g) => [g, map.get(g) ?? []] as [string, KeyEntry[]])
+      .filter(([, list]) => list.length > 0)
+  }, [entries])
+
   return (
-    <div className="mx-auto flex max-w-[760px] flex-col gap-4">
+    <div className="mx-auto flex max-w-[900px] flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/60 px-4 py-3">
         <div className="flex items-center gap-2">
           <Fingerprint className="h-4 w-4 text-gold" />
           <span className="font-heading text-xs text-foreground">Credential Vault</span>
         </div>
-        <span className="text-[0.55rem] text-muted-foreground">{configuredCount} / {providers.length} configured</span>
+        <span className="text-[0.55rem] text-muted-foreground">{configuredCount} / {entries.length} configured</span>
       </div>
 
-      <div className="rounded-xl border border-gold/30 bg-card/60">
-        <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">
-          Real configured-state only, derived from which backends actually initialised — no key values are ever exposed here or anywhere in this app.
-        </p>
-        {loading && !llm ? (
-          <div className="flex items-center justify-center py-6 text-[0.6rem] text-muted-foreground">
-            <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-          </div>
-        ) : (
-          <ul className="divide-y divide-border/40">
-            {providers.map((p) => (
-              <VaultRow key={p.name} label={p.label} ok={configuredNames.has(p.name)} />
-            ))}
-          </ul>
-        )}
-      </div>
+      <p className="text-[0.55rem] text-muted-foreground">
+        Real configured-state only, derived from which LLM backends actually initialised, which channels report
+        their required env vars set, and which provider-registry vendors self-registered — no key values are
+        ever exposed here or anywhere in this app.
+      </p>
+
+      {loading && entries.length === 0 ? (
+        <div className="flex items-center justify-center rounded-xl border border-border bg-card/60 py-8 text-[0.6rem] text-muted-foreground">
+          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {groups.map(([group, list]) => (
+            <div key={group} className="overflow-hidden rounded-xl border border-gold/30 bg-card/60">
+              <div className="flex items-center gap-2 border-b border-border/50 bg-secondary/10 px-3.5 py-2">
+                <h3 className="font-heading text-[0.65rem] text-foreground">{group}</h3>
+                <span className="ml-auto text-[0.5rem] text-muted-foreground">
+                  {list.filter((e) => e.configured).length}/{list.length}
+                </span>
+              </div>
+              <ul className="divide-y divide-border/40">
+                {list.map((e) => <VaultRow key={e.name} label={e.label} ok={e.configured ?? undefined} />)}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="rounded-xl border border-border bg-card/60 p-4">
         <h3 className="mb-2.5 flex items-center gap-2 font-heading text-[0.68rem] text-foreground">
           <Key className="h-3.5 w-3.5 text-primary" /> Add / Update a Key
         </h3>
-        <AddKeyForm />
+        <AddKeyForm catalog={entries} />
       </div>
     </div>
   )
@@ -2061,6 +2095,58 @@ function groupConfig(config: Record<string, string | number | boolean>) {
     groups.get(label)!.push([k, v])
   }
   return groups
+}
+
+/* Real optional-integration status per providers/registry.py -- every vendor
+   adapter that self-registers if its env var is set. `configured` reflects
+   actual live registration, not a guess, and the value itself is never sent
+   to the frontend, only whether it's present. */
+const CAPABILITY_LABELS: Record<string, string> = {
+  web_search: 'Web Search', image: 'Image Generation', tts: 'Text-to-Speech',
+  transcription: 'Transcription', telephony: 'Telephony', sandbox: 'Sandbox Execution',
+  memory: 'External Memory',
+}
+
+function IntegrationsCard() {
+  const { data } = useConfigCapabilities()
+  const capabilities = data?.capabilities ?? {}
+  const keys = Object.keys(capabilities)
+  if (keys.length === 0) return null
+
+  const totalConfigured = keys.reduce((sum, k) => sum + capabilities[k].filter((v) => v.configured).length, 0)
+  const totalVendors = keys.reduce((sum, k) => sum + capabilities[k].length, 0)
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card/60">
+      <div className="flex items-center gap-2 border-b border-border/50 bg-secondary/10 px-3.5 py-2">
+        <PlugZap className="h-3.5 w-3.5 text-primary" />
+        <h3 className="font-heading text-[0.65rem] text-foreground">Integrations</h3>
+        <span className="ml-auto text-[0.5rem] text-muted-foreground">{totalConfigured}/{totalVendors} configured</span>
+      </div>
+      <div className="divide-y divide-border/30">
+        {keys.map((capability) => (
+          <div key={capability} className="flex flex-wrap items-center gap-2 px-3.5 py-2">
+            <span className="w-32 shrink-0 text-[0.58rem] text-muted-foreground">{CAPABILITY_LABELS[capability] ?? capability}</span>
+            <div className="flex flex-wrap gap-1.5">
+              {capabilities[capability].map((v) => (
+                <span
+                  key={v.vendor}
+                  title={v.configured ? `${v.vendor}: configured` : `${v.vendor}: set ${v.env_var} to enable`}
+                  className={cn(
+                    'flex items-center gap-1 rounded-full border px-2 py-0.5 text-[0.5rem] capitalize',
+                    v.configured ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/40 text-muted-foreground opacity-60',
+                  )}
+                >
+                  {v.configured ? <CheckCircle2 className="h-2.5 w-2.5" /> : <Lock className="h-2.5 w-2.5" />}
+                  {v.vendor}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 /** Real, user-controlled opt-in ambient screen awareness (see
@@ -2169,6 +2255,8 @@ export function ConfigPanel() {
       </div>
 
       <ScreenAwarenessCard />
+
+      <IntegrationsCard />
 
       {loading && !data ? (
         <div className="flex items-center justify-center rounded-xl border border-border bg-card/60 py-8 text-[0.6rem] text-muted-foreground">
@@ -2302,6 +2390,14 @@ export function UsagePanel() {
                 </div>
                 {b.tokens_per_sec !== null && (
                   <div className="mt-1 text-[0.55rem] text-primary">{b.tokens_per_sec} tok/s inference speed</div>
+                )}
+                {b.success_count < b.call_count && b.last_error && (
+                  <div className="mt-1.5 flex items-start gap-1.5 rounded border border-destructive/30 bg-destructive/5 px-2 py-1.5 text-[0.55rem] text-destructive">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                    <span className="min-w-0 break-words">
+                      Last failure{b.last_error_at ? ` (${timeAgo(b.last_error_at * 1000)})` : ''}: {b.last_error}
+                    </span>
+                  </div>
                 )}
               </li>
             ))}
@@ -2444,23 +2540,41 @@ export function PairingPanel() {
   )
 }
 
-/* ═══════════════════ PROFILES — real, functional persona switcher ══════ */
+/* ═══════════════════ PROFILES — real, functional persona switcher ══════
+   Both /greeting and /persona/{name} now go through the same /api/... Next.js
+   proxy convention every other panel in this app uses, instead of fetching
+   ${BACKEND} directly from the browser -- the direct-fetch pattern was an
+   outlier that bypasses the server-side proxy layer everything else relies
+   on (works fine with CORS today, but would need a publicly-reachable
+   backend host and matching CORS config the moment frontend/backend are
+   ever deployed on different origins, unlike every proxied panel). Cards
+   also now show each persona's real greeting text (NancyGreeting.GREETINGS,
+   via /persona/preview) instead of just a bare name + first-letter badge --
+   there was previously no way to see what "nancy" vs "billion" vs "jarvis"
+   actually sound like without switching to each one first. ═══════════════ */
 const PERSONAS = ['nancy', 'billion', 'jarvis'] as const
+type PersonaPreview = { boot: string; ready: string; accent: string }
+
 export function ProfilesPanel() {
   const [active, setActive] = useState<string>('nancy')
   const [switching, setSwitching] = useState<string | null>(null)
+  const [previews, setPreviews] = useState<Record<string, PersonaPreview>>({})
 
   useEffect(() => {
-    fetch(`${BACKEND}/greeting`)
+    fetch('/api/greeting')
       .then((res) => res.json())
       .then((json) => { if (json.success && json.persona) setActive(json.persona) })
       .catch(() => { /* keep the default 'nancy' state -- backend may not be reachable yet */ })
+    fetch('/api/persona/preview')
+      .then((res) => res.json())
+      .then((json) => { if (json.success) setPreviews(json.personas) })
+      .catch(() => {})
   }, [])
 
   const switchPersona = async (name: string) => {
     setSwitching(name)
     try {
-      const res = await fetch(`${BACKEND}/persona/${name}`, { method: 'POST' })
+      const res = await fetch(`/api/persona/${name}`, { method: 'POST' })
       const json = await res.json()
       if (json.success) setActive(json.persona)
     } finally {
@@ -2483,6 +2597,7 @@ export function ProfilesPanel() {
         {PERSONAS.map((p) => {
           const isActive = active === p
           const isSwitching = switching === p
+          const preview = previews[p]
           return (
             <button
               key={p}
@@ -2513,6 +2628,12 @@ export function ProfilesPanel() {
                   {p.charAt(0).toUpperCase()}
                 </span>
                 <span className="font-heading text-sm capitalize text-foreground">{p}</span>
+                {preview && (
+                  <>
+                    <p className="text-center text-[0.55rem] italic leading-relaxed text-muted-foreground">&ldquo;{preview.ready}&rdquo;</p>
+                    <span className="text-[0.48rem] uppercase tracking-wide text-muted-foreground/70">{preview.accent}</span>
+                  </>
+                )}
               </div>
               {/* card bottom strip — signature/id bar */}
               <div className={cn('mt-auto flex items-center justify-between border-t px-4 py-2 font-mono text-[0.5rem]', isActive ? 'border-primary/30 text-primary' : 'border-border/40 text-muted-foreground')}>
@@ -3880,9 +4001,8 @@ export function ThemingPanel() {
 
   const currentValue = (key: string) => {
     if (overrides[key]) return overrides[key]
-    if (typeof window === 'undefined') return '#888888'
-    const computed = getComputedStyle(document.documentElement).getPropertyValue(key).trim()
-    return computed || '#888888'
+    if (typeof window === 'undefined') return ''
+    return getComputedStyle(document.documentElement).getPropertyValue(key).trim()
   }
 
   const handleChange = async (key: string, value: string) => {
@@ -3903,6 +4023,15 @@ export function ThemingPanel() {
     setOverrides({})
   }
 
+  const groups = useMemo(() => {
+    const map = new Map<string, ThemeableVar[]>()
+    for (const v of THEMEABLE_VARS) {
+      if (!map.has(v.group)) map.set(v.group, [])
+      map.get(v.group)!.push(v)
+    }
+    return Array.from(map.entries())
+  }, [])
+
   return (
     <div className="mx-auto flex max-w-[700px] flex-col gap-4">
       <div className="flex items-center justify-between gap-2 rounded-xl border border-border bg-card/60 px-4 py-3">
@@ -3915,38 +4044,53 @@ export function ThemingPanel() {
         </button>
       </div>
 
-      <div className="divide-y divide-border/40 rounded-xl border border-border bg-card/60">
-        {THEMEABLE_VARS_META.map(({ key, label, description }) => (
-          <div key={key} className="flex items-center gap-3 px-4 py-3">
-            <input
-              type="color"
-              value={/^#/.test(currentValue(key)) ? currentValue(key) : '#888888'}
-              onChange={(e) => handleChange(key, e.target.value)}
-              className="h-8 w-8 shrink-0 cursor-pointer rounded border border-border bg-transparent"
-            />
-            <div className="min-w-0 flex-1">
-              <div className="text-[0.62rem] text-foreground">{label}</div>
-              <div className="text-[0.5rem] text-muted-foreground">{description}</div>
-            </div>
-            {overrides[key] && (
-              <button type="button" onClick={() => handleReset(key)} className="text-[0.5rem] text-muted-foreground hover:text-destructive">
-                Reset
-              </button>
-            )}
+      {groups.map(([group, vars]) => (
+        <div key={group} className="overflow-hidden rounded-xl border border-border bg-card/60">
+          <div className="border-b border-border/50 bg-secondary/10 px-4 py-2 text-[0.6rem] text-foreground">{group}</div>
+          <div className="divide-y divide-border/40">
+            {vars.map((v) => (
+              <div key={v.key} className="flex items-center gap-3 px-4 py-3">
+                {v.type === 'color' ? (
+                  <input
+                    type="color"
+                    value={/^#/.test(currentValue(v.key)) ? currentValue(v.key) : '#888888'}
+                    onChange={(e) => handleChange(v.key, e.target.value)}
+                    className="h-8 w-8 shrink-0 cursor-pointer rounded border border-border bg-transparent"
+                  />
+                ) : null}
+                <div className="min-w-0 flex-1">
+                  <div className="text-[0.62rem] text-foreground">{v.label}</div>
+                  <div className="text-[0.5rem] text-muted-foreground">{v.description}</div>
+                  {v.type === 'range' && (
+                    <input
+                      type="range"
+                      min={v.min}
+                      max={v.max}
+                      step={v.step}
+                      value={parseFloat(currentValue(v.key)) || v.default || 0}
+                      onChange={(e) => handleChange(v.key, `${e.target.value}${v.unit ?? ''}`)}
+                      className="mt-1.5 w-full accent-primary"
+                    />
+                  )}
+                </div>
+                {v.type === 'range' && (
+                  <span className="w-12 shrink-0 text-right text-[0.55rem] text-muted-foreground">
+                    {(parseFloat(currentValue(v.key)) || v.default || 0).toFixed(3)}{v.unit}
+                  </span>
+                )}
+                {overrides[v.key] && (
+                  <button type="button" onClick={() => handleReset(v.key)} className="shrink-0 text-[0.5rem] text-muted-foreground hover:text-destructive">
+                    Reset
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </div>
+      ))}
       <p className="text-[0.55rem] text-muted-foreground">
-        Base colors use oklch() for perceptual consistency; a picked color here overrides that variable directly (valid CSS, applied immediately) and persists across reloads until reset.
+        Base colors use oklch() for perceptual consistency; a picked value here overrides that variable directly (valid CSS, applied immediately) and persists across reloads until reset.
       </p>
     </div>
   )
 }
-
-const THEMEABLE_VARS_META = [
-  { key: '--primary', label: 'Primary (Ember)', description: 'The one confident accent — active states, primary actions.' },
-  { key: '--gold', label: 'Gold', description: 'Secondary accent, used sparingly.' },
-  { key: '--accent', label: 'Accent (Slate)', description: 'Quiet informational color — links, secondary emphasis.' },
-  { key: '--tertiary', label: 'Tertiary', description: 'Special-moments-only accent.' },
-  { key: '--magenta', label: 'Magenta', description: 'Rarely-used warm rose-red accent.' },
-]

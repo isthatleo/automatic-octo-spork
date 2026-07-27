@@ -718,17 +718,40 @@ class FallbackLLM(LLMBackend):
                 logger.warning(
                     f"LLM backend {backend.__class__.__name__} timed out after {self.BACKEND_TIMEOUT_S}s"
                 )
-                usage_analytics.record_call(backend.__class__.__name__, time.monotonic() - call_start, prompt, "", False)
+                usage_analytics.record_call(
+                    backend.__class__.__name__, time.monotonic() - call_start, prompt, "", False,
+                    error=f"timed out after {self.BACKEND_TIMEOUT_S}s",
+                )
                 last_exception = TimeoutError(f"{backend.__class__.__name__} timed out")
                 continue
             except Exception as e:
                 logger.warning(f"LLM backend {backend.__class__.__name__} failed: {e}")
-                usage_analytics.record_call(backend.__class__.__name__, time.monotonic() - call_start, prompt, "", False)
+                usage_analytics.record_call(
+                    backend.__class__.__name__, time.monotonic() - call_start, prompt, "", False, error=str(e),
+                )
                 last_exception = e
                 continue
         # If all backends failed, raise the last exception
         logger.error("All LLM backends failed")
         raise last_exception
+
+# Real, declarative catalog of cloud LLM providers -- single source of truth
+# for get_llm_backends()'s PHASE 1 below AND for main_new.py's /config/keys
+# catalog endpoint (the Keys page's credential list). Adding a new provider
+# here is the *only* place it needs to be added: it's simultaneously wired
+# into the live fallback chain and automatically offered as a configurable
+# credential in the UI, with real live status -- no separate list to keep in
+# sync by hand.
+LLM_PROVIDER_CATALOG: list[tuple[str, str, type, str]] = [
+    ("ANTHROPIC_API_KEY", "Anthropic (Claude)", AnthropicLLM, "primary backend (best quality)"),
+    ("GROQ_API_KEY", "Groq", GroqLLM, "fast cloud backend"),
+    ("OPENAI_API_KEY", "OpenAI", OpenAILLM, "general-purpose cloud backend"),
+    ("GEMINI_API_KEY", "Gemini", GeminiLLM, "multimodal cloud backend"),
+    ("OPENROUTER_API_KEY", "OpenRouter", OpenRouterLLM, "aggregator backend"),
+    ("OPENCODE_API_KEY", "OpenCode Zen", OpenCodeLLM, "coding-focused cloud backend"),
+    ("CLAWROUTER_API_KEY", "ClawRouter", ClawRouterLLM, "managed multi-provider backend"),
+]
+
 
 # Factory to create a list of backends from the environment variable LLM_BACKENDS
 def get_llm_backends():
@@ -751,41 +774,11 @@ def get_llm_backends():
 
     backends: list[LLMBackend] = []
 
-    # ---- PHASE 1: Cloud (best quality first) ----
-    # Anthropic: Claude is excellent for coding, complex reasoning, writing
-    if os.getenv("ANTHROPIC_API_KEY"):
-        logger.info("Adding AnthropicLLM as primary backend (best quality)")
-        backends.append(AnthropicLLM())
-
-    # Groq: Lightning-fast inference (best for quick responses)
-    if os.getenv("GROQ_API_KEY"):
-        logger.info("Adding GroqLLM as fast cloud backend")
-        backends.append(GroqLLM())
-
-    # OpenAI: GPT models for general tasks
-    if os.getenv("OPENAI_API_KEY"):
-        logger.info("Adding OpenAILLM as general-purpose cloud backend")
-        backends.append(OpenAILLM())
-
-    # Gemini: Google's LLM for multimodal support
-    if os.getenv("GEMINI_API_KEY"):
-        logger.info("Adding GeminiLLM as multimodal cloud backend")
-        backends.append(GeminiLLM())
-
-    # OpenRouter: Aggregator with many models
-    if os.getenv("OPENROUTER_API_KEY"):
-        logger.info("Adding OpenRouterLLM as aggregator backend")
-        backends.append(OpenRouterLLM())
-
-    # OpenCode Zen: coding-focused model gateway
-    if os.getenv("OPENCODE_API_KEY"):
-        logger.info("Adding OpenCodeLLM as coding-focused cloud backend")
-        backends.append(OpenCodeLLM())
-
-    # ClawRouter: managed multi-provider routing (Batch 3, item #20)
-    if os.getenv("CLAWROUTER_API_KEY"):
-        logger.info("Adding ClawRouterLLM as managed multi-provider backend")
-        backends.append(ClawRouterLLM())
+    # ---- PHASE 1: Cloud (best quality first, in LLM_PROVIDER_CATALOG order) ----
+    for env_var, _label, backend_cls, role in LLM_PROVIDER_CATALOG:
+        if os.getenv(env_var):
+            logger.info(f"Adding {backend_cls.__name__} as {role}")
+            backends.append(backend_cls())
 
     # ---- PHASE 2: Local (free, offline fallback) ----
     disable_auto_ollama = os.getenv("DISABLE_AUTO_OLLAMA", "0").strip() == "1"

@@ -68,6 +68,14 @@ def _fresh_entry() -> Dict[str, Any]:
         "est_prompt_tokens": 0,
         "est_completion_tokens": 0,
         "estimated_token_calls": 0,
+        # The real reason the most recent failed call actually failed --
+        # without this, a backend with a 0% success rate (e.g. an
+        # out-of-credit key) was only visible as a suspiciously low number
+        # here, with the actual cause buried in a backend log line no
+        # frontend surfaced. Overwritten on every failure, so it's always
+        # the latest, not a stale first-ever error.
+        "last_error": None,
+        "last_error_at": None,
     }
 
 
@@ -81,6 +89,7 @@ def record_call(
     completion_tokens: Optional[int] = None,
     prompt_time_s: Optional[float] = None,
     decode_time_s: Optional[float] = None,
+    error: Optional[str] = None,
 ) -> None:
     """Never raises -- a failure to record analytics should never break the
     real LLM call it's measuring. Pass prompt_tokens/completion_tokens when
@@ -88,7 +97,9 @@ def record_call(
     back to the character-count estimate. Pass prompt_time_s/decode_time_s
     only when a provider's response actually broke total latency down that
     way (currently: Groq's x_groq.usage, Ollama's prompt_eval_duration/
-    eval_duration) -- never estimated."""
+    eval_duration) -- never estimated. Pass error (the real exception text)
+    on a failed call so a chronically-failing backend is diagnosable from
+    the Usage page instead of just showing a suspiciously low success rate."""
     try:
         data = _load()
         entry = data.setdefault(backend_name, _fresh_entry())
@@ -98,6 +109,9 @@ def record_call(
         entry["call_count"] += 1
         if success:
             entry["success_count"] += 1
+        else:
+            entry["last_error"] = error
+            entry["last_error_at"] = time.time()
         entry["total_latency_s"] += latency_s
 
         if prompt_tokens is not None and completion_tokens is not None:
@@ -152,6 +166,8 @@ def get_usage_summary() -> Dict[str, Any]:
             "avg_prompt_time_s": round(avg_prompt_time, 3) if avg_prompt_time is not None else None,
             "avg_decode_time_s": round(avg_decode_time, 3) if avg_decode_time is not None else None,
             "tokens_per_sec": tokens_per_sec,
+            "last_error": e.get("last_error"),
+            "last_error_at": e.get("last_error_at"),
         })
     per_backend.sort(key=lambda x: x["call_count"], reverse=True)
 

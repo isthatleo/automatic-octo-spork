@@ -15,14 +15,26 @@ export interface ThemeableVar {
   key: string
   label: string
   description: string
+  group: 'Accent Colors' | 'Status Colors' | 'Shape'
+  type: 'color' | 'range'
+  /** range only */
+  min?: number
+  max?: number
+  step?: number
+  unit?: string
+  default?: number
 }
 
 export const THEMEABLE_VARS: ThemeableVar[] = [
-  { key: '--primary', label: 'Primary (Ember)', description: 'The one confident accent -- active states, primary actions.' },
-  { key: '--gold', label: 'Gold', description: 'Secondary accent, used sparingly.' },
-  { key: '--accent', label: 'Accent (Slate)', description: 'Quiet informational color -- links, secondary emphasis.' },
-  { key: '--tertiary', label: 'Tertiary', description: 'Special-moments-only accent.' },
-  { key: '--magenta', label: 'Magenta', description: 'Rarely-used warm rose-red accent.' },
+  { key: '--primary', label: 'Primary (Ember)', description: 'The one confident accent -- active states, primary actions.', group: 'Accent Colors', type: 'color' },
+  { key: '--gold', label: 'Gold', description: 'Secondary accent, used sparingly.', group: 'Accent Colors', type: 'color' },
+  { key: '--accent', label: 'Accent (Slate)', description: 'Quiet informational color -- links, secondary emphasis.', group: 'Accent Colors', type: 'color' },
+  { key: '--tertiary', label: 'Tertiary', description: 'Special-moments-only accent.', group: 'Accent Colors', type: 'color' },
+  { key: '--magenta', label: 'Magenta', description: 'Rarely-used warm rose-red accent.', group: 'Accent Colors', type: 'color' },
+  { key: '--success', label: 'Success', description: 'Real positive-state color -- confirmations, "ok" badges.', group: 'Status Colors', type: 'color' },
+  { key: '--warning', label: 'Warning', description: 'Caution-state color -- degraded/attention-needed badges.', group: 'Status Colors', type: 'color' },
+  { key: '--destructive', label: 'Destructive', description: 'Error/failure/delete-state color.', group: 'Status Colors', type: 'color' },
+  { key: '--radius', label: 'Corner Radius', description: 'How rounded panels, buttons, and inputs are throughout the app.', group: 'Shape', type: 'range', min: 0, max: 1.5, step: 0.025, unit: 'rem', default: 0.625 },
 ]
 
 const STORAGE_KEY = 'nancy:theme-overrides'

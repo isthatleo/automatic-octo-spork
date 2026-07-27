@@ -55,7 +55,7 @@ except ImportError:
 
 # Local imports
 from stt import stt_backend
-from llm import llm_backend, select_llm_for_task, AnthropicLLM
+from llm import llm_backend, select_llm_for_task, AnthropicLLM, LLM_PROVIDER_CATALOG
 import file_access
 import subagent_factory
 import terminal_tool
@@ -1495,6 +1495,17 @@ async def get_greeting():
     }
 
 
+@app.get("/persona/preview")
+async def persona_preview():
+    """Static representative greeting text for every persona, read straight
+    off NancyGreeting.GREETINGS -- lets the Profiles page show what each
+    persona actually sounds like before switching to it, instead of a bare
+    name + first-letter badge with no indication of what's actually
+    different about "nancy" vs "billion" vs "jarvis". Doesn't touch
+    startup_coordinator's real active-persona state."""
+    return {"success": True, "personas": NancyGreeting.GREETINGS}
+
+
 @app.post("/persona/{persona_name}")
 async def set_persona(persona_name: str):
     valid_personas = ["nancy", "billion", "jarvis"]
@@ -2722,14 +2733,134 @@ async def config_public():
     }
 
 
-# Only these names can be written via /config/keys -- an explicit allowlist
-# so this endpoint can never be used to overwrite arbitrary env vars (HOST,
-# PORT, auth tokens, etc.) through the Keys page.
-_WRITABLE_KEY_NAMES = {
-    "ANTHROPIC_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY",
-    "OPENROUTER_API_KEY", "OPENCODE_API_KEY",
-    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+# Every vendor adapter that self-registers into providers/registry.py if its
+# env var is set (see providers/bootstrap.py's _VENDOR_MODULES) -- kept here
+# as an explicit (capability, vendor, env_var) catalog rather than derived,
+# so an *unconfigured* vendor still shows up (PROVIDER_REGISTRIES only ever
+# contains the ones that already registered).
+_CAPABILITY_CATALOG = [
+    ("web_search", "brave", "BRAVE_API_KEY"),
+    ("web_search", "tavily", "TAVILY_API_KEY"),
+    ("web_search", "searxng", "SEARXNG_BASE_URL"),
+    ("image", "fal", "FAL_API_KEY"),
+    ("image", "deepinfra", "DEEPINFRA_API_KEY"),
+    ("tts", "elevenlabs", "ELEVENLABS_API_KEY"),
+    ("transcription", "deepgram", "DEEPGRAM_API_KEY"),
+    ("telephony", "twilio", "TWILIO_ACCOUNT_SID"),
+    ("sandbox", "crabbox", "CRABBOX_API_KEY"),
+    ("memory", "mem0", "MEM0_API_KEY"),
+    ("memory", "supermemory", "SUPERMEMORY_API_KEY"),
+    ("memory", "honcho", "HONCHO_API_KEY"),
+    ("memory", "hindsight", "HINDSIGHT_API_KEY"),
+    ("memory", "byterover", "BYTEROVER_API_KEY"),
+    ("memory", "openviking", "OPENVIKING_API_KEY"),
+    ("memory", "retaindb", "RETAINDB_API_KEY"),
+]
+
+
+@app.get("/config/capabilities")
+async def config_capabilities():
+    """Real optional-integration status for every vendor adapter that can
+    self-register into providers/registry.py. `configured` reflects actual
+    live registration (env var set AND construction didn't throw), not just
+    whether the env var happens to be set. Never returns a secret value."""
+    from providers.registry import PROVIDER_REGISTRIES
+
+    capabilities: Dict[str, List[Dict[str, Any]]] = {}
+    for capability, vendor, env_var in _CAPABILITY_CATALOG:
+        capabilities.setdefault(capability, []).append({
+            "vendor": vendor,
+            "configured": vendor in PROVIDER_REGISTRIES.get(capability, {}),
+            "env_var": env_var,
+        })
+    return {"success": True, "capabilities": capabilities}
+
+
+# Real one-off credentials with no dedicated live-status source (Spotify's
+# tool only exposes a plain is_configured() bool with no registry entry;
+# FRED and node-pairing have no self-registration mechanism at all).
+OTHER_CREDENTIAL_CATALOG = [
+    ("FRED_API_KEY", "FRED (economic calendar data)"),
+    ("NODE_SHARED_SECRET", "Node pairing shared secret"),
+    ("SPOTIFY_CLIENT_ID", "Spotify client ID"),
+    ("SPOTIFY_CLIENT_SECRET", "Spotify client secret"),
+    ("SPOTIFY_REFRESH_TOKEN", "Spotify refresh token"),
+]
+
+# Real fields a channel accepts but doesn't strictly require (see
+# CHANNEL_DEFINITIONS' required_env for what's mandatory) -- still worth
+# being settable through the same form.
+OPTIONAL_CHANNEL_FIELD_CATALOG = [
+    ("NTFY_SERVER", "ntfy — server URL (optional, self-hosted)"),
+    ("NTFY_TOKEN", "ntfy — token (optional, private servers)"),
+    ("SLACK_SIGNING_SECRET", "Slack — signing secret (optional)"),
+    ("REEF_PEER_ID", "Reef — peer ID"),
+]
+
+_CAPABILITY_GROUPS = {
+    "web_search": "Web Search", "image": "Media & Voice", "tts": "Media & Voice",
+    "transcription": "Media & Voice", "telephony": "Channels", "sandbox": "Sandbox",
+    "memory": "External Memory",
 }
+
+
+def _build_key_catalog() -> List[Dict[str, Any]]:
+    """The single real source of truth for every writable credential this
+    app has a use for, and for the Keys page's displayed configured-state --
+    assembled entirely from the same declarative lists that already drive
+    the live LLM chain (llm.LLM_PROVIDER_CATALOG), the channel registry
+    (CHANNEL_DEFINITIONS, defined below), and the provider registries
+    (_CAPABILITY_CATALOG), plus two small catalogs for the handful of fields
+    those don't cover. Adding a new provider/channel/vendor to any of those
+    lists is the *only* change needed for it to automatically become
+    writable via /config/keys and visible on the Keys page -- nothing here,
+    on the frontend, or in a second allowlist ever needs a manual update."""
+    from providers.registry import PROVIDER_REGISTRIES
+    from channels.registry import list_channels
+
+    entries: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def add(name: str, label: str, group: str, configured: Optional[bool] = None):
+        if name in seen:
+            return
+        seen.add(name)
+        entries.append({"name": name, "label": label, "group": group, "configured": configured})
+
+    configured_llm = {b.__class__.__name__ for b in getattr(llm_backend, "backends", [])}
+    for env_var, label, backend_cls, _role in LLM_PROVIDER_CATALOG:
+        add(env_var, label, "Reasoning", backend_cls.__name__ in configured_llm)
+
+    telegram_ok = bool(telegram_notifier.status.get("available"))
+    add("TELEGRAM_BOT_TOKEN", "Telegram bot token", "Messaging", telegram_ok)
+    add("TELEGRAM_CHAT_ID", "Telegram chat ID", "Messaging", telegram_ok)
+
+    registered_channels = list_channels()
+    for defn in CHANNEL_DEFINITIONS:
+        chan_configured = defn["key"] in registered_channels
+        for env_var in defn["required_env"]:
+            add(env_var, f"{defn['label']} — {env_var}", "Channels", chan_configured)
+    for env_var, label in OPTIONAL_CHANNEL_FIELD_CATALOG:
+        add(env_var, label, "Channels")
+
+    for capability, vendor, env_var in _CAPABILITY_CATALOG:
+        configured = vendor in PROVIDER_REGISTRIES.get(capability, {})
+        group = _CAPABILITY_GROUPS.get(capability, capability.replace("_", " ").title())
+        add(env_var, f"{vendor} ({capability.replace('_', ' ')})", group, configured)
+
+    for env_var, label in OTHER_CREDENTIAL_CATALOG:
+        add(env_var, label, "Other")
+
+    return entries
+
+
+@app.get("/config/keys/catalog")
+async def config_keys_catalog():
+    """Real, always-current list of every writable credential (see
+    _build_key_catalog) -- the Keys page renders entirely from this response,
+    so a new provider/channel/vendor added to any of the source catalogs
+    appears here automatically, with no separate frontend list to maintain."""
+    return {"success": True, "entries": _build_key_catalog()}
 
 
 @app.post("/config/keys")
@@ -2744,9 +2875,10 @@ async def upsert_key(req: KeyUpsertRequest):
     behind a fake "applied" response."""
     from dotenv import set_key
 
+    writable_names = {e["name"] for e in _build_key_catalog()}
     name = req.name.strip().upper()
-    if name not in _WRITABLE_KEY_NAMES:
-        raise HTTPException(status_code=400, detail=f"'{name}' is not a writable key. Allowed: {sorted(_WRITABLE_KEY_NAMES)}")
+    if name not in writable_names:
+        raise HTTPException(status_code=400, detail=f"'{name}' is not a writable key. Allowed: {sorted(writable_names)}")
     if not req.value.strip():
         raise HTTPException(status_code=400, detail="value cannot be empty")
 
