@@ -64,16 +64,39 @@ def _is_safe_command(command: str) -> bool:
     return any(normalized.startswith(prefix) for prefix in TERMINAL_SAFE_PREFIXES)
 
 
-async def execute_command(command: str, cwd: str | None = None, timeout: float = DEFAULT_TIMEOUT_S, use_egress_proxy: bool = False) -> Dict[str, Any]:
+async def execute_command(command: str, cwd: str | None = None, timeout: float = DEFAULT_TIMEOUT_S, use_egress_proxy: bool = False, sandbox: str | None = None) -> Dict[str, Any]:
     """Run `command` in a real shell and return its stdout/stderr/exit code.
-    No sandboxing -- same "no folder sandbox, gate destructive action behind
-    human approval" choice file_access.py already made for this machine.
+    No sandboxing by default -- same "no folder sandbox, gate destructive
+    action behind human approval" choice file_access.py already made for
+    this machine. Two real opt-in isolation layers, composable:
 
     use_egress_proxy=True routes the subprocess's own HTTP(S) traffic
     through egress_proxy.py's real TLS-intercepting allowlist (see that
-    module) via HTTP_PROXY/HTTPS_PROXY env vars -- an opt-in extra
-    isolation layer for a command whose network access should be bounded to
-    a real, enforced host allowlist, on top of the existing approval gate."""
+    module) via HTTP_PROXY/HTTPS_PROXY env vars.
+
+    sandbox="crabbox" runs the command on Crabbox's remote worker instead of
+    this machine at all (providers/sandbox/crabbox.py). sandbox="native"
+    runs it locally under whichever real OS-native isolation primitive this
+    host actually has (sandbox/posix_sandbox.py's run_native_sandbox --
+    Windows Job Object + restricted token, Linux `unshare` namespaces, or
+    macOS `sandbox-exec` Seatbelt profile); sandbox="mxc_windows" forces the
+    Windows-specific backend by name."""
+    if sandbox == "crabbox":
+        from providers.registry import get_ordered_providers
+        providers = get_ordered_providers("sandbox")
+        crabbox = next((p for p in providers if type(p).__name__ == "CrabboxSandboxProvider"), None)
+        if crabbox is None:
+            return {"success": False, "error": "Crabbox is not configured (CRABBOX_API_KEY)."}
+        return await crabbox.execute(command, cwd=cwd, timeout=timeout)
+
+    if sandbox == "mxc_windows":
+        import sandbox.mxc_windows as mxc
+        return await mxc.run_sandboxed(command, cwd=cwd, timeout=timeout)
+
+    if sandbox == "native":
+        from sandbox.posix_sandbox import run_native_sandbox
+        return await run_native_sandbox(command, cwd=cwd, timeout=timeout)
+
     env = None
     if use_egress_proxy:
         import egress_proxy
@@ -136,6 +159,11 @@ TERMINAL_TOOLS = [
                 "use_egress_proxy": {
                     "type": "boolean",
                     "description": "If true, routes this command's own network access through the real TLS-intercepting egress allowlist proxy (must already be running).",
+                },
+                "sandbox": {
+                    "type": "string",
+                    "enum": ["native", "crabbox", "mxc_windows"],
+                    "description": "Run this command in real isolation instead of directly: 'native' auto-picks whatever real OS sandbox this machine has (Windows Job Object, Linux unshare namespaces, or macOS sandbox-exec); 'crabbox' runs it on a remote Crabbox worker (needs CRABBOX_API_KEY); 'mxc_windows' forces the Windows-specific backend by name.",
                 },
             },
             "required": ["command"],

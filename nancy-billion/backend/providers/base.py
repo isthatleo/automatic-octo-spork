@@ -67,6 +67,13 @@ class TelephonyProvider(ABC):
         """Returns {"success", "call_id", "error"?}."""
 
 
+class SandboxProvider(ABC):
+    @abstractmethod
+    async def execute(self, command: str, **kw: Any) -> Dict[str, Any]:
+        """Runs `command` in a remote/isolated sandbox. Returns
+        {"success", "stdout", "stderr", "exit_code", "error"?}."""
+
+
 class MemoryProvider(ABC):
     @abstractmethod
     async def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

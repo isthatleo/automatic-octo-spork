@@ -86,6 +86,8 @@ from diff_render import post_diff_to_canvas
 import doc_extraction
 import config_migration
 import workflow_engine
+import mdns_discovery
+import fleet.manager as fleet_manager
 from debug_share import share_debug_report
 import node_host
 import approval_policy
@@ -944,7 +946,9 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             )
             if not approved:
                 return {"success": False, "error": "User did not approve this command."}
-        return await terminal_tool.execute_command(command, cwd=tool_input.get("cwd"), use_egress_proxy=tool_input.get("use_egress_proxy", False))
+        return await terminal_tool.execute_command(
+            command, cwd=tool_input.get("cwd"), use_egress_proxy=tool_input.get("use_egress_proxy", False), sandbox=tool_input.get("sandbox"),
+        )
 
     resolved_write_path: Optional[Path] = None
     if name == "write_file":
@@ -3157,6 +3161,83 @@ async def get_workflow_run_route(run_id: str):
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return {"success": True, "run": run}
+
+
+@app.post("/mdns/advertise", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def mdns_advertise_route():
+    return await mdns_discovery.advertise(port=int(os.getenv("PORT", "8000")))
+
+
+@app.post("/mdns/stop", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def mdns_stop_route():
+    return await mdns_discovery.stop_advertising()
+
+
+@app.get("/mdns/status", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def mdns_status_route():
+    return {"success": True, **mdns_discovery.status()}
+
+
+@app.get("/mdns/discover", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def mdns_discover_route(timeout_s: float = 3.0):
+    return {"success": True, "services": await mdns_discovery.discover(timeout_s=timeout_s)}
+
+
+class FleetCellCreateRequest(BaseModel):
+    tenant_id: str
+    image: str = "python:3.11-slim"
+    mem_limit: str = "256m"
+    nano_cpus: float = 0.5
+    allowed_env_keys: List[str] = []
+    command: Optional[str] = None
+
+
+class FleetCellExecRequest(BaseModel):
+    command: str
+    timeout: int = 30
+
+
+@app.get("/fleet/health", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def fleet_health_route():
+    return fleet_manager.check_docker_health()
+
+
+@app.get("/fleet/cells", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_fleet_cells_route(tenant_id: Optional[str] = None):
+    return {"success": True, "cells": fleet_manager.list_cells(tenant_id)}
+
+
+@app.post("/fleet/cells", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_fleet_cell_route(req: FleetCellCreateRequest):
+    approved = await telegram_notifier.request_approval(
+        f"Nancy wants to create a new fleet cell (Docker container) for tenant '{req.tenant_id}' from image {req.image}.", timeout=120.0,
+    )
+    if not approved:
+        raise HTTPException(status_code=403, detail="User did not approve creating this cell.")
+    return await fleet_manager.create_cell(req.tenant_id, req.image, req.mem_limit, req.nano_cpus, req.allowed_env_keys, req.command)
+
+
+@app.post("/fleet/cells/{cell_id}/exec", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def exec_fleet_cell_route(cell_id: str, req: FleetCellExecRequest):
+    return await fleet_manager.exec_in_cell(cell_id, req.command, req.timeout)
+
+
+@app.post("/fleet/cells/{cell_id}/stop", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def stop_fleet_cell_route(cell_id: str):
+    return await fleet_manager.stop_cell(cell_id)
+
+
+@app.post("/fleet/cells/{cell_id}/backup", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def backup_fleet_cell_route(cell_id: str):
+    return await fleet_manager.backup_cell(cell_id)
+
+
+@app.delete("/fleet/cells/{cell_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def remove_fleet_cell_route(cell_id: str):
+    approved = await telegram_notifier.request_approval(f"Nancy wants to remove fleet cell {cell_id}.", timeout=120.0)
+    if not approved:
+        raise HTTPException(status_code=403, detail="User did not approve removing this cell.")
+    return await fleet_manager.remove_cell(cell_id)
 
 
 @app.get("/achievements", dependencies=[Depends(require_auth), Depends(rate_limit)])
