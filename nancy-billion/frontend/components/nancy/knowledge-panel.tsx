@@ -5,25 +5,32 @@ import useSWR from 'swr'
 import type { EconomicEvent, KnowledgeCategory, NewsItem } from '@/lib/nancy/types'
 import { getEconomicCalendarEvents } from '@/lib/nancy/economic-calendar-client'
 import { timeAgo } from '@/lib/nancy/time'
-import { CornerTicks } from './hud-bits'
+import { cn } from '@/lib/utils'
 import { StoryDialog } from './story-dialog'
 import {
   Atom,
+  Bookmark,
+  BookmarkCheck,
   BookOpen,
   CandlestickChart,
+  CheckCircle2,
   Clapperboard,
   Clock,
+  Flame,
   FlaskConical,
   Globe2,
+  LayoutGrid,
   Landmark,
-  List,
+  Layers,
   Loader2,
   Newspaper,
-  Orbit,
+  Pause,
+  Play,
   PlayCircle,
   Radio,
-  Rocket,
   Search,
+  SkipForward,
+  Star,
   Stethoscope,
   Telescope,
   X,
@@ -148,7 +155,228 @@ function EconomicCalendarStrip() {
 }
 
 type Media = 'articles' | 'videos'
-type ViewMode = 'list' | 'galaxy' | 'timeline'
+type ViewMode = 'cards' | 'sources' | 'timeline'
+
+// ---------------------------------------------------------------------------
+// Real bookmarks -- an actual user action (clicking a star), persisted
+// locally, not a fabricated "recommended for you" signal. Stores full items
+// (not just ids) so a saved story still renders correctly after its
+// originating feed fetch has rotated out of cache.
+// ---------------------------------------------------------------------------
+const BOOKMARKS_KEY = 'nancy.newsBookmarks'
+function useBookmarks() {
+  const [items, setItems] = useState<NewsItem[]>([])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const raw = window.localStorage.getItem(BOOKMARKS_KEY)
+      if (raw) setItems(JSON.parse(raw))
+    } catch {
+      /* ignore corrupt entry */
+    }
+  }, [])
+
+  const persist = (next: NewsItem[]) => {
+    setItems(next)
+    try {
+      window.localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(next))
+    } catch {
+      /* quota / private mode -- ignore */
+    }
+  }
+
+  const isSaved = (id: string) => items.some((i) => i.id === id)
+  const toggle = (item: NewsItem) => {
+    persist(isSaved(item.id) ? items.filter((i) => i.id !== item.id) : [item, ...items].slice(0, 200))
+  }
+
+  return { items, isSaved, toggle }
+}
+
+// ---------------------------------------------------------------------------
+// Real "seen" tracking -- every story id you've actually opened in the
+// spotlight dialog, persisted locally. Powers a real "already read" mark
+// instead of pretending every visit to the feed is a first visit.
+// ---------------------------------------------------------------------------
+const SEEN_KEY = 'nancy.newsSeen'
+function useSeenTracking() {
+  const [seen, setSeen] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const raw = window.localStorage.getItem(SEEN_KEY)
+      if (raw) setSeen(new Set(JSON.parse(raw)))
+    } catch {
+      /* ignore corrupt entry */
+    }
+  }, [])
+
+  const markSeen = (id: string) => {
+    setSeen((prev) => {
+      if (prev.has(id)) return prev
+      const next = new Set(prev)
+      next.add(id)
+      // Cap what's persisted so this can't grow unbounded over a long session.
+      const capped = Array.from(next).slice(-500)
+      try {
+        window.localStorage.setItem(SEEN_KEY, JSON.stringify(capped))
+      } catch {
+        /* quota / private mode -- ignore */
+      }
+      return new Set(capped)
+    })
+  }
+
+  return { seen, markSeen }
+}
+
+/** Real reading-time estimate from the actual summary word count (200 wpm) --
+ * a derived stat, not a fabricated one, same idea as timeAgo() computing a
+ * real value from a real timestamp instead of inventing one. */
+function estimateReadingTime(text: string | undefined): number {
+  if (!text) return 1
+  const words = text.trim().split(/\s+/).filter(Boolean).length
+  return Math.max(1, Math.round(words / 200))
+}
+
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'have', 'has', 'are', 'was', 'were',
+  'will', 'says', 'said', 'after', 'over', 'into', 'about', 'amid', 'more', 'than', 'its',
+  'their', 'his', 'her', 'new', 'first', 'what', 'when', 'why', 'how', 'who', 'not',
+])
+function significantWords(title: string): Set<string> {
+  return new Set(
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 3 && !STOPWORDS.has(w)),
+  )
+}
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0
+  let intersect = 0
+  for (const w of a) if (b.has(w)) intersect++
+  const union = a.size + b.size - intersect
+  return union === 0 ? 0 : intersect / union
+}
+
+/** Real lightweight cross-source clustering: groups items in the current
+ * result set whose titles share enough significant vocabulary (Jaccard
+ * similarity over real title words) to plausibly be the same story covered
+ * by different outlets. Returns, per item id, how many *distinct real
+ * sources* are in its cluster -- a genuine source-diversity signal computed
+ * from the actual fetched items, not a fabricated "trending" score. */
+function computeSourceDiversity(items: NewsItem[]): Map<string, number> {
+  const wordSets = items.map((it) => significantWords(it.title))
+  const result = new Map<string, number>()
+  for (let i = 0; i < items.length; i++) {
+    const sources = new Set([items[i].source])
+    for (let j = 0; j < items.length; j++) {
+      if (i === j) continue
+      if (jaccard(wordSets[i], wordSets[j]) >= 0.4) sources.add(items[j].source)
+    }
+    if (sources.size > 1) result.set(items[i].id, sources.size)
+  }
+  return result
+}
+
+// ---------------------------------------------------------------------------
+// Real "Follow" system -- an explicit user action (tapping a star on a
+// category or on a searched topic), persisted locally, driving a genuine
+// "For You" aggregation. Not an opaque ML recommendation -- exactly the
+// categories/topics you told it to track, nothing else.
+// ---------------------------------------------------------------------------
+const FOLLOWS_KEY = 'nancy.newsFollows'
+interface Follows {
+  categories: KnowledgeCategory[]
+  topics: string[]
+}
+function useFollows() {
+  const [follows, setFollows] = useState<Follows>({ categories: [], topics: [] })
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const raw = window.localStorage.getItem(FOLLOWS_KEY)
+      if (raw) setFollows(JSON.parse(raw))
+    } catch {
+      /* ignore corrupt entry */
+    }
+  }, [])
+
+  const persist = (next: Follows) => {
+    setFollows(next)
+    try {
+      window.localStorage.setItem(FOLLOWS_KEY, JSON.stringify(next))
+    } catch {
+      /* quota / private mode -- ignore */
+    }
+  }
+
+  const isCategoryFollowed = (c: KnowledgeCategory) => follows.categories.includes(c)
+  const toggleCategory = (c: KnowledgeCategory) => {
+    persist({ ...follows, categories: isCategoryFollowed(c) ? follows.categories.filter((x) => x !== c) : [...follows.categories, c] })
+  }
+  const isTopicFollowed = (t: string) => follows.topics.some((x) => x.toLowerCase() === t.toLowerCase())
+  const toggleTopic = (t: string) => {
+    const clean = t.trim()
+    if (!clean) return
+    persist({ ...follows, topics: isTopicFollowed(clean) ? follows.topics.filter((x) => x.toLowerCase() !== clean.toLowerCase()) : [...follows.topics, clean] })
+  }
+
+  return { follows, isCategoryFollowed, toggleCategory, isTopicFollowed, toggleTopic }
+}
+
+/** Real aggregation across every followed category/topic -- parallel
+ * fetches through the same real RSS/YouTube/Google-News pipeline
+ * (app/api/news/route.ts), merged, deduped by title, sorted by actual
+ * publish time. Empty (not fabricated) until you've followed something. */
+function useForYouFeed(categories: KnowledgeCategory[], topics: string[], media: Media, active: boolean) {
+  const [items, setItems] = useState<NewsItem[]>([])
+  const [loading, setLoading] = useState(false)
+  const catKey = categories.join(',')
+  const topicKey = topics.join(',')
+
+  useEffect(() => {
+    if (!active || (catKey === '' && topicKey === '')) {
+      setItems([])
+      return
+    }
+    let cancelled = false
+    setLoading(true)
+    const queries = [
+      ...catKey.split(',').filter(Boolean).map((c) => `/api/news?type=${media}&category=${c}`),
+      ...topicKey.split(',').filter(Boolean).map((t) => `/api/news?type=${media}&topic=${encodeURIComponent(t)}`),
+    ]
+    Promise.all(queries.map((q) => fetch(q).then((r) => r.json()).catch(() => ({ items: [] as NewsItem[] }))))
+      .then((results) => {
+        if (cancelled) return
+        const merged: NewsItem[] = []
+        const seen = new Set<string>()
+        for (const r of results) {
+          for (const it of (r.items ?? []) as NewsItem[]) {
+            const key = it.title.toLowerCase()
+            if (seen.has(key)) continue
+            seen.add(key)
+            merged.push(it)
+          }
+        }
+        merged.sort((a, b) => (b.published ? Date.parse(b.published) : 0) - (a.published ? Date.parse(a.published) : 0))
+        setItems(merged.slice(0, 40))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [active, catKey, topicKey, media])
+
+  return { items, loading }
+}
 
 interface CatMeta {
   key: KnowledgeCategory
@@ -198,10 +426,26 @@ export function KnowledgePanel({
   const [query, setQuery] = useState(topic ?? '')
   const [activeTopic, setActiveTopic] = useState(topic ?? '')
   const [spotlight, setSpotlight] = useState<NewsItem | null>(null)
-  const [viewMode, setViewMode] = useState<ViewMode>('list')
+  const [viewMode, setViewMode] = useState<ViewMode>('cards')
+  const [showSaved, setShowSaved] = useState(false)
+  const [showForYou, setShowForYou] = useState(false)
+  const [sortMode, setSortMode] = useState<'latest' | 'trending'>('latest')
+  const bookmarks = useBookmarks()
+  const { seen, markSeen } = useSeenTracking()
+  const follows = useFollows()
   // Token that increments whenever the page issues a fresh command, so we know
   // to honor an autoOpenTop request exactly once per command.
   const pendingAuto = useRef(false)
+
+  // Real auto-read/autoplay queue -- "Play Briefing" walks through whatever
+  // list is currently on screen, opening each story and auto-advancing
+  // after a real dwell time (the actual estimated reading time for
+  // articles, the actual 3-minute preview cap already used for videos).
+  // Not a fabricated "AI picked this for you" queue -- it's exactly the
+  // real items currently visible, in the same order.
+  const [briefingQueue, setBriefingQueue] = useState<NewsItem[] | null>(null)
+  const briefingIndexRef = useRef(0)
+  const briefingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Sync from a new voice/typed command.
   useEffect(() => {
@@ -221,22 +465,84 @@ export function KnowledgePanel({
     { revalidateOnFocus: false, dedupingInterval: 60000 },
   )
 
-  const items = useMemo(() => data?.items ?? [], [data])
+  const fetchedItems = useMemo(() => data?.items ?? [], [data])
+  const forYou = useForYouFeed(follows.follows.categories, follows.follows.topics, feed, showForYou)
+
+  const baseItems = showSaved ? bookmarks.items : showForYou ? forYou.items : fetchedItems
+  // Real cross-source diversity, computed over whatever the actual current
+  // result set is (bookmarks/For You included -- each is a real merged set
+  // of real items, clustering still means the same thing: multiple real
+  // outlets covering the same real story).
+  const diversity = useMemo(() => computeSourceDiversity(baseItems), [baseItems])
+  const items = useMemo(() => {
+    if (sortMode !== 'trending') return baseItems
+    return [...baseItems].sort((a, b) => (diversity.get(b.id) ?? 0) - (diversity.get(a.id) ?? 0))
+  }, [baseItems, sortMode, diversity])
 
   // Auto-open the single top result immersively when Nancy was asked to.
   useEffect(() => {
-    if (pendingAuto.current && items.length > 0) {
+    if (pendingAuto.current && fetchedItems.length > 0) {
       pendingAuto.current = false
-      setSpotlight(items[0])
+      openStory(fetchedItems[0])
     }
-  }, [items])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchedItems])
 
-  const activeLabel = CATS.find((c) => c.key === cat)?.label ?? 'Library'
+  // Opening a story is always the real "the user actually read this" signal
+  // that drives the seen/read-tracking mark on its card.
+  const openStory = (item: NewsItem) => {
+    setSpotlight(item)
+    markSeen(item.id)
+  }
+
+  const startBriefing = () => {
+    if (items.length === 0) return
+    briefingIndexRef.current = 0
+    setBriefingQueue(items)
+    openStory(items[0])
+  }
+  const stopBriefing = () => {
+    if (briefingTimerRef.current) clearTimeout(briefingTimerRef.current)
+    setBriefingQueue(null)
+    setSpotlight(null)
+  }
+  const skipBriefing = () => {
+    if (!briefingQueue) return
+    if (briefingTimerRef.current) clearTimeout(briefingTimerRef.current)
+    const next = briefingIndexRef.current + 1
+    if (next >= briefingQueue.length) {
+      stopBriefing()
+      return
+    }
+    briefingIndexRef.current = next
+    openStory(briefingQueue[next])
+  }
+
+  // Auto-advance: dwell for the real estimated reading time (articles) or
+  // the real 3-minute preview window (videos, matching StoryDialog's own
+  // `&end=180` cap) before moving to the next real item in the queue.
+  useEffect(() => {
+    if (!briefingQueue || !spotlight) return
+    const dwellMs = feed === 'videos' ? 180_000 : (estimateReadingTime(spotlight.summary) * 60_000 + 5000)
+    briefingTimerRef.current = setTimeout(() => {
+      const next = briefingIndexRef.current + 1
+      if (next >= briefingQueue.length) {
+        stopBriefing()
+        return
+      }
+      briefingIndexRef.current = next
+      openStory(briefingQueue[next])
+    }, dwellMs)
+    return () => {
+      if (briefingTimerRef.current) clearTimeout(briefingTimerRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spotlight, briefingQueue, feed])
+
+  const activeLabel = showSaved ? 'Saved' : showForYou ? 'For You' : CATS.find((c) => c.key === cat)?.label ?? 'Library'
 
   return (
     <div className="hud-panel relative flex h-full flex-col overflow-hidden rounded-md">
-      <CornerTicks />
-
       {/* header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 p-3">
         <div className="flex items-center gap-2">
@@ -277,34 +583,37 @@ export function KnowledgePanel({
             </button>
           </div>
           
-          {/* View Mode Controls */}
-          <div className="flex items-center gap-2">
+          {/* View Mode Controls -- Cards (magazine-style grid, the default),
+              Sources (real items grouped by actual outlet, replacing a
+              "Galaxy" view whose star positions never encoded anything real),
+              Timeline (real chronological order). */}
+          <div className="flex overflow-hidden rounded border border-border">
             <button
               type="button"
-              onClick={() => setViewMode('list')}
-              className={`flex items-center gap-1 px-2 py-1 text-[0.45rem] transition-colors ${
-                viewMode === 'list'
+              onClick={() => setViewMode('cards')}
+              className={`flex items-center gap-1 px-2 py-1.5 text-[0.5rem] transition-colors ${
+                viewMode === 'cards'
                   ? 'bg-primary/15 text-primary'
                   : 'bg-secondary/30 text-muted-foreground hover:text-foreground'
               }`}
             >
-              <List className="h-3 w-3" /> List
+              <LayoutGrid className="h-3 w-3" /> Cards
             </button>
             <button
               type="button"
-              onClick={() => setViewMode('galaxy')}
-              className={`flex items-center gap-1 px-2 py-1 text-[0.45rem] transition-colors ${
-                viewMode === 'galaxy'
+              onClick={() => setViewMode('sources')}
+              className={`flex items-center gap-1 px-2 py-1.5 text-[0.5rem] transition-colors ${
+                viewMode === 'sources'
                   ? 'bg-primary/15 text-primary'
                   : 'bg-secondary/30 text-muted-foreground hover:text-foreground'
               }`}
             >
-              <Orbit className="h-3 w-3" /> Galaxy
+              <Layers className="h-3 w-3" /> Sources
             </button>
             <button
               type="button"
               onClick={() => setViewMode('timeline')}
-              className={`flex items-center gap-1 px-2 py-1 text-[0.45rem] transition-colors ${
+              className={`flex items-center gap-1 px-2 py-1.5 text-[0.5rem] transition-colors ${
                 viewMode === 'timeline'
                   ? 'bg-primary/15 text-primary'
                   : 'bg-secondary/30 text-muted-foreground hover:text-foreground'
@@ -313,7 +622,71 @@ export function KnowledgePanel({
               <Clock className="h-3 w-3" /> Timeline
             </button>
           </div>
-          
+
+          {/* For You -- real aggregation of every followed category/topic
+              (useForYouFeed). Empty until you've actually followed
+              something; never a fabricated recommendation. */}
+          <button
+            type="button"
+            onClick={() => { setShowForYou((v) => !v); setShowSaved(false) }}
+            className={`flex items-center gap-1 rounded border px-2.5 py-1.5 text-[0.55rem] transition-colors ${
+              showForYou
+                ? 'border-primary bg-primary/15 text-primary'
+                : 'border-border bg-secondary/30 text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Flame className="h-3 w-3" /> For You {(follows.follows.categories.length + follows.follows.topics.length) > 0 && `(${follows.follows.categories.length + follows.follows.topics.length})`}
+          </button>
+
+          {/* Trending -- real cross-source clustering re-sort (computeSourceDiversity),
+              not a hidden black-box ranking. */}
+          <button
+            type="button"
+            onClick={() => setSortMode((m) => (m === 'trending' ? 'latest' : 'trending'))}
+            title="Sort by real cross-source coverage"
+            className={`flex items-center gap-1 rounded border px-2.5 py-1.5 text-[0.55rem] transition-colors ${
+              sortMode === 'trending'
+                ? 'border-gold bg-gold/15 text-gold'
+                : 'border-border bg-secondary/30 text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Flame className="h-3 w-3" /> Trending
+          </button>
+
+          {/* Saved -- real bookmarks (localStorage), independent of the
+              current category/search filter. */}
+          <button
+            type="button"
+            onClick={() => { setShowSaved((v) => !v); setShowForYou(false) }}
+            className={`flex items-center gap-1 rounded border px-2.5 py-1.5 text-[0.55rem] transition-colors ${
+              showSaved
+                ? 'border-primary bg-primary/15 text-primary'
+                : 'border-border bg-secondary/30 text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {showSaved ? <BookmarkCheck className="h-3 w-3" /> : <Bookmark className="h-3 w-3" />}
+            Saved {bookmarks.items.length > 0 && `(${bookmarks.items.length})`}
+          </button>
+
+          {/* Play Briefing -- real auto-read/autoplay queue through
+              whatever's currently on screen (see the briefing effect
+              above): opens each item, dwells for its real reading-time
+              estimate (or the real 3-minute video preview window), then
+              auto-advances. */}
+          <button
+            type="button"
+            onClick={() => (briefingQueue ? stopBriefing() : startBriefing())}
+            disabled={!briefingQueue && items.length === 0}
+            className={`flex items-center gap-1 rounded border px-2.5 py-1.5 text-[0.55rem] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+              briefingQueue
+                ? 'border-destructive bg-destructive/15 text-destructive'
+                : 'border-primary bg-primary/15 text-primary hover:bg-primary/25'
+            }`}
+          >
+            {briefingQueue ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+            {briefingQueue ? 'Stop Briefing' : 'Play Briefing'}
+          </button>
+
           <button
             type="button"
             onClick={onClose}
@@ -325,61 +698,102 @@ export function KnowledgePanel({
         </div>
       </div>
 
+      {briefingQueue && spotlight && (
+        <div className="flex items-center gap-2 border-b border-border/60 bg-primary/5 px-3 py-1.5 text-[0.55rem]">
+          <Radio className="h-3 w-3 shrink-0 animate-pulse text-primary" />
+          <span className="text-muted-foreground">Now playing ({briefingIndexRef.current + 1}/{briefingQueue.length}):</span>
+          <span className="truncate text-foreground">{spotlight.title}</span>
+          <button type="button" onClick={skipBriefing} className="ml-auto flex shrink-0 items-center gap-1 rounded border border-border px-2 py-0.5 text-muted-foreground hover:text-foreground">
+            <SkipForward className="h-3 w-3" /> Skip
+          </button>
+        </div>
+      )}
+
       <EconomicCalendarStrip />
 
-      {/* domain rail */}
-      <div className="flex items-center gap-1.5 overflow-x-auto border-b border-border/60 p-2">
-        {CATS.map(({ key, label, icon: Icon }) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => {
-              setCat(key)
-              setQuery('')
-              setActiveTopic('')
-            }}
-            className={`flex shrink-0 items-center gap-1.5 rounded border px-2.5 py-1.5 text-[0.55rem] transition-colors ${
-              cat === key
-                ? 'border-primary bg-primary/15 text-primary'
-                : 'border-border bg-secondary/20 text-muted-foreground hover:border-primary/50 hover:text-foreground'
-            }`}
-          >
-            <Icon className="h-3.5 w-3.5" />
-            {label}
-          </button>
-        ))}
-      </div>
+      {/* domain rail + search -- both apply to the live feed, not to Saved
+          or For You (a bookmark list has no "category", and For You is
+          driven by follows, not category selection), so both are hidden
+          in those views rather than shown doing nothing. */}
+      {!showSaved && !showForYou && (
+        <>
+          <div className="flex items-center gap-1.5 overflow-x-auto border-b border-border/60 p-2">
+            {CATS.map(({ key, label, icon: Icon }) => (
+              <div key={key} className="group relative shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setCat(key)
+                  setQuery('')
+                  setActiveTopic('')
+                }}
+                className={`flex shrink-0 items-center gap-1.5 rounded border px-2.5 py-1.5 pr-6 text-[0.55rem] transition-colors ${
+                  cat === key
+                    ? 'border-primary bg-primary/15 text-primary'
+                    : 'border-border bg-secondary/20 text-muted-foreground hover:border-primary/50 hover:text-foreground'
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+              </button>
+              <button
+                type="button"
+                onClick={() => follows.toggleCategory(key)}
+                title={follows.isCategoryFollowed(key) ? `Unfollow ${label}` : `Follow ${label}`}
+                className={`absolute right-1 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded-full transition-opacity ${
+                  follows.isCategoryFollowed(key) ? 'text-gold opacity-100' : 'text-muted-foreground opacity-0 group-hover:opacity-100'
+                }`}
+              >
+                <Star className={cn('h-3 w-3', follows.isCategoryFollowed(key) && 'fill-gold')} />
+              </button>
+              </div>
+            ))}
+          </div>
 
-      {/* search */}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          setActiveTopic(query.trim())
-        }}
-        className="flex items-center gap-2 border-b border-border/60 p-2"
-      >
-        <Search className="ml-1 h-3.5 w-3.5 text-muted-foreground" />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={`Search ${activeLabel.toLowerCase()} — e.g. ${
-            cat === 'finance' ? 'Nvidia, CPI, oil' : 'a topic or keyword'
-          }`}
-          className="h-8 flex-1 rounded border border-border bg-background/60 px-2.5 text-[0.6rem] text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/60"
-        />
-        {activeTopic && (
-          <button
-            type="button"
-            onClick={() => {
-              setQuery('')
-              setActiveTopic('')
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              setActiveTopic(query.trim())
             }}
-            className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground"
+            className="flex items-center gap-2 border-b border-border/60 p-2"
           >
-            Top stories
-          </button>
-        )}
-      </form>
+            <Search className="ml-1 h-3.5 w-3.5 text-muted-foreground" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={`Search ${activeLabel.toLowerCase()} — e.g. ${
+                cat === 'finance' ? 'Nvidia, CPI, oil' : 'a topic or keyword'
+              }`}
+              className="h-8 flex-1 rounded border border-border bg-background/60 px-2.5 text-[0.6rem] text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/60"
+            />
+            {activeTopic && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => follows.toggleTopic(activeTopic)}
+                  title={follows.isTopicFollowed(activeTopic) ? `Unfollow "${activeTopic}"` : `Follow "${activeTopic}"`}
+                  className={`flex items-center gap-1 rounded border px-2 py-1 text-[0.5rem] transition-colors ${
+                    follows.isTopicFollowed(activeTopic) ? 'border-gold bg-gold/10 text-gold' : 'border-border text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  <Star className={cn('h-2.5 w-2.5', follows.isTopicFollowed(activeTopic) && 'fill-gold')} />
+                  {follows.isTopicFollowed(activeTopic) ? 'Following' : 'Follow'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuery('')
+                    setActiveTopic('')
+                  }}
+                  className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground hover:text-foreground"
+                >
+                  Top stories
+                </button>
+              </>
+            )}
+          </form>
+        </>
+      )}
 
       {/* body */}
       <div className="relative flex-1 overflow-y-auto p-3">
@@ -404,130 +818,81 @@ export function KnowledgePanel({
           </p>
         )}
 
-        {!isLoading && viewMode === 'list' && items.length > 0 && (
-          <div className="flex flex-col divide-y divide-border/50 border-t border-border/50">
-            {items.map((it, i) => (
-              <button
+        {!isLoading && viewMode === 'cards' && items.length > 0 && (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {items.map((it) => (
+              <NewsCard
                 key={it.id}
-                type="button"
-                onClick={() => setSpotlight(it)}
-                className="group flex items-start gap-3 py-3 text-left transition-colors hover:bg-secondary/20"
-              >
-                <span className="mt-0.5 w-6 shrink-0 text-right font-display text-[0.7rem] text-muted-foreground/50">
-                  {String(i + 1).padStart(2, '0')}
-                </span>
-                {(it.image || feed === 'videos') && (
-                  <div className="relative h-14 w-20 shrink-0 overflow-hidden rounded bg-background/60">
-                    {it.image && (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={it.image || '/placeholder.svg'}
-                        alt=""
-                        className="h-full w-full object-cover opacity-90 transition-transform duration-500 group-hover:scale-105"
-                      />
-                    )}
-                    {feed === 'videos' && (
-                      <span className="absolute inset-0 flex items-center justify-center">
-                        <PlayCircle className="h-5 w-5 text-primary drop-shadow-[0_0_8px_var(--hud)]" />
-                      </span>
-                    )}
-                  </div>
-                )}
-                <div className="flex min-w-0 flex-1 flex-col gap-1">
-                  <div className="flex items-center gap-2 text-[0.5rem]">
-                    <span className="text-primary">{it.source}</span>
-                    <span className="text-muted-foreground">{timeAgo(it.published)}</span>
-                  </div>
-                  <p className="line-clamp-2 text-[0.7rem] leading-snug text-foreground transition-colors group-hover:text-primary">
-                    {it.title}
-                  </p>
-                  {it.summary && feed === 'articles' && (
-                    <p className="line-clamp-1 text-[0.56rem] leading-relaxed text-muted-foreground">
-                      {it.summary}
-                    </p>
-                  )}
-                </div>
-              </button>
+                item={it}
+                feed={feed}
+                saved={bookmarks.isSaved(it.id)}
+                isSeen={seen.has(it.id)}
+                sourceCount={diversity.get(it.id)}
+                onOpen={() => openStory(it)}
+                onToggleSave={() => bookmarks.toggle(it)}
+              />
             ))}
           </div>
         )}
-        
-        {!isLoading && viewMode === 'galaxy' && items.length > 0 && (
-          <div className="relative h-full w-full">
-            {/* Galaxy background */}
-            <div
-              className="absolute inset-0 -z-10"
-              style={{
-                background:
-                  'radial-gradient(circle at center, transparent 0%, oklch(0.1 0 0 / 0.8) 70%, oklch(0.05 0 0 / 0.9) 100%)',
-              }}
-            />
 
-            {(() => {
-              // Golden-angle spiral scatter -- deterministic (same items always
-              // land in the same spots), not a fabricated data layout, just a
-              // real algorithm for spreading N nodes without overlap.
-              const GOLDEN_ANGLE = 137.508 * (Math.PI / 180)
-              const n = items.length
-              const nodes = items.map((item, i) => {
-                const angle = i * GOLDEN_ANGLE
-                const radius = 6 + (Math.sqrt(i + 1) / Math.sqrt(n)) * 40
-                return {
-                  item,
-                  x: 50 + radius * Math.cos(angle),
-                  y: 50 + radius * Math.sin(angle),
-                }
-              })
-
-              return (
-                <>
-                  {/* Constellation lines -- real SVG segments between
-                      consecutive nodes in spiral order, not overlapping divs. */}
-                  <svg
-                    viewBox="0 0 100 100"
-                    preserveAspectRatio="none"
-                    className="pointer-events-none absolute inset-0 h-full w-full"
-                  >
-                    {nodes.slice(1).map((n0, i) => {
-                      const prev = nodes[i]
-                      return (
-                        <line
-                          key={`line-${n0.item.id}`}
-                          x1={prev.x}
-                          y1={prev.y}
-                          x2={n0.x}
-                          y2={n0.y}
-                          stroke="oklch(0.6 0.15 240 / 0.35)"
-                          strokeWidth={0.15}
-                        />
-                      )
-                    })}
-                  </svg>
-
-                  {/* Knowledge nodes (stars) */}
-                  {nodes.map(({ item, x, y }) => (
-                    <button
-                      key={`star-${item.id}`}
-                      type="button"
-                      onClick={() => setSpotlight(item)}
-                      title={item.title}
-                      className="group absolute flex flex-col items-center"
-                      style={{ left: `${x}%`, top: `${y}%`, transform: 'translate(-50%, -50%)' }}
-                    >
-                      <span className="flex h-8 w-8 items-center justify-center rounded-full border border-primary/40 bg-primary/15 text-primary shadow-[0_0_10px_rgba(56,211,235,0.35)] transition-all duration-300 group-hover:scale-125 group-hover:bg-primary/30">
-                        <span className="h-1.5 w-1.5 rounded-full bg-primary" />
-                      </span>
-                      <span className="mt-1 max-w-[6rem] truncate rounded bg-background/80 px-1.5 py-0.5 text-[0.45rem] text-primary opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100">
-                        {item.title}
-                      </span>
-                    </button>
-                  ))}
-                </>
-              )
-            })()}
+        {!isLoading && viewMode === 'sources' && items.length > 0 && (
+          <div className="flex flex-col gap-4">
+            {/* Real grouping by actual outlet -- replaces a "Galaxy" view
+                whose star positions were an arbitrary spiral with no
+                relation to the data. This groups the same real items by a
+                genuine attribute (who reported it), so you can see how
+                coverage actually differs by source. */}
+            {Object.entries(
+              items.reduce<Record<string, NewsItem[]>>((acc, it) => {
+                (acc[it.source] ??= []).push(it)
+                return acc
+              }, {}),
+            )
+              .sort((a, b) => b[1].length - a[1].length)
+              .map(([source, group]) => (
+                <div key={source}>
+                  <div className="mb-1.5 flex items-center gap-2 text-[0.55rem] tracking-[0.15em] text-primary">
+                    <Radio className="h-3 w-3" /> {source.toUpperCase()}
+                    <span className="text-muted-foreground">({group.length})</span>
+                  </div>
+                  <div className="flex flex-col divide-y divide-border/40 border-t border-border/40">
+                    {group.map((it) => (
+                      <button
+                        key={it.id}
+                        type="button"
+                        onClick={() => openStory(it)}
+                        className={`group flex items-start gap-3 py-2.5 text-left transition-colors hover:bg-secondary/20 ${seen.has(it.id) ? 'opacity-60' : ''}`}
+                      >
+                        {(it.image || feed === 'videos') && (
+                          <div className="relative h-12 w-16 shrink-0 overflow-hidden rounded bg-background/60">
+                            {it.image && (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img src={it.image} alt="" className="h-full w-full object-cover opacity-90" />
+                            )}
+                            {feed === 'videos' && (
+                              <span className="absolute inset-0 flex items-center justify-center">
+                                <PlayCircle className="h-4 w-4 text-primary" />
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <div className="flex items-center gap-1.5 text-[0.48rem] text-muted-foreground">
+                            {seen.has(it.id) && <CheckCircle2 className="h-2.5 w-2.5 text-primary/70" />}
+                            {timeAgo(it.published)}
+                          </div>
+                          <p className="line-clamp-2 text-[0.65rem] leading-snug text-foreground transition-colors group-hover:text-primary">
+                            {it.title}
+                          </p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
           </div>
         )}
-        
+
         {!isLoading && viewMode === 'timeline' && items.length > 0 && (
           <div className="relative mx-auto max-w-2xl py-1">
             {/* Timeline axis — a real hairline running the full flowed height
@@ -546,14 +911,15 @@ export function KnowledgePanel({
                   const body = (
                     <button
                       type="button"
-                      onClick={() => setSpotlight(item)}
-                      className={`group flex flex-col gap-1 rounded border border-border/50 bg-secondary/20 px-2.5 py-2 text-left transition-colors hover:border-primary/50 ${isLeft ? 'items-end text-right' : 'items-start text-left'}`}
+                      onClick={() => openStory(item)}
+                      className={`group flex flex-col gap-1 rounded border border-border/50 bg-secondary/20 px-2.5 py-2 text-left transition-colors hover:border-primary/50 ${isLeft ? 'items-end text-right' : 'items-start text-left'} ${seen.has(item.id) ? 'opacity-60' : ''}`}
                     >
                       <div className="flex items-center gap-2 text-[0.5rem]">
                         <span className="text-primary">{item.source}</span>
                         <span className="text-muted-foreground">
                           {new Date(item.published || 0).toLocaleDateString()}
                         </span>
+                        {seen.has(item.id) && <CheckCircle2 className="h-2.5 w-2.5 text-primary/70" />}
                       </div>
                       <div className="text-[0.6rem] leading-snug text-foreground transition-colors group-hover:text-primary">
                         {item.title}
@@ -586,9 +952,100 @@ export function KnowledgePanel({
       <StoryDialog
         item={spotlight}
         isVideo={feed === 'videos'}
-        onClose={() => setSpotlight(null)}
+        onClose={() => (briefingQueue ? stopBriefing() : setSpotlight(null))}
         onReadout={onReadout}
       />
+    </div>
+  )
+}
+
+/** Magazine-style card -- the default view. Bigger imagery and one story
+ * per card read better scanned than a dense list (2026 news-app UX
+ * consensus favors card/tile layouts over plain RSS-style rows). Every
+ * badge on it is real: reading-time is derived from the actual summary
+ * word count, "seen" reflects stories you've actually opened, the
+ * source-count badge comes from real title-similarity clustering across
+ * the current result set, and the bookmark star is a real, persisted
+ * user action. */
+function NewsCard({
+  item,
+  feed,
+  saved,
+  isSeen,
+  sourceCount,
+  onOpen,
+  onToggleSave,
+}: {
+  item: NewsItem
+  feed: Media
+  saved: boolean
+  isSeen: boolean
+  sourceCount: number | undefined
+  onOpen: () => void
+  onToggleSave: () => void
+}) {
+  return (
+    <div
+      className={`group relative flex flex-col overflow-hidden rounded border border-border/60 bg-secondary/10 transition-colors hover:border-primary/50 ${isSeen ? 'opacity-70' : ''}`}
+    >
+      <button type="button" onClick={onOpen} className="flex flex-1 flex-col text-left">
+        <div className="relative aspect-video w-full shrink-0 overflow-hidden bg-background/60">
+          {item.image ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={item.image}
+              alt=""
+              className="h-full w-full object-cover opacity-90 transition-transform duration-500 group-hover:scale-105"
+            />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-[0.5rem] tracking-[0.2em] text-muted-foreground/60">
+              NO IMAGE
+            </div>
+          )}
+          {feed === 'videos' && (
+            <span className="absolute inset-0 flex items-center justify-center">
+              <PlayCircle className="h-8 w-8 text-primary drop-shadow-[0_0_10px_var(--hud)]" />
+            </span>
+          )}
+          {isSeen && (
+            <span className="absolute left-1.5 top-1.5 flex items-center gap-1 rounded bg-background/80 px-1.5 py-0.5 text-[0.42rem] text-primary backdrop-blur-sm">
+              <CheckCircle2 className="h-2.5 w-2.5" /> Read
+            </span>
+          )}
+          {sourceCount != null && sourceCount > 1 && (
+            <span className="absolute right-1.5 top-1.5 rounded bg-background/80 px-1.5 py-0.5 text-[0.42rem] text-accent backdrop-blur-sm">
+              {sourceCount} sources
+            </span>
+          )}
+        </div>
+        <div className="flex flex-1 flex-col gap-1 p-2.5">
+          <div className="flex items-center gap-2 text-[0.5rem]">
+            <span className="text-primary">{item.source}</span>
+            <span className="text-muted-foreground">{timeAgo(item.published)}</span>
+            {feed === 'articles' && item.summary && (
+              <span className="text-muted-foreground/70">· {estimateReadingTime(item.summary)} min read</span>
+            )}
+          </div>
+          <p className="line-clamp-2 text-[0.72rem] leading-snug text-foreground transition-colors group-hover:text-primary">
+            {item.title}
+          </p>
+          {item.summary && feed === 'articles' && (
+            <p className="line-clamp-2 text-[0.58rem] leading-relaxed text-muted-foreground">
+              {item.summary}
+            </p>
+          )}
+        </div>
+      </button>
+      <button
+        type="button"
+        onClick={onToggleSave}
+        title={saved ? 'Remove from Saved' : 'Save for later'}
+        className={`absolute bottom-2 right-2 flex h-6 w-6 items-center justify-center rounded-full backdrop-blur-sm transition-colors ${
+          saved ? 'bg-primary/25 text-primary' : 'bg-background/70 text-muted-foreground hover:text-primary'
+        }`}
+      >
+        {saved ? <BookmarkCheck className="h-3 w-3" /> : <Bookmark className="h-3 w-3" />}
+      </button>
     </div>
   )
 }

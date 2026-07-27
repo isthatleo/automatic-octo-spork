@@ -1,8 +1,7 @@
 """Imports every channel module so its module-level
 `register_channel_if_configured(...)` call runs -- same explicit-import
-convention as providers/bootstrap.py. Empty for now (no channel vendor
-modules exist yet); channels/{ntfy,home_assistant,...}.py (Batch 4) each get
-added to _CHANNEL_MODULES as they're built.
+convention as providers/bootstrap.py. Each new channel module gets added
+to _CHANNEL_MODULES here as it's built.
 """
 from __future__ import annotations
 
@@ -18,6 +17,8 @@ _CHANNEL_MODULES: list[str] = [
     "channels.clickclack",
     "channels.slack",
     "channels.voice_call",
+    "channels.discord",
+    "channels.whatsapp",
 ]
 
 

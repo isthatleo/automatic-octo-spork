@@ -65,18 +65,6 @@ export interface Place {
   lon: number
   country?: string
   timezone?: string
-  historicalEvents?: HistoricalEvent[]
-}
-
-export interface HistoricalEvent {
-  id: string
-  title: string
-  description: string
-  date: string
-  year: number
-  significance: 'high' | 'medium' | 'low'
-  category: 'conflict' | 'discovery' | 'culture' | 'politics' | 'science' | 'technology'
-  imageUrl?: string
 }
 
 export interface ProjectInfo {

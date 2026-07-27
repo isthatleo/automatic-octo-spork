@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { BootSequence } from '@/components/nancy/boot-sequence'
 import { MapPanel } from '@/components/nancy/map-panel'
 import { KnowledgePanel } from '@/components/nancy/knowledge-panel'
+import { TradingDeskPanel } from '@/components/nancy/trading-desk'
 import {
   CorePanel,
   OverviewPanel,
@@ -34,7 +35,7 @@ import {
   Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, Newspaper, Kanban, X, Mic, MicOff,
   Keyboard, ChevronDown, MessageSquare, PanelLeftClose, PanelLeftOpen, Send, Server, Clock3,
   FileClock, Sparkles, Cpu, Key, Settings2, BarChart3, Link2, User, PlugZap, Wrench, Webhook, BookOpen,
-  StickyNote, Award, Palette,
+  StickyNote, Award, Palette, CandlestickChart,
 } from 'lucide-react'
 
 import { DocsHelpPanel } from '@/components/nancy/docs-panel'
@@ -48,6 +49,7 @@ const NAV_GROUPS: { group: string; items: { key: PanelKey; label: string; icon: 
     { key: 'overview', label: 'Overview', icon: LayoutDashboard },
     { key: 'map', label: 'Recon', icon: Globe2 },
     { key: 'news', label: 'Newsfeed', icon: Newspaper },
+    { key: 'market', label: 'Trading Desk', icon: CandlestickChart },
     { key: 'channels', label: 'Channels', icon: Send },
     { key: 'instances', label: 'Instances', icon: Server },
     { key: 'sessions', label: 'Sessions', icon: Clock3 },
@@ -672,6 +674,7 @@ export default function Page() {
             panel={panel!}
             place={place}
             mapLoading={mapLoading}
+            onLocate={locate}
             launched={launched}
             onLaunch={doLaunch}
             onClose={closeWorkspace}
@@ -848,6 +851,7 @@ function WorkspaceLayout({
   panel,
   place,
   mapLoading,
+  onLocate,
   launched,
   onLaunch,
   onClose,
@@ -864,6 +868,7 @@ function WorkspaceLayout({
   panel: PanelKey
   place: Place | null
   mapLoading: boolean
+  onLocate: (query: string) => void
   launched: string | null
   onLaunch: (t: string) => void
   onClose: () => void
@@ -882,6 +887,7 @@ function WorkspaceLayout({
   const [collapsed, setCollapsed] = useState(false)
   const TITLE: Partial<Record<PanelKey, string>> = {
     overview: 'Command Overview',
+    market: 'Trading Desk',
     core: 'Neural Core',
     agents: 'Mission Control',
     system: 'Command Layer',
@@ -991,7 +997,7 @@ function WorkspaceLayout({
         <div className="relative flex-1 overflow-hidden">
           {isMap ? (
             <div className="absolute inset-0">
-              <MapPanel place={place} loading={mapLoading} />
+              <MapPanel place={place} loading={mapLoading} onLocate={onLocate} />
             </div>
           ) : isNews ? (
             <div className="absolute inset-0 p-3 md:p-4">
@@ -1007,7 +1013,8 @@ function WorkspaceLayout({
             </div>
           ) : (
             <div className="absolute inset-0 overflow-y-auto px-4 py-4 pb-10 md:px-8 md:py-6">
-              {panel === 'overview' && <OverviewPanel />}
+              {panel === 'overview' && <OverviewPanel onNavigate={onNav} />}
+              {panel === 'market' && <TradingDeskPanel />}
               {panel === 'core' && <CorePanel />}
               {panel === 'agents' && <MissionControlPanel />}
               {panel === 'system' && <SystemPanel onLaunch={onLaunch} launched={launched} />}

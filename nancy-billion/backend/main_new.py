@@ -154,6 +154,7 @@ load_all_providers()
 load_all_channels()
 import computer_use_tool
 from computer_use_tool import COMPUTER_USE_TOOLS, ACTION_TOOLS as COMPUTER_ACTION_TOOLS
+import screen_context
 from tts import tts_backend
 from neu_tts import NeuTTSBackend, USER_REF_WAV, USER_REF_TXT
 from tools import get_tools
@@ -568,7 +569,14 @@ def _live_system_context() -> str:
         parts.append(f"success_rate={stats.get('success_rate')}")
     except Exception:
         pass
-    return " ".join(parts)
+    text = " ".join(parts)
+    # Real ambient screen awareness (opt-in, see screen_context.py) --
+    # contributes nothing unless the user has actually turned it on and a
+    # real capture has succeeded.
+    screen_line = screen_context.context_line()
+    if screen_line:
+        text += "\n" + screen_line
+    return text
 
 
 def _live_context_bridge_context() -> str:
@@ -1896,6 +1904,29 @@ async def get_watched_pairs():
     }
 
 
+@app.get("/trading/quotes")
+async def get_trading_quotes(pairs: str = ""):
+    """Real live quotes (forex_engine.ForexDataAggregator -- Frankfurter/ECB
+    for fiat pairs, Yahoo COMEX futures for XAU/XAG) for either an explicit
+    comma-separated `pairs` query param or, when omitted, the user's real
+    watched/relevant pairs -- the same list the greeting/alerts use. Powers
+    a live quotes ticker without requiring the caller to already know what
+    to ask for. A pair that fails to fetch is simply omitted, never
+    backfilled with a stale or invented price."""
+    requested = [p.strip().upper() for p in pairs.split(",") if p.strip()] or trading_manager.get_relevant_pairs()
+    results = await asyncio.gather(*(forex_aggregator.get_price(p) for p in requested), return_exceptions=True)
+    quotes = []
+    for pair, snap in zip(requested, results):
+        if isinstance(snap, Exception) or snap is None:
+            continue
+        quotes.append({
+            "pair": snap.pair, "price": snap.price, "bid": snap.bid, "ask": snap.ask,
+            "change_24h": snap.change_24h, "high_24h": snap.high_24h, "low_24h": snap.low_24h,
+            "timestamp": snap.timestamp,
+        })
+    return {"success": True, "quotes": quotes}
+
+
 class WatchedPairsRequest(BaseModel):
     pairs: List[str]
 
@@ -2370,6 +2401,40 @@ async def list_economic_calendar_events():
     }
 
 
+@app.get("/screen-context/status")
+async def screen_context_status():
+    """Real ambient screen-awareness state -- whether it's on, the last
+    real captured summary (if any), and whether vision (ANTHROPIC_API_KEY)
+    is even configured. Off and empty by default; nothing here is ever
+    fabricated -- see screen_context.py."""
+    return {"success": True, **screen_context.status()}
+
+
+class ScreenContextToggleRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/screen-context/toggle", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def screen_context_toggle(req: ScreenContextToggleRequest):
+    """User-controlled opt-in/out for ambient screen awareness. Turning it
+    off immediately clears any cached summary -- no stale screen content
+    lingers in Nancy's context after opting out."""
+    screen_context.set_enabled(req.enabled)
+    if req.enabled:
+        # Capture immediately on enable rather than waiting up to 45s for
+        # the background loop's next tick, so the toggle feels responsive.
+        asyncio.create_task(screen_context.capture_now())
+    return {"success": True, **screen_context.status()}
+
+
+@app.post("/screen-context/capture-now", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def screen_context_capture_now():
+    """On-demand real capture + describe, independent of the background
+    loop's cadence -- e.g. a manual 'refresh' button in the UI."""
+    result = await screen_context.capture_now()
+    return result
+
+
 @app.get("/webhooks")
 async def list_webhooks():
     """Real, persisted outbound webhook subscriptions (data/webhooks.json) --
@@ -2683,6 +2748,81 @@ async def telegram_status():
     see telegram_bot.py. TelegramNotifier's status is a plain attribute (not
     a property doing I/O), so no executor offload is needed here."""
     return {"success": True, **telegram_notifier.status}
+
+
+# Real definitions for every channel this backend actually knows how to
+# speak (channels/bootstrap.py's _CHANNEL_MODULES) -- used so /channels/status
+# can honestly report *why* an unconfigured channel isn't live (which real
+# env vars it needs) instead of just omitting it, the way the old frontend
+# Discord/WhatsApp placeholders pretended channels existed that were never
+# actually built.
+CHANNEL_DEFINITIONS: List[Dict[str, Any]] = [
+    {"key": "ntfy", "label": "ntfy", "description": "Free push notifications to your phone or desktop via ntfy.sh (or a self-hosted server).", "required_env": ["NTFY_TOPIC"], "two_way": False},
+    {"key": "home_assistant", "label": "Home Assistant", "description": "Notifies and calls services on a real Home Assistant instance on your network.", "required_env": ["HOME_ASSISTANT_URL", "HOME_ASSISTANT_TOKEN"], "two_way": False},
+    {"key": "photon", "label": "iMessage (Photon)", "description": "Real iMessage delivery via a Photon sidecar process running on a Mac -- this IS the iMessage integration.", "required_env": ["PHOTON_SIDECAR_URL", "PHOTON_SHARED_SECRET"], "two_way": True},
+    {"key": "reef", "label": "Reef", "description": "Encrypted agent-to-agent messaging over the Reef network.", "required_env": ["REEF_API_KEY", "REEF_ENDPOINT", "REEF_PEER_ID"], "two_way": True},
+    {"key": "clickclack", "label": "ClickClack", "description": "Messaging via the ClickClack chat platform.", "required_env": ["CLICKCLACK_API_KEY"], "two_way": False},
+    {"key": "slack", "label": "Slack", "description": "Posts to a Slack channel via a bot token.", "required_env": ["SLACK_BOT_TOKEN"], "two_way": True},
+    {"key": "voice_call", "label": "Voice Call", "description": "Real outbound phone calls via Twilio.", "required_env": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"], "two_way": False},
+    {"key": "discord", "label": "Discord", "description": "Posts to a Discord channel via a real bot token (Discord's REST API).", "required_env": ["DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID"], "two_way": False},
+    {"key": "whatsapp", "label": "WhatsApp", "description": "Real WhatsApp messages via Meta's WhatsApp Business Cloud API.", "required_env": ["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"], "two_way": False},
+]
+
+
+@app.get("/channels/status")
+async def channels_status():
+    """Real status for every channel this backend can speak: Telegram
+    (predates channels/registry.py, checked via telegram_notifier) plus
+    every channel in the real registry. A channel is only 'configured' if
+    it actually registered (its own is_configured() passed) -- otherwise
+    it's reported honestly as not configured, with the real env vars it
+    needs, never a fabricated entry for an integration that doesn't exist."""
+    from channels.registry import list_channels
+    registered = list_channels()
+
+    channels = [{
+        "key": "telegram",
+        "label": "Telegram",
+        "description": "Two-way chat, the approval-request gate, and proactive alerts (economic calendar, daily briefing).",
+        "configured": bool(telegram_notifier.status.get("available")),
+        "detail": telegram_notifier.status.get("error"),
+        "two_way": True,
+        "required_env": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+    }]
+    for defn in CHANNEL_DEFINITIONS:
+        channels.append({
+            "key": defn["key"],
+            "label": defn["label"],
+            "description": defn["description"],
+            "configured": defn["key"] in registered,
+            "detail": None,
+            "two_way": defn["two_way"],
+            "required_env": defn["required_env"],
+        })
+    return {"success": True, "channels": channels}
+
+
+class ChannelTestRequest(BaseModel):
+    message: str = "Test message from Nancy's Signal Board."
+
+
+@app.post("/channels/{name}/test", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def channel_test(name: str, req: ChannelTestRequest):
+    """Send a real test message through a real, currently-configured
+    channel. 404 if it isn't registered -- never pretends to send through
+    something that was never actually set up."""
+    if name == "telegram":
+        if not telegram_notifier.status.get("available"):
+            raise HTTPException(status_code=404, detail="Telegram is not configured")
+        await telegram_notifier.send(req.message)
+        return {"success": True}
+
+    from channels.registry import get_channel
+    channel = get_channel(name)
+    if channel is None:
+        raise HTTPException(status_code=404, detail=f"Channel {name!r} is not configured")
+    ok = await channel.send(req.message)
+    return {"success": ok}
 
 
 @app.post("/telegram/pair/start")
@@ -3720,6 +3860,7 @@ async def startup_event():
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_cron_execution_loop())
     asyncio.create_task(_economic_calendar_loop())
+    asyncio.create_task(_screen_context_loop())
     asyncio.create_task(_prewarm_tts())
     asyncio.create_task(_prewarm_memory_embeddings())
     asyncio.create_task(mcp_manager.connect_all())
@@ -4002,6 +4143,21 @@ async def _economic_calendar_loop() -> None:
         except Exception:
             logger.exception("Economic calendar loop tick failed")
         await asyncio.sleep(economic_calendar.next_poll_interval_s())
+
+
+async def _screen_context_loop() -> None:
+    """Real ambient screen awareness -- see screen_context.py. A no-op tick
+    (fast-polled, cheap) unless the user has actually opted in via
+    POST /screen-context/toggle; while on, captures + describes the real
+    screen every ~45s so Nancy has current context without being asked to
+    look first."""
+    while True:
+        try:
+            if screen_context.is_enabled():
+                await screen_context.capture_now()
+        except Exception:
+            logger.exception("Screen context loop tick failed")
+        await asyncio.sleep(screen_context.next_tick_interval_s())
 
 
 async def _init_agents():

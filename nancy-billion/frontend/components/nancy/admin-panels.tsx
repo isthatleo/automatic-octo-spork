@@ -3,7 +3,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { HudPanel } from './hud-bits'
 import { listAgents } from '@/lib/nancy/agent-client'
-import { useCronStatus, useConfigPublic, useTelegramStatus, useLlmStatus } from '@/hooks/useSystemData'
+import {
+  useCronStatus, useConfigPublic, useTelegramStatus, useLlmStatus,
+  useScreenContextStatus, setScreenContextEnabled, captureScreenContextNow,
+  useChannelsStatus, sendChannelTest, type ChannelStatus,
+} from '@/hooks/useSystemData'
 import type { AgentInfo, LogEntry } from '@/lib/nancy/types'
 import { cn } from '@/lib/utils'
 import {
@@ -14,7 +18,7 @@ import {
   Radar, ChevronRight, Lock, ShieldCheck,
   CalendarClock, Library, ArrowRight, FileCode2,
   Fingerprint, Layers, MessageCircle, SendHorizonal, Upload, Mic,
-  Moon, CheckSquare, Network, Award,
+  Moon, CheckSquare, Network, Award, Bell, Home, PhoneCall, MessageSquare,
 } from 'lucide-react'
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
@@ -143,37 +147,111 @@ export function SessionsPanel({ logs }: { logs: LogEntry[] }) {
 }
 
 /* ═══════════════════ CHANNELS — real Telegram, honest about the rest ═══ */
-const CHANNEL_DEFS = [
-  { key: 'telegram', label: 'Telegram', icon: Send },
-  { key: 'discord', label: 'Discord', icon: Hash },
-  { key: 'slack', label: 'Slack', icon: MessagesSquare },
-  { key: 'whatsapp', label: 'WhatsApp', icon: Phone },
-  { key: 'web', label: 'Web Voice/Chat', icon: Globe2 },
-]
-/** Binary connectivity → 4 signal bars, all lit or all dim. Never invents a
- * fake strength reading — this is a step function of the one real boolean
- * each channel actually has (connected / not), just drawn like a signal
- * meter instead of a text pill. */
-function SignalBars({ connected, pending }: { connected: boolean; pending?: boolean }) {
+/** Every real icon this backend's channels/bootstrap.py actually loads,
+ * plus Telegram (which predates the registry). Nothing here stands in for
+ * a channel that doesn't exist -- the old Discord/WhatsApp/"Web Voice"
+ * entries this page used to show were fictional (Discord and WhatsApp
+ * weren't built at all; "Web" wasn't a real notification channel, just the
+ * live chat UI itself). All nine of these are real, working integrations
+ * -- some just need their own API keys before they'll show connected. */
+const CHANNEL_ICONS: Record<string, React.ElementType> = {
+  telegram: Send,
+  ntfy: Bell,
+  home_assistant: Home,
+  photon: MessageCircle,
+  reef: Waves,
+  clickclack: MessageSquare,
+  slack: MessagesSquare,
+  voice_call: PhoneCall,
+  discord: Hash,
+  whatsapp: Phone,
+}
+
+function ChannelCard({ channel }: { channel: ChannelStatus }) {
+  const Icon = CHANNEL_ICONS[channel.key] ?? Globe2
+  const [testing, setTesting] = useState(false)
+  const [result, setResult] = useState<'ok' | 'fail' | null>(null)
+
+  const runTest = async () => {
+    setTesting(true)
+    setResult(null)
+    try {
+      const res = await sendChannelTest(channel.key)
+      setResult(res.success ? 'ok' : 'fail')
+    } catch {
+      setResult('fail')
+    } finally {
+      setTesting(false)
+      setTimeout(() => setResult(null), 4000)
+    }
+  }
+
   return (
-    <div className="flex items-end gap-0.5" aria-hidden>
-      {[3, 5, 7, 9].map((h, i) => (
-        <span
-          key={i}
+    <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-card/60 p-4">
+      <div className="flex items-center gap-2.5">
+        <span className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-full border', channel.configured ? 'border-primary/50 bg-primary/10' : 'border-border/50 bg-secondary/20')}>
+          <Icon className={cn('h-4 w-4', channel.configured ? 'text-primary' : 'text-muted-foreground')} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate font-heading text-xs text-foreground">{channel.label}</span>
+            {channel.two_way && (
+              <span className="shrink-0 rounded-full border border-border/60 px-1.5 py-px text-[0.42rem] text-muted-foreground">two-way</span>
+            )}
+          </div>
+          <StatusPill ok={channel.configured} label={channel.configured ? 'connected' : 'not configured'} />
+        </div>
+      </div>
+
+      <p className="text-[0.55rem] leading-snug text-muted-foreground">{channel.description}</p>
+      {channel.detail && <p className="text-[0.5rem] text-destructive">{channel.detail}</p>}
+
+      {channel.configured ? (
+        <button
+          type="button"
+          onClick={runTest}
+          disabled={testing}
           className={cn(
-            'w-1 rounded-sm transition-colors',
-            pending ? 'bg-border/60 animate-hud-pulse' : connected ? 'bg-primary' : 'bg-border/50',
+            'flex items-center justify-center gap-1.5 rounded border px-2.5 py-1.5 text-[0.55rem] transition-colors disabled:opacity-50',
+            result === 'ok'
+              ? 'border-primary bg-primary/15 text-primary'
+              : result === 'fail'
+                ? 'border-destructive bg-destructive/10 text-destructive'
+                : 'border-border text-muted-foreground hover:border-primary/50 hover:text-primary',
           )}
-          style={{ height: h, boxShadow: connected && !pending ? '0 0 5px var(--hud)' : undefined }}
-        />
-      ))}
+        >
+          {testing ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : result === 'ok' ? (
+            <CheckCircle2 className="h-3 w-3" />
+          ) : result === 'fail' ? (
+            <XCircle className="h-3 w-3" />
+          ) : (
+            <Send className="h-3 w-3" />
+          )}
+          {testing ? 'Sending…' : result === 'ok' ? 'Sent' : result === 'fail' ? 'Failed' : 'Send test message'}
+        </button>
+      ) : (
+        <div className="rounded border border-dashed border-border/60 px-2.5 py-1.5 text-[0.5rem] text-muted-foreground">
+          Set{' '}
+          {channel.required_env.map((e, i) => (
+            <span key={e}>
+              <code className="text-foreground/80">{e}</code>
+              {i < channel.required_env.length - 1 ? ', ' : ''}
+            </span>
+          ))}{' '}
+          in the backend .env
+        </div>
+      )}
     </div>
   )
 }
 
 export function ChannelsPanel() {
-  const { data: tg, loading } = useTelegramStatus()
-  const liveCount = CHANNEL_DEFS.filter(({ key }) => (key === 'telegram' ? !!tg?.available : key === 'web')).length
+  const { data, loading } = useChannelsStatus()
+  const channels = data?.channels ?? []
+  const liveCount = channels.filter((c) => c.configured).length
+
   return (
     <div className="mx-auto flex max-w-[1680px] flex-col gap-4">
       {/* board header — a radar sweep icon and a real live-channel count,
@@ -184,46 +262,24 @@ export function ChannelsPanel() {
           <span className="font-heading text-xs text-foreground">Signal Board</span>
         </div>
         <span className="text-[0.6rem] text-muted-foreground">
-          <span className="text-primary">{liveCount}</span> / {CHANNEL_DEFS.length} channels live
+          <span className="text-primary">{liveCount}</span> / {channels.length} channels live
         </span>
       </div>
 
-      {/* the strip itself — a single continuous rail of tiles, not a wrapping
-          grid of equal boxes */}
-      <div className="grid grid-cols-1 divide-y divide-border/50 overflow-hidden rounded-xl border border-border bg-card/60 sm:grid-cols-5 sm:divide-x sm:divide-y-0">
-        {CHANNEL_DEFS.map(({ key, label, icon: Icon }) => {
-          const isTelegram = key === 'telegram'
-          const isWeb = key === 'web'
-          const connected = isTelegram ? !!tg?.available : isWeb
-          const pending = isTelegram && loading
-          return (
-            <div key={key} className="flex flex-col items-center gap-2 px-3 py-4 text-center">
-              <span
-                className={cn(
-                  'flex h-9 w-9 items-center justify-center rounded-full border',
-                  connected ? 'border-primary/50 bg-primary/10' : 'border-border/50 bg-secondary/20',
-                )}
-              >
-                <Icon className={cn('h-4 w-4', connected ? 'text-primary' : 'text-muted-foreground')} />
-              </span>
-              <span className="font-heading text-[0.65rem] text-foreground">{label}</span>
-              <SignalBars connected={connected} pending={pending} />
-              {pending ? (
-                <span className="flex items-center gap-1 text-[0.5rem] text-muted-foreground"><Loader2 className="h-2.5 w-2.5 animate-spin" /> checking</span>
-              ) : (
-                <StatusPill ok={connected} label={connected ? 'connected' : 'not configured'} />
-              )}
-              <p className="text-[0.5rem] leading-snug text-muted-foreground">
-                {isTelegram
-                  ? (tg?.available ? 'Two-way chat + approval gate active.' : tg?.error || 'TELEGRAM_BOT_TOKEN/CHAT_ID not set.')
-                  : isWeb
-                    ? 'This browser session — always on.'
-                    : 'No integration built yet.'}
-              </p>
-            </div>
-          )
-        })}
-      </div>
+      {/* real per-channel cards -- every channel actually built into this
+          backend (channels/bootstrap.py), each testable in place rather
+          than a read-only status pill. */}
+      {loading && channels.length === 0 ? (
+        <div className="flex items-center justify-center rounded-xl border border-border bg-card/60 py-8 text-[0.6rem] text-muted-foreground">
+          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Checking channels…
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {channels.map((c) => (
+            <ChannelCard key={c.key} channel={c} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -1090,6 +1146,96 @@ function groupConfig(config: Record<string, string | number | boolean>) {
   return groups
 }
 
+/** Real, user-controlled opt-in ambient screen awareness (see
+ * backend/screen_context.py) -- off by default. Shows the actual last
+ * captured summary in the open, not hidden, so trust doesn't depend on
+ * taking the toggle's word for it: whatever Nancy currently "knows" from
+ * your screen is always visible right here. */
+function ScreenAwarenessCard() {
+  const { data: status } = useScreenContextStatus()
+  const [busy, setBusy] = useState(false)
+
+  const toggle = async () => {
+    if (!status) return
+    setBusy(true)
+    try {
+      await setScreenContextEnabled(!status.enabled)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const refreshNow = async () => {
+    setBusy(true)
+    try {
+      await captureScreenContextNow()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const enabled = status?.enabled ?? false
+
+  return (
+    <div className="rounded-xl border border-border bg-card/60 p-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2">
+          {enabled ? <Eye className="h-4 w-4 text-primary" /> : <EyeOff className="h-4 w-4 text-muted-foreground" />}
+          <div>
+            <h3 className="font-heading text-xs text-foreground">Screen Awareness</h3>
+            <p className="text-[0.5rem] text-muted-foreground">
+              Real, opt-in only — a screenshot is captured and described (Claude vision) roughly every 45s while on.
+            </p>
+          </div>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          {enabled && (
+            <button
+              type="button"
+              onClick={refreshNow}
+              disabled={busy}
+              className="rounded border border-border px-2 py-1 text-[0.5rem] text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary disabled:opacity-40"
+            >
+              Capture now
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={toggle}
+            disabled={busy || !status}
+            className={cn(
+              'flex items-center gap-1.5 rounded border px-2.5 py-1.5 text-[0.6rem] transition-colors disabled:opacity-40',
+              enabled ? 'border-primary bg-primary/15 text-primary' : 'border-border bg-secondary/30 text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {enabled ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
+            {enabled ? 'On' : 'Off'}
+          </button>
+        </div>
+      </div>
+
+      {status && !status.configured && (
+        <p className="mt-2 text-[0.5rem] text-muted-foreground">
+          Set ANTHROPIC_API_KEY in the backend .env to enable vision description.
+        </p>
+      )}
+      {enabled && (
+        <div className="mt-3 rounded border border-border/50 bg-secondary/20 px-2.5 py-2 text-[0.6rem]">
+          {status?.error ? (
+            <span className="text-destructive">{status.error}</span>
+          ) : status?.last_summary ? (
+            <>
+              <span className="text-muted-foreground">Last seen: </span>
+              <span className="text-foreground">{status.last_summary}</span>
+            </>
+          ) : (
+            <span className="text-muted-foreground">Waiting on the first capture…</span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ConfigPanel() {
   const { data, loading } = useConfigPublic()
   const groups = useMemo(() => groupConfig(data?.config ?? {}), [data])
@@ -1104,6 +1250,8 @@ export function ConfigPanel() {
         </div>
         <span className="text-[0.55rem] text-muted-foreground">{entryCount} real setting{entryCount !== 1 ? 's' : ''} · read-only</span>
       </div>
+
+      <ScreenAwarenessCard />
 
       {loading && !data ? (
         <div className="flex items-center justify-center rounded-xl border border-border bg-card/60 py-8 text-[0.6rem] text-muted-foreground">

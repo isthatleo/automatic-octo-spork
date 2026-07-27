@@ -1,19 +1,17 @@
 'use client'
 
 import { useEffect, useCallback, useMemo, useRef, useState } from 'react'
+import type { ElementType, ReactNode } from 'react'
 import { ArcReactor, HudPanel, RadialGauge, StatBar, AnimatedNumber } from './hud-bits'
-import { GlobeView } from './globe-view'
-import type { AgentInfo } from '@/lib/nancy/types'
+import type { AgentInfo, PanelKey } from '@/lib/nancy/types'
 import { listAgents, type AgentListResponse } from '@/lib/nancy/agent-client'
-import { useSystemHealth, useTradeHistory, useLlmStatus } from '@/hooks/useSystemData'
+import { useSystemHealth, useTradeHistory, useLlmStatus, useCronStatus, useTelegramStatus } from '@/hooks/useSystemData'
 import {
   Area,
   AreaChart,
   Bar,
   BarChart,
   Cell,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -36,11 +34,17 @@ import {
   RefreshCw,
   Zap,
   Waves,
-  Radio,
   Signal,
   ShieldCheck,
   Eye,
   Thermometer,
+  Brain,
+  Award,
+  FileClock,
+  Send,
+  ArrowRight,
+  TrendingUp,
+  AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -128,6 +132,151 @@ function useSessionUptime() {
   return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
 }
 
+/** Real recent activity -- terminal commands + file writes actually
+ * recorded by evidence_ledger.py, merged with real skill/memory events from
+ * the journey timeline. Replaces the old ActivityTimeline, which just
+ * re-described the same cpu/mem/fleet numbers already shown elsewhere in
+ * this page as fake "log lines" -- this is genuinely new information. */
+function useRecentActivity(intervalMs = 20000) {
+  const [rows, setRows] = useState<Array<{ id: string; tag: string; text: string; tone: 'ok' | 'warn'; at: number }>>([])
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const [evidenceRes, journeyRes] = await Promise.all([
+          fetch('/api/evidence?limit=8').then((r) => r.json()),
+          fetch('/api/memory/journey?limit=6').then((r) => r.json()).catch(() => null),
+        ])
+        if (cancelled) return
+        const merged: Array<{ id: string; tag: string; text: string; tone: 'ok' | 'warn'; at: number }> = []
+        if (evidenceRes?.success) {
+          for (const e of evidenceRes.evidence) {
+            merged.push({
+              id: `ev-${e.id}`, tag: e.kind, tone: e.success ? 'ok' : 'warn',
+              text: e.kind === 'write_file' ? `wrote ${e.action}` : e.kind === 'terminal_command' ? `ran: ${e.action}`.slice(0, 70) : `${e.kind}: ${e.action}`.slice(0, 70),
+              at: e.timestamp * 1000,
+            })
+          }
+        }
+        if (journeyRes?.success) {
+          for (const j of journeyRes.timeline) {
+            merged.push({ id: `jr-${j.timestamp}`, tag: j.kind, tone: 'ok', text: j.label, at: j.timestamp * 1000 })
+          }
+        }
+        merged.sort((a, b) => b.at - a.at)
+        setRows(merged.slice(0, 8))
+      } catch {
+        // leave existing rows in place on a transient fetch failure
+      }
+    }
+    load()
+    const t = setInterval(load, intervalMs)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [intervalMs])
+  return rows
+}
+
+/** Real per-backend LLM call volume/latency/tokens/inference-speed --
+ * usage_analytics.py, Batch 7 -- surfaced here since it previously had zero
+ * presence on the main dashboard despite being real, live data. */
+function useLlmUsageBrief(intervalMs = 30000) {
+  const [usage, setUsage] = useState<{ overall_calls: number; per_backend: Array<Record<string, unknown>> } | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = () => fetch('/api/usage/llm').then((r) => r.json()).then((json) => { if (!cancelled && json.success) setUsage(json) }).catch(() => {})
+    load()
+    const t = setInterval(load, intervalMs)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [intervalMs])
+  return usage
+}
+
+interface AchievementsBrief {
+  unlocked: number
+  total: number
+  /** Real usage-derived counters already computed by achievements_store.py
+   * (task/command/memory/skill history) -- previously only consumed to
+   * compute the unlocked/total counts above, discarding the rest. Reused
+   * here for the Memory & Growth tile and the header's real uptime figure
+   * instead of fetching the same data twice. */
+  activity: {
+    total_tasks: number
+    failed_tasks: number
+    terminal_commands: number
+    file_writes: number
+    distinct_skills_used: number
+    total_skills: number
+    total_memories: number
+    wiki_pages: number
+    dream_cycles: number
+    uptime_hours: number
+  } | null
+}
+
+/** Real unlocked/total achievement counts + activity breakdown --
+ * achievements_store.py, Batch 7. */
+function useAchievementsBrief(intervalMs = 60000) {
+  const [data, setData] = useState<AchievementsBrief | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = () => fetch('/api/achievements').then((r) => r.json()).then((json) => {
+      if (!cancelled && json.success) {
+        setData({ unlocked: json.unlocked.length, total: json.unlocked.length + json.locked.length, activity: json.activity ?? null })
+      }
+    }).catch(() => {})
+    load()
+    const t = setInterval(load, intervalMs)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [intervalMs])
+  return data
+}
+
+/** Formats a real backend-process-uptime figure (achievements_store.py's
+ * activity.uptime_hours, tracked since the process actually started) --
+ * replaces the client-side "since this browser tab mounted" session timer
+ * with the real thing now that the backend exposes it. */
+function formatUptime(hours: number | null | undefined): string {
+  if (hours == null) return '…'
+  const totalMinutes = Math.round(hours * 60)
+  const d = Math.floor(totalMinutes / 1440)
+  const h = Math.floor((totalMinutes % 1440) / 60)
+  const m = totalMinutes % 60
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
+/** Real relative time to a cron job's next_run timestamp (cron_store.py). */
+function formatRelative(iso: string | undefined): string {
+  if (!iso) return '…'
+  const diffMs = new Date(iso).getTime() - Date.now()
+  if (diffMs <= 0) return 'due now'
+  const mins = Math.round(diffMs / 60000)
+  if (mins < 60) return `in ${mins}m`
+  const hours = Math.round(mins / 60)
+  if (hours < 48) return `in ${hours}h`
+  return `in ${Math.round(hours / 24)}d`
+}
+
+/** Real arm-switch + egress-proxy state -- both are live, actionable safety
+ * surfaces from Batches 1/6 with no visibility anywhere on the main
+ * dashboard until now. */
+function useSafetyBrief(intervalMs = 15000) {
+  const [armed, setArmed] = useState<boolean | null>(null)
+  const [proxyRunning, setProxyRunning] = useState<boolean | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = () => {
+      fetch('/api/safety/status').then((r) => r.json()).then((json) => { if (!cancelled && 'armed' in json) setArmed(json.armed) }).catch(() => {})
+      fetch('/api/egress-proxy/status').then((r) => r.json()).then((json) => { if (!cancelled && 'running' in json) setProxyRunning(json.running) }).catch(() => {})
+    }
+    load()
+    const t = setInterval(load, intervalMs)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [intervalMs])
+  return { armed, proxyRunning }
+}
+
 function HudTooltip({ active, payload, label, unit = '' }: { active?: boolean; payload?: Array<{ name: string; value: number; color?: string }>; label?: string | number; unit?: string }) {
   if (!active || !payload?.length) return null
   return (
@@ -147,137 +296,142 @@ function HudTooltip({ active, payload, label, unit = '' }: { active?: boolean; p
    OVERVIEW — Mission Control
    Big hero arc-reactor, live rings, world telemetry, comms feed.
    ═══════════════════════════════════════════════════════════════ */
-export function OverviewPanel() {
+export function OverviewPanel({ onNavigate }: { onNavigate?: (key: PanelKey) => void } = {}) {
   const health = useSystemHealth()
   const cpu = health.cpu ?? 0
   const mem = health.memory ?? 0
-  const net = health.networkPercent ?? 0
+  const disk = health.disk ?? 0
   const tick = useTick(1200)
   const { agents, stats } = useAgentsBrief()
-  const uptime = useSessionUptime()
   const cores = useCpuCoreCount()
   const telemetryHistory = useMetricHistory({ cpu: health.cpu, mem: health.memory, net: health.networkPercent })
   const successPct = stats ? stats.success_rate * 100 : 100
+  const usage = useLlmUsageBrief()
+  const achievements = useAchievementsBrief()
+  const { armed, proxyRunning } = useSafetyBrief()
+  const { data: llm, loading: llmLoading } = useLlmStatus()
 
-  const fleetOnlinePct = stats && stats.agents_online + stats.agents_offline > 0
-    ? (stats.agents_online / (stats.agents_online + stats.agents_offline)) * 100
-    : 0
+  // Real, honest two-state status -- no fabricated "critical" severity
+  // level without an actual signal to back it. Each alert names the exact
+  // data point that triggered it, so the headline is never a guess.
+  const alerts: string[] = []
+  if (armed) alerts.push('Arm switch is armed — approvals are being bypassed')
+  if (stats && stats.failed_tasks > 0) alerts.push(`${stats.failed_tasks} failed task${stats.failed_tasks === 1 ? '' : 's'} recorded`)
+  if (!llmLoading && !llm) alerts.push('LLM reasoning chain unavailable')
+  const statusOk = alerts.length === 0
 
-  const bigStats = [
-    { label: 'Tasks Run', v: stats?.total_tasks ?? 0, icon: Zap, tone: 'primary' as const },
-    { label: 'Agents',    v: stats?.agents_online ?? 0, icon: Radio, tone: 'accent' as const },
-    { label: 'Failures',  v: stats?.failed_tasks ?? 0, icon: Shield, tone: 'ok' as const },
+  const kpis: { label: string; v: number; suffix?: string }[] = [
+    { label: 'Tasks run', v: stats?.total_tasks ?? 0 },
+    { label: 'Agents online', v: stats?.agents_online ?? 0 },
+    { label: 'Success rate', v: Math.round(successPct), suffix: '%' },
+    { label: 'LLM calls', v: usage?.overall_calls ?? 0 },
+    { label: 'Memories', v: achievements?.activity?.total_memories ?? 0 },
   ]
 
   return (
     <div className="mx-auto flex max-w-[1680px] flex-col gap-4">
-      {/* ── One compact hero band (reactor + headline stats + vitals all in
-          a single row) instead of two stacked hero blocks -- a genuine
-          bento grid follows instead of a fixed two-column [content|rail]
-          split, so this reads as its own composition rather than the same
-          "column of cards" shape repeated with different content. ── */}
-      <div className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-br from-card via-card to-primary/5 p-5">
-        <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-primary/10 blur-3xl" aria-hidden />
-        <div className="relative flex flex-wrap items-center gap-6">
-          <div className="flex items-center gap-3">
-            <ArcReactor size={100} />
-            <div>
-              <div className="font-display text-2xl tracking-tight text-primary">
-                <AnimatedNumber value={successPct} decimals={1} /> <span className="text-sm text-muted-foreground">%</span>
-              </div>
-              <div className="text-[0.55rem] text-muted-foreground">fleet success</div>
-            </div>
-          </div>
-          <div className="h-10 w-px bg-border/50" />
-          <div className="flex items-center gap-1.5 text-[0.62rem] text-muted-foreground">
-            <Activity className="h-3 w-3 text-primary animate-hud-breathe" /> Session {uptime}
-          </div>
-          <div className="ml-auto flex flex-wrap items-center gap-4 text-[0.68rem]">
-            {bigStats.map((s) => (
-              <span key={s.label} className="flex items-center gap-1.5">
-                <s.icon className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="font-display text-base text-foreground"><AnimatedNumber value={s.v} /></span>
-                <span className="text-muted-foreground">{s.label.toLowerCase()}</span>
-              </span>
-            ))}
-          </div>
-          <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-[260px] sm:flex-1">
-            <StatBar label="Neural CPU" value={cpu.toFixed(0)} unit="%" pct={cpu} />
-            <StatBar label="Memory" value={mem.toFixed(0)} unit="%" pct={mem} amber />
-          </div>
+      {/* ── Status bar: the one thing worth glancing at first. A plain
+          colored-state line instead of decorative hero art -- real
+          command-center UIs favor an unambiguous status signal over
+          spectacle (operators stop consciously processing decorative
+          motion within minutes of exposure). Two honest states (nominal /
+          needs attention), each backed by a real, named signal. ── */}
+      <div className="flex flex-col gap-2 rounded-xl border border-border bg-card/60 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full animate-hud-pulse', statusOk ? 'bg-primary' : 'bg-gold')} />
+          <span className="font-heading text-sm text-foreground">
+            {statusOk ? 'All systems nominal' : `${alerts.length} item${alerts.length === 1 ? '' : 's'} need attention`}
+          </span>
+          <span className="text-[0.6rem] text-muted-foreground">· backend uptime {formatUptime(achievements?.activity?.uptime_hours)}</span>
+          <span className="ml-auto flex items-center gap-1.5 text-[0.55rem] text-muted-foreground">
+            <Activity className="h-3 w-3 text-primary animate-hud-breathe" /> live · Δ{tick}
+          </span>
         </div>
+        {!statusOk && (
+          <ul className="flex flex-wrap gap-x-4 gap-y-1 pl-[1.375rem] text-[0.6rem] text-gold">
+            {alerts.map((a) => (
+              <li key={a} className="flex items-center gap-1.5">
+                <AlertTriangle className="h-3 w-3 shrink-0" /> {a}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
-      {/* ── Bento grid: varied tile sizes instead of a uniform two-up or
-          three-up repeat. Global Track spans two rows on the right; the
-          telemetry chart leads wide on the left; activity closes full
-          width at the bottom. ── */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
-        <div className="md:col-span-8">
-          <HudPanel title="System Telemetry · Live" right={<span className="text-primary text-[0.5rem]">Δ {tick}</span>}>
-            <SystemTelemetryChart history={telemetryHistory} height={208} />
-            <div className="mt-3 flex items-center gap-3 text-[0.5rem] text-muted-foreground">
-              <LegendDot color="var(--hud)" label="cpu" />
-              <LegendDot color="var(--accent)" label="memory" />
-              <LegendDot color="oklch(0.7 0.16 160)" label="uplink" />
-            </div>
-          </HudPanel>
-        </div>
-
-        <div className="flex flex-col gap-4 rounded-xl border border-border bg-card/60 p-4 md:col-span-4 md:row-span-2">
-          <div>
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="font-heading text-[0.72rem] font-medium text-foreground/90">Global Track</h2>
-              <span className="text-primary text-[0.6rem]">Active</span>
-            </div>
-            <WorldTracker tall />
+      {/* ── KPI strip: the numbers actually worth checking day to day, one
+          dense row in priority order, instead of scattered across several
+          separate boxes. ── */}
+      <div className="flex flex-wrap items-center gap-x-8 gap-y-3 rounded-xl border border-border bg-card/60 px-5 py-4">
+        {kpis.map((k) => (
+          <div key={k.label} className="flex flex-col">
+            <span className="font-display text-2xl text-foreground">
+              <AnimatedNumber value={k.v} />{k.suffix}
+            </span>
+            <span className="text-[0.55rem] text-muted-foreground">{k.label}</span>
           </div>
-          <div className="h-px bg-border/60" />
-          <div>
-            <h2 className="mb-2 font-heading text-[0.72rem] font-medium text-foreground/90">Trading P/L · Recent</h2>
-            <TradePLChart />
-          </div>
-        </div>
+        ))}
+      </div>
 
-        <div className="md:col-span-4">
-          <HudPanel title="Agent Domains" accent="violet">
-            <AgentDomainChart agents={agents} />
-          </HudPanel>
-        </div>
-        <div className="md:col-span-4">
-          <HudPanel title="Fleet & System Vitals">
-            <div className="flex flex-wrap items-center justify-around gap-2 py-1">
-              <RadialGauge value={cpu} label="CPU" color="var(--hud)" size={72} />
-              <RadialGauge value={fleetOnlinePct} label="Fleet" color="var(--accent)" size={72} />
-              <RadialGauge value={health.disk ?? 0} label="Disk" color="var(--tertiary)" size={72} />
-            </div>
-            <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-              {[
-                { icon: Cpu, label: 'Cores', v: cores != null ? `${cores}` : '…' },
-                { icon: Database, label: 'Mem', v: `${mem.toFixed(0)}%` },
-                { icon: Thermometer, label: 'Temp', v: health.tempC != null ? `${health.tempC.toFixed(0)}°C` : 'N/A' },
-              ].map(({ icon: Icon, label, v }) => (
-                <div key={label} className="flex flex-col items-center gap-1 rounded border border-border/60 bg-secondary/30 py-2">
-                  <Icon className="h-4 w-4 text-primary" />
-                  <span className="font-heading text-xs text-foreground">{v}</span>
-                  <span className="text-[0.45rem] text-muted-foreground">{label}</span>
-                </div>
-              ))}
-            </div>
-          </HudPanel>
-        </div>
+      {/* ── Status cards: one consistent card grammar for every real
+          subsystem instead of a different widget shape per capability
+          (donut here, globe there, gauges elsewhere). Each card is both
+          the summary AND, where a dedicated page exists, the navigation
+          into it -- action lives with the data it acts on instead of a
+          separate read-only tile plus an unrelated "quick actions" panel.
+          Safety and Trading have no dedicated page yet, so they stay
+          informational only rather than linking somewhere dishonest. ── */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <FleetCard stats={stats} onNavigate={onNavigate} />
+        <ReasoningCard usage={usage} llm={llm} llmLoading={llmLoading} onNavigate={onNavigate} />
+        <AutomationsCard onNavigate={onNavigate} />
+        <SafetyCard armed={armed} proxyRunning={proxyRunning} />
+        <ChannelsCard onNavigate={onNavigate} />
+        <MemoryCard activity={achievements?.activity ?? null} onNavigate={onNavigate} />
+        <AchievementsCard achievements={achievements} onNavigate={onNavigate} />
+        <TradingCard />
+        <SystemCard cpu={cpu} mem={mem} disk={disk} cores={cores} tempC={health.tempC ?? null} onNavigate={onNavigate} />
+      </div>
 
-        {/* Activity as a real timeline (connecting rail + dots), full width
-            across the bottom of the grid instead of tucked in a column. */}
-        <div className="rounded-xl border border-border bg-card/60 p-4 md:col-span-12">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="flex items-center gap-2 font-heading text-[0.72rem] font-medium text-foreground/90">
-              <span className="h-1.5 w-1.5 rounded-full bg-primary" /> Activity
-            </h2>
-            <span className="text-primary text-xs">Live</span>
+      {/* ── Analytics: every trend/breakdown a static status card can't
+          show. Four real charts, each backed by data already flowing into
+          the cards above (system telemetry, LLM per-backend usage, fleet
+          task volume by domain, trading P/L) -- a genuine time series or
+          comparison the card grammar deliberately keeps out of its own
+          summary line. ── */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <HudPanel title="Live Telemetry" right={<span className="text-primary text-[0.5rem]">Δ {tick}</span>}>
+          <SystemTelemetryChart history={telemetryHistory} height={160} />
+          <div className="mt-3 flex items-center gap-3 text-[0.5rem] text-muted-foreground">
+            <LegendDot color="var(--hud)" label="cpu" />
+            <LegendDot color="var(--accent)" label="memory" />
+            <LegendDot color="oklch(0.7 0.16 160)" label="uplink" />
           </div>
-          <ActivityTimeline cpu={cpu} mem={mem} net={net} stats={stats} />
+        </HudPanel>
+
+        <HudPanel title="LLM Usage by Backend" accent="amber">
+          <LlmBackendChart usage={usage} />
+        </HudPanel>
+
+        <HudPanel title="Task Volume by Domain" accent="violet">
+          <DomainTaskChart agents={agents} />
+        </HudPanel>
+
+        <HudPanel title="Trading P/L Trend" accent="magenta">
+          <TradingTrendChart />
+        </HudPanel>
+      </div>
+
+      {/* ── Activity: the real log, deliberately kept separate from the
+          status cards above -- a status board and an activity log answer
+          different questions and read worse merged into one stream. ── */}
+      <div className="rounded-xl border border-border bg-card/60 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="flex items-center gap-2 font-heading text-[0.72rem] font-medium text-foreground/90">
+            <span className="h-1.5 w-1.5 rounded-full bg-primary" /> Activity
+          </h2>
+          <span className="text-primary text-xs">Live</span>
         </div>
+        <RealActivityFeed />
       </div>
     </div>
   )
@@ -328,53 +482,146 @@ function SystemTelemetryChart({ history, height = 160 }: { history: Array<{ t: n
   )
 }
 
+/** Real per-backend LLM usage (calls + tokens), grouped from
+ * usage_analytics.py's per-backend rollup -- the fallback chain's actual
+ * distribution of work, not just the single top backend's name. */
+function LlmBackendChart({ usage }: { usage: ReturnType<typeof useLlmUsageBrief> }) {
+  const data = useMemo(() => {
+    return (usage?.per_backend ?? []).map((b) => ({
+      name: String(b.backend).replace(/LLM$/, ''),
+      tokens: Number(b.total_tokens ?? 0),
+      calls: Number(b.call_count ?? 0),
+      tokPerSec: b.tokens_per_sec != null ? Number(b.tokens_per_sec) : null,
+    }))
+  }, [usage])
+
+  if (data.length === 0) {
+    return <div className="flex h-40 items-center justify-center text-[0.6rem] text-muted-foreground">No LLM calls recorded yet this run.</div>
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="h-32 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
+            <XAxis dataKey="name" tick={{ fontSize: 9, fill: 'var(--muted-foreground)' }} interval={0} />
+            <YAxis width={32} tick={{ fontSize: 9, fill: 'var(--muted-foreground)' }} />
+            <Tooltip content={<HudTooltip unit=" tok" />} />
+            <Bar dataKey="tokens" name="tokens" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+              {data.map((_, i) => (
+                <Cell key={i} fill={DOMAIN_COLORS[i % DOMAIN_COLORS.length]} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <ul className="flex flex-wrap gap-x-3 gap-y-1 text-[0.55rem] text-muted-foreground">
+        {data.map((b, i) => (
+          <li key={b.name} className="flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: DOMAIN_COLORS[i % DOMAIN_COLORS.length] }} />
+            {b.name}: {b.calls} call{b.calls === 1 ? '' : 's'}{b.tokPerSec != null ? ` · ${b.tokPerSec} tok/s` : ''}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** Real task volume grouped by agent domain (sum of each agent's real
+ * total_tasks) -- a richer breakdown than a bare agent-count split, since
+ * it reflects actual work done, not just roster size. */
+function DomainTaskChart({ agents }: { agents: AgentInfo[] }) {
+  const data = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const a of agents) counts.set(a.domain, (counts.get(a.domain) ?? 0) + (a.total_tasks ?? 0))
+    return Array.from(counts, ([domain, tasks]) => ({ domain, tasks }))
+      .sort((a, b) => b.tasks - a.tasks)
+      .slice(0, 8)
+  }, [agents])
+
+  if (data.length === 0) {
+    return <div className="flex h-40 items-center justify-center text-[0.6rem] text-muted-foreground">Awaiting fleet roster…</div>
+  }
+  return (
+    <div className="h-40 w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} layout="vertical" margin={{ top: 4, right: 12, bottom: 0, left: 4 }}>
+          <XAxis type="number" tick={{ fontSize: 9, fill: 'var(--muted-foreground)' }} allowDecimals={false} />
+          <YAxis type="category" dataKey="domain" width={92} tick={{ fontSize: 9, fill: 'var(--muted-foreground)' }} />
+          <Tooltip content={<HudTooltip unit=" tasks" />} />
+          <Bar dataKey="tasks" name="tasks" radius={[0, 3, 3, 0]} isAnimationActive={false}>
+            {data.map((_, i) => (
+              <Cell key={i} fill={DOMAIN_COLORS[i % DOMAIN_COLORS.length]} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+/** Real cumulative trade P/L over the recent trade history
+ * (useTradeHistory) -- the trend that the Trading status card's single
+ * "latest" figure can't show on its own. */
+function TradingTrendChart() {
+  const { data: trades, loading } = useTradeHistory(20)
+  const data = useMemo(() => {
+    let cumulative = 0
+    return trades
+      .filter((t) => typeof t.profit_loss === 'number')
+      .map((t, i) => {
+        cumulative += t.profit_loss as number
+        return { seq: i, pair: t.pair ?? `#${i}`, cumulative }
+      })
+  }, [trades])
+
+  if (loading && data.length === 0) {
+    return <div className="flex h-40 items-center justify-center text-[0.6rem] text-muted-foreground">Loading trade history…</div>
+  }
+  if (data.length === 0) {
+    return <div className="flex h-40 items-center justify-center text-[0.6rem] text-muted-foreground">No closed trades yet.</div>
+  }
+  return (
+    <div className="h-40 w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
+          <defs>
+            <linearGradient id="fillPl" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--hud)" stopOpacity={0.4} />
+              <stop offset="100%" stopColor="var(--hud)" stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <XAxis dataKey="seq" hide />
+          <YAxis width={32} tick={{ fontSize: 9, fill: 'var(--muted-foreground)' }} />
+          <Tooltip content={<HudTooltip unit=" pips" />} />
+          <Area type="monotone" dataKey="cumulative" name="cumulative P/L" stroke="var(--hud)" fill="url(#fillPl)" strokeWidth={1.5} isAnimationActive={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
 /* ─── Live activity timeline -- real derived events, not scripted flavor
    text. Appends a real line whenever the actual polled system/fleet values
    change, instead of cycling through fabricated "SIGINT"/"orbital satellite"
    copy that never corresponded to anything the backend does. Rendered as a
    connecting-rail timeline instead of a bordered list, distinct from the
    panel/box vocabulary used everywhere else on the page. ─── */
-function ActivityTimeline({
-  cpu, mem, net, stats,
-}: {
-  cpu: number
-  mem: number
-  net: number
-  stats: AgentListResponse['stats'] | null
-}) {
-  const [rows, setRows] = useState<{ id: number; tag: string; text: string; tone: 'ok' | 'warn'; at: number }[]>([])
-  const seq = useRef(0)
-  const prevTasks = useRef<number | null>(null)
-
-  useEffect(() => {
-    const id = seq.current++
-    setRows((r) => [
-      { id, tag: 'sys', text: `cpu ${cpu.toFixed(0)}% · mem ${mem.toFixed(0)}% · net ${net.toFixed(0)}%`, tone: 'ok' as const, at: Date.now() },
-      ...r,
-    ].slice(0, 6))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [Math.round(cpu / 3), Math.round(mem / 3), Math.round(net / 5)])
-
-  useEffect(() => {
-    if (!stats) return
-    if (prevTasks.current !== null && stats.total_tasks === prevTasks.current) return
-    prevTasks.current = stats.total_tasks
-    const id = seq.current++
-    setRows((r) => [
-      { id, tag: 'fleet', text: `${stats.agents_online} agents online · ${stats.total_tasks} tasks · ${(stats.success_rate * 100).toFixed(0)}% success`, tone: stats.failed_tasks > 0 ? ('warn' as const) : ('ok' as const), at: Date.now() },
-      ...r,
-    ].slice(0, 6))
-  }, [stats])
+/* ─── Real activity feed -- terminal commands, file writes, skill/memory
+   events, actually recorded by evidence_ledger.py + journey.py. Replaces
+   the old client-synthesized timeline that just re-described numbers
+   already visible elsewhere on this page. ─── */
+function RealActivityFeed() {
+  const rows = useRecentActivity()
 
   if (rows.length === 0) {
-    return <p className="text-xs text-muted-foreground">Waiting for the first real reading…</p>
+    return <p className="text-xs text-muted-foreground">No real activity recorded yet this run — terminal commands, file writes, and skill usage will appear here as they happen.</p>
   }
 
   return (
     <ol className="relative flex flex-col gap-4 pl-4">
       <div className="absolute bottom-1 left-[3px] top-1 w-px bg-border" aria-hidden />
       {rows.map((row, i) => (
-        <li key={row.id} className="relative flex items-start gap-3" style={{ opacity: 1 - i * 0.12 }}>
+        <li key={row.id} className="relative flex items-start gap-3" style={{ opacity: 1 - i * 0.08 }}>
           <span
             className={cn(
               'absolute -left-4 top-1 h-2 w-2 shrink-0 rounded-full ring-4 ring-card',
@@ -384,7 +631,7 @@ function ActivityTimeline({
           <div className="flex min-w-0 flex-1 items-center justify-between gap-3">
             <div className="min-w-0">
               <span className="mr-2 font-mono text-[0.55rem] text-muted-foreground">{row.tag}</span>
-              <span className="text-xs text-foreground">{row.text}</span>
+              <span className="truncate text-xs text-foreground">{row.text}</span>
             </div>
             <span className="shrink-0 font-mono text-[0.6rem] text-muted-foreground">
               {new Date(row.at).toLocaleTimeString('en-GB').slice(0, 8)}
@@ -396,109 +643,225 @@ function ActivityTimeline({
   )
 }
 
-/* ─── Real per-domain agent distribution donut (grouped from the live
-   fleet roster — replaces the previous hardcoded NAM/EMEA/APAC/LATAM split
-   that had no backing data at all) ─── */
-const DOMAIN_CHART_COLORS = [
-  'var(--hud)', 'var(--accent)', 'oklch(0.7 0.16 160)', 'oklch(0.65 0.18 25)',
-  'oklch(0.75 0.14 90)', 'oklch(0.6 0.15 290)', 'oklch(0.7 0.12 340)', 'oklch(0.55 0.1 220)',
-]
-function AgentDomainChart({ agents }: { agents: AgentInfo[] }) {
-  const data = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const a of agents) counts.set(a.domain, (counts.get(a.domain) ?? 0) + 1)
-    return Array.from(counts, ([domain, count]) => ({ domain, count }))
-      .sort((a, b) => b.count - a.count)
-  }, [agents])
-
-  if (data.length === 0) {
-    return (
-      <div className="flex h-32 items-center justify-center text-[0.6rem] text-muted-foreground">
-        Awaiting fleet roster…
-      </div>
-    )
-  }
-
+/* ═══════════════════════════════════════════════════════════════
+   STATUS CARDS — one consistent card grammar for every real subsystem,
+   replacing the previous mix of donut/globe/gauge/bar widgets that each
+   looked different for no reason tied to the data itself. Every card is
+   simultaneously the summary AND, where a dedicated page exists, the
+   navigation into it -- action lives with the data it describes instead
+   of a separate read-only tile plus an unrelated "quick actions" grid.
+   ═══════════════════════════════════════════════════════════════ */
+function StatusCard({
+  icon: Icon,
+  title,
+  value,
+  sub,
+  tone = 'ok',
+  onClick,
+  children,
+}: {
+  icon: ElementType
+  title: string
+  value: string
+  sub?: string
+  tone?: 'ok' | 'warn'
+  onClick?: () => void
+  children?: ReactNode
+}) {
   return (
-    <div className="flex items-center gap-4">
-      <div className="h-32 w-32 shrink-0">
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie data={data} dataKey="count" nameKey="domain" innerRadius={38} outerRadius={58} paddingAngle={2} isAnimationActive={false}>
-              {data.map((d, i) => (
-                <Cell key={d.domain} fill={DOMAIN_CHART_COLORS[i % DOMAIN_CHART_COLORS.length]} stroke="none" />
-              ))}
-            </Pie>
-            <Tooltip content={<HudTooltip />} />
-          </PieChart>
-        </ResponsiveContainer>
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!onClick}
+      className={cn(
+        'group flex flex-col gap-2 rounded-xl border border-border bg-card/60 p-4 text-left transition-all',
+        onClick ? 'cursor-pointer hover:border-primary/50 hover:bg-card' : 'cursor-default',
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-2 text-[0.62rem] text-muted-foreground">
+          <Icon className="h-3.5 w-3.5 text-primary" /> {title}
+        </span>
+        <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', tone === 'warn' ? 'bg-gold' : 'bg-primary')} />
       </div>
-      <ul className="flex-1 flex flex-col gap-1.5 text-[0.6rem]">
-        {data.slice(0, 6).map((d, i) => {
-          const color = DOMAIN_CHART_COLORS[i % DOMAIN_CHART_COLORS.length]
-          return (
-            <li key={d.domain} className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-1.5 min-w-0">
-                <span className="h-2 w-2 shrink-0 rounded-sm" style={{ background: color, boxShadow: `0 0 4px ${color}` }} />
-                <span className="truncate font-heading text-muted-foreground">{d.domain}</span>
-              </span>
-              <span className="shrink-0 text-foreground">{d.count}</span>
-            </li>
-          )
-        })}
-      </ul>
-    </div>
+      <div className="truncate font-display text-lg text-foreground">{value}</div>
+      {sub && <div className="truncate text-[0.58rem] text-muted-foreground">{sub}</div>}
+      {children}
+      {onClick && (
+        <span className="mt-0.5 flex items-center gap-1 text-[0.55rem] text-primary opacity-0 transition-opacity group-hover:opacity-100">
+          View <ArrowRight className="h-2.5 w-2.5" />
+        </span>
+      )}
+    </button>
   )
 }
 
-/* ─── Mini live globe (reuses the real three.js/globe.gl instance from
-   globe-view.tsx instead of a flat SVG placeholder — same asset the Recon
-   map uses, just ambient-rotating with no active target). Only mounts
-   while the Overview tab is actually visible, since OverviewPanel itself
-   is conditionally rendered by page.tsx. ─── */
-function WorldTracker({ tall = false }: { tall?: boolean }) {
+const DOMAIN_COLORS = ['var(--hud)', 'var(--accent)', 'var(--gold)', 'var(--tertiary)', 'oklch(0.7 0.16 160)', 'oklch(0.65 0.18 25)']
+
+function FleetCard({
+  stats,
+  onNavigate,
+}: {
+  stats: AgentListResponse['stats'] | null
+  onNavigate?: (key: PanelKey) => void
+}) {
+  const total = stats ? stats.agents_online + stats.agents_offline : 0
   return (
-    <div className={cn(
-      'relative w-full overflow-hidden rounded border border-border/50 bg-background/40',
-      tall ? 'aspect-[5/4]' : 'aspect-[3/2]',
-    )}>
-      <GlobeView place={null} active={false} />
-    </div>
+    <StatusCard
+      icon={Bot}
+      title="Fleet"
+      value={stats ? `${stats.agents_online}/${total} online` : '…'}
+      sub={stats ? `${Math.round(stats.success_rate * 100)}% success · ${stats.total_tasks} tasks run` : undefined}
+      onClick={onNavigate ? () => onNavigate('agents') : undefined}
+    />
   )
 }
 
-/* ─── Real recent trade P/L (replaces the fake audio-spectrum bars —
-   no mic/audio signal was ever actually measured here) ─── */
-function TradePLChart() {
-  const { data: trades, loading } = useTradeHistory(12)
-  const bars = useMemo(
-    () => trades
-      .filter((t) => typeof t.profit_loss === 'number')
-      .map((t, i) => ({ label: t.pair ?? `#${i}`, pl: t.profit_loss as number })),
-    [trades],
-  )
-
-  if (loading && bars.length === 0) {
-    return <div className="flex h-24 items-center justify-center text-[0.6rem] text-muted-foreground">Loading trade history…</div>
-  }
-  if (bars.length === 0) {
-    return <div className="flex h-24 items-center justify-center text-[0.6rem] text-muted-foreground">No closed trades yet.</div>
-  }
+function ReasoningCard({
+  usage,
+  llm,
+  llmLoading,
+  onNavigate,
+}: {
+  usage: ReturnType<typeof useLlmUsageBrief>
+  llm: ReturnType<typeof useLlmStatus>['data']
+  llmLoading: boolean
+  onNavigate?: (key: PanelKey) => void
+}) {
+  const topBackend = usage?.per_backend?.[0] as Record<string, unknown> | undefined
   return (
-    <div className="h-24 w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={bars} margin={{ top: 4, right: 4, bottom: 0, left: -28 }}>
-          <XAxis dataKey="label" hide />
-          <YAxis width={32} tick={{ fontSize: 9, fill: 'var(--muted-foreground)' }} />
-          <Tooltip content={<HudTooltip unit=" pips" />} />
-          <Bar dataKey="pl" name="P/L" isAnimationActive={false}>
-            {bars.map((b, i) => (
-              <Cell key={i} fill={b.pl >= 0 ? 'var(--hud)' : 'oklch(0.65 0.2 25)'} />
-            ))}
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
+    <StatusCard
+      icon={Zap}
+      title="Reasoning"
+      value={llm?.primary_model ?? (topBackend ? String(topBackend.backend) : 'No calls yet')}
+      sub={usage ? `${usage.overall_calls} call${usage.overall_calls === 1 ? '' : 's'}${topBackend?.tokens_per_sec != null ? ` · ${topBackend.tokens_per_sec} tok/s` : ''}` : undefined}
+      tone={!llmLoading && !llm ? 'warn' : 'ok'}
+      onClick={onNavigate ? () => onNavigate('core') : undefined}
+    />
+  )
+}
+
+function AutomationsCard({ onNavigate }: { onNavigate?: (key: PanelKey) => void }) {
+  const { data: cronData } = useCronStatus()
+  const jobs = cronData?.jobs ?? []
+  const job = jobs[0]
+  return (
+    <StatusCard
+      icon={FileClock}
+      title="Automations"
+      value={job ? job.name : 'None scheduled'}
+      sub={job ? `Next run ${formatRelative(job.next_run)} · ${jobs.length} job${jobs.length === 1 ? '' : 's'}` : undefined}
+      onClick={onNavigate ? () => onNavigate('cron') : undefined}
+    />
+  )
+}
+
+function SafetyCard({ armed, proxyRunning }: { armed: boolean | null; proxyRunning: boolean | null }) {
+  return (
+    <StatusCard
+      icon={ShieldCheck}
+      title="Safety"
+      value={armed == null ? '…' : armed ? 'Armed' : 'Disarmed'}
+      sub={proxyRunning == null ? undefined : `Egress proxy ${proxyRunning ? 'running' : 'stopped'}`}
+      tone={armed ? 'warn' : 'ok'}
+    />
+  )
+}
+
+function ChannelsCard({ onNavigate }: { onNavigate?: (key: PanelKey) => void }) {
+  const { data: telegramData } = useTelegramStatus()
+  return (
+    <StatusCard
+      icon={Send}
+      title="Channels"
+      value={telegramData?.available ? 'Telegram connected' : 'Telegram not configured'}
+      sub={telegramData?.polling ? 'Polling for commands' : undefined}
+      onClick={onNavigate ? () => onNavigate('channels') : undefined}
+    />
+  )
+}
+
+function MemoryCard({
+  activity,
+  onNavigate,
+}: {
+  activity: AchievementsBrief['activity']
+  onNavigate?: (key: PanelKey) => void
+}) {
+  return (
+    <StatusCard
+      icon={Brain}
+      title="Memory & Growth"
+      value={activity ? `${activity.total_memories} memories` : '…'}
+      sub={activity ? `${activity.distinct_skills_used}/${activity.total_skills} skills used · ${activity.terminal_commands} commands run` : undefined}
+      onClick={onNavigate ? () => onNavigate('memory-insights') : undefined}
+    />
+  )
+}
+
+function AchievementsCard({
+  achievements,
+  onNavigate,
+}: {
+  achievements: AchievementsBrief | null
+  onNavigate?: (key: PanelKey) => void
+}) {
+  const pct = achievements ? (achievements.unlocked / Math.max(1, achievements.total)) * 100 : 0
+  return (
+    <StatusCard
+      icon={Award}
+      title="Achievements"
+      value={achievements ? `${achievements.unlocked}/${achievements.total} unlocked` : '…'}
+      onClick={onNavigate ? () => onNavigate('achievements') : undefined}
+    >
+      <div className="h-1.5 overflow-hidden rounded-full bg-secondary/40">
+        <div className="h-full rounded-full bg-gold transition-all duration-700" style={{ width: `${pct}%` }} />
+      </div>
+    </StatusCard>
+  )
+}
+
+/** Real recent trade P/L summary -- the full trend lives in the Trading
+ * P/L Trend chart below (Analytics section); this card stays a plain
+ * glanceable status line, not a duplicate of that chart. */
+function TradingCard() {
+  const { data: trades, loading } = useTradeHistory(10)
+  const closed = useMemo(() => trades.filter((t) => typeof t.profit_loss === 'number'), [trades])
+  const latest = closed[closed.length - 1]
+
+  return (
+    <StatusCard
+      icon={TrendingUp}
+      title="Trading"
+      value={loading && closed.length === 0 ? '…' : !latest ? 'No closed trades' : `${latest.profit_loss >= 0 ? '+' : ''}${Number(latest.profit_loss).toFixed(1)} pips latest`}
+      sub={closed.length > 0 ? `${closed.length} recent trade${closed.length === 1 ? '' : 's'}` : undefined}
+    />
+  )
+}
+
+function SystemCard({
+  cpu,
+  mem,
+  disk,
+  cores,
+  tempC,
+  onNavigate,
+}: {
+  cpu: number
+  mem: number
+  disk: number
+  cores: number | null
+  tempC: number | null
+  onNavigate?: (key: PanelKey) => void
+}) {
+  return (
+    <StatusCard
+      icon={Cpu}
+      title="System"
+      value={`${cpu.toFixed(0)}% CPU`}
+      sub={`${mem.toFixed(0)}% mem · ${disk.toFixed(0)}% disk${tempC != null ? ` · ${tempC.toFixed(0)}°C` : ''}${cores != null ? ` · ${cores} cores` : ''}`}
+      onClick={onNavigate ? () => onNavigate('system') : undefined}
+    />
   )
 }
 

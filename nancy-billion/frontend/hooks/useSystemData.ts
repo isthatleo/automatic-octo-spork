@@ -480,3 +480,80 @@ export function useTelegramStatus() {
   return useSimplePoll<{ success: boolean; available: boolean; error: string | null; polling?: boolean }>('/api/telegram/status', 20000)
 }
 
+export interface TradingQuote {
+  pair: string
+  price: number
+  bid: number
+  ask: number
+  change_24h: number
+  high_24h: number
+  low_24h: number
+  timestamp: string
+}
+// Real live forex/metal quotes (Frankfurter/ECB + Yahoo COMEX -- see
+// trading/forex_engine.py) for the user's real watched/relevant pairs.
+export function useTradingQuotes(pairs?: string[]) {
+  const path = pairs && pairs.length > 0 ? `/api/trading/quotes?pairs=${encodeURIComponent(pairs.join(','))}` : '/api/trading/quotes'
+  return useSimplePoll<{ success: boolean; quotes: TradingQuote[] }>(path, 30000)
+}
+
+// Real watched/relevant trading pairs (trading/manager.py) -- whatever the
+// user has actually told Nancy they trade, plus real trade-history pairs.
+export function useWatchedPairs() {
+  return useSimplePoll<{ success: boolean; watched_pairs: string[]; relevant_pairs: string[] }>('/api/trading/watched-pairs', 60000)
+}
+
+export interface ScreenContextStatus {
+  success: boolean
+  enabled: boolean
+  last_summary: string | null
+  last_at: number | null
+  error: string | null
+  configured: boolean
+}
+// Real ambient screen-awareness state (opt-in, see backend/screen_context.py).
+// Off and empty until the user explicitly turns it on -- see useToggleScreenContext.
+export function useScreenContextStatus() {
+  return useSimplePoll<ScreenContextStatus>('/api/screen-context/status', 10000)
+}
+
+export async function setScreenContextEnabled(enabled: boolean): Promise<ScreenContextStatus> {
+  const res = await fetch('/api/screen-context/toggle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  })
+  return res.json()
+}
+
+export async function captureScreenContextNow(): Promise<{ success: boolean; summary?: string; error?: string }> {
+  const res = await fetch('/api/screen-context/capture-now', { method: 'POST' })
+  return res.json()
+}
+
+export interface ChannelStatus {
+  key: string
+  label: string
+  description: string
+  configured: boolean
+  detail: string | null
+  two_way: boolean
+  required_env: string[]
+}
+// Real per-channel configuration state for every channel this backend
+// actually knows how to speak (Telegram + channels/registry.py). Never a
+// fabricated "coming soon" entry -- see backend/channels/bootstrap.py for
+// the definitive list of what's actually built.
+export function useChannelsStatus() {
+  return useSimplePoll<{ success: boolean; channels: ChannelStatus[] }>('/api/channels/status', 30000)
+}
+
+export async function sendChannelTest(key: string, message?: string): Promise<{ success: boolean; detail?: string }> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(key)}/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(message ? { message } : {}),
+  })
+  return res.json()
+}
+
