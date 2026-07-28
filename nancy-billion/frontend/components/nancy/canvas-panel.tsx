@@ -7,7 +7,7 @@ import type { CanvasItem, Scene3DData } from '@/lib/nancy/types'
 import { Scene3DViewer } from './scene-3d-viewer'
 import {
   Loader2, Pin, PinOff, Trash2, Plus, StickyNote, Link2, Code2, Image as ImageIcon,
-  Search, Copy, Check, Pencil, Save, X, Maximize2, Box,
+  Search, Copy, Check, Pencil, Save, X, Maximize2, Box, MonitorPlay,
 } from 'lucide-react'
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -21,7 +21,7 @@ import {
    ═══════════════════════════════════════════════════════════════════════ */
 
 const TYPE_ICON: Record<CanvasItem['type'], typeof StickyNote> = {
-  note: StickyNote, link: Link2, code: Code2, image: ImageIcon, '3d_scene': Box,
+  note: StickyNote, link: Link2, code: Code2, image: ImageIcon, '3d_scene': Box, html_preview: MonitorPlay,
 }
 
 type TypeFilter = CanvasItem['type'] | 'all'
@@ -83,7 +83,7 @@ export function CanvasPanel() {
 
   const sorted = [...filtered].sort((a, b) => (a.pinned === b.pinned ? b.created_at - a.created_at : a.pinned ? -1 : 1))
   const counts = useMemo(() => {
-    const c: Record<TypeFilter, number> = { all: items.length, note: 0, link: 0, code: 0, image: 0, '3d_scene': 0 }
+    const c: Record<TypeFilter, number> = { all: items.length, note: 0, link: 0, code: 0, image: 0, '3d_scene': 0, html_preview: 0 }
     for (const i of items) c[i.type]++
     return c
   }, [items])
@@ -121,7 +121,7 @@ export function CanvasPanel() {
           className="h-7 min-w-[140px] flex-1 bg-transparent text-[0.6rem] text-foreground outline-none placeholder:text-muted-foreground/60"
         />
         <div className="flex flex-wrap gap-1.5">
-          {(['all', 'note', 'link', 'code', 'image', '3d_scene'] as TypeFilter[]).map((t) => (
+          {(['all', 'note', 'link', 'code', 'image', '3d_scene', 'html_preview'] as TypeFilter[]).map((t) => (
             <button
               key={t}
               type="button"
@@ -131,7 +131,7 @@ export function CanvasPanel() {
                 typeFilter === t ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground hover:text-foreground',
               )}
             >
-              {t === '3d_scene' ? '3D scene' : t} {t !== 'all' && `(${counts[t]})`}
+              {t === '3d_scene' ? '3D scene' : t === 'html_preview' ? 'Preview' : t} {t !== 'all' && `(${counts[t]})`}
             </button>
           ))}
         </div>
@@ -166,6 +166,9 @@ export function CanvasPanel() {
 
       {preview && preview.type === 'image' && (
         <ImagePreviewModal item={preview} onClose={() => setPreview(null)} />
+      )}
+      {preview && preview.type === 'html_preview' && (
+        <HtmlPreviewModal item={preview} onClose={() => setPreview(null)} />
       )}
     </div>
   )
@@ -249,8 +252,11 @@ function CanvasCard({
           <textarea
             value={content}
             onChange={(e) => setContent(e.target.value)}
-            rows={item.type === 'code' ? 6 : 3}
-            className={cn('w-full resize-none rounded border border-border bg-background/60 px-2 py-1.5 text-[0.6rem] text-foreground outline-none focus:border-primary/60', item.type === 'code' && 'font-mono')}
+            rows={item.type === 'code' || item.type === 'html_preview' || item.type === '3d_scene' ? 8 : 3}
+            className={cn(
+              'w-full resize-none rounded border border-border bg-background/60 px-2 py-1.5 text-[0.6rem] text-foreground outline-none focus:border-primary/60',
+              (item.type === 'code' || item.type === 'html_preview' || item.type === '3d_scene') && 'font-mono',
+            )}
           />
           {item.type === 'code' && (
             <input value={language} onChange={(e) => setLanguage(e.target.value)} placeholder="language (optional)" className="w-full rounded border border-border bg-background/60 px-2 py-1 text-[0.55rem] text-foreground outline-none focus:border-primary/60" />
@@ -272,6 +278,22 @@ function CanvasCard({
 }
 
 function CanvasCardBody({ item, onPreview }: { item: CanvasItem; onPreview: () => void }) {
+  if (item.type === 'html_preview') {
+    return (
+      <button type="button" onClick={onPreview} className="group relative block w-full overflow-hidden rounded-lg border border-border/60">
+        {/* pointer-events-none: the card preview is a thumbnail, not the interactive surface -- click opens the real fullscreen modal below */}
+        <iframe
+          srcDoc={item.content}
+          sandbox="allow-scripts"
+          title={item.title}
+          className="h-40 w-full pointer-events-none bg-background"
+        />
+        <span className="absolute inset-0 flex items-center justify-center bg-background/0 opacity-0 backdrop-blur-[1px] transition-all group-hover:bg-background/40 group-hover:opacity-100">
+          <Maximize2 className="h-4 w-4 text-foreground" />
+        </span>
+      </button>
+    )
+  }
   if (item.type === '3d_scene') {
     let scene: Scene3DData | null = null
     try {
@@ -330,6 +352,34 @@ function ImagePreviewModal({ item, onClose }: { item: CanvasItem; onClose: () =>
           </button>
         </div>
         <img src={`data:image/png;base64,${item.content}`} alt={item.title} className="max-h-[80dvh] rounded-lg object-contain" />
+      </div>
+    </div>
+  )
+}
+
+function HtmlPreviewModal({ item, onClose }: { item: CanvasItem; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={item.title}>
+      <button type="button" aria-label="Dismiss" onClick={onClose} className="absolute inset-0 cursor-default bg-background/80 backdrop-blur-sm" />
+      <div className="relative z-10 flex h-[85dvh] w-full max-w-5xl flex-col gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-foreground">{item.title}</span>
+          <button type="button" onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded border border-border bg-card/80 text-muted-foreground hover:text-destructive">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <iframe
+          srcDoc={item.content}
+          sandbox="allow-scripts"
+          title={item.title}
+          className="min-h-0 flex-1 rounded-lg border border-border bg-white"
+        />
       </div>
     </div>
   )

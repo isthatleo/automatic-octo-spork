@@ -195,7 +195,7 @@ export type DomainEventType =
 
 export interface CanvasItem {
   id: string
-  type: 'note' | 'link' | 'code' | 'image' | '3d_scene'
+  type: 'note' | 'link' | 'code' | 'image' | '3d_scene' | 'html_preview'
   title: string
   content: string
   language: string | null

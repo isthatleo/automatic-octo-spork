@@ -28,7 +28,12 @@ STORE_PATH = Path(__file__).parent / "data" / "canvas.json"
 # "research and illustrate a nuclear reactor" style requests, real enough to
 # genuinely teach spatial/structural relationships, not a buildable
 # engineering model.
-VALID_TYPES = {"note", "link", "code", "image", "3d_scene"}
+# "html_preview": content is a complete, self-contained HTML document (see
+# main_new.py's create_artifact tool) rendered client-side in a sandboxed
+# iframe (allow-scripts only, no allow-same-origin/allow-top-navigation) --
+# a real live demo/mockup surface, isolated from the rest of the app the
+# same way an untrusted preview should be.
+VALID_TYPES = {"note", "link", "code", "image", "3d_scene", "html_preview"}
 
 
 @dataclass

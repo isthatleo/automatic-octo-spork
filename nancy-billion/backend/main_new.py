@@ -90,6 +90,7 @@ import lifecycle_hooks
 import lsp_client
 from diff_render import post_diff_to_canvas
 import doc_extraction
+import notebook_tools
 import config_migration
 import workflow_engine
 import mdns_discovery
@@ -805,6 +806,36 @@ FILE_TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "multi_edit_file",
+        "description": (
+            "Apply several edit_file-style find-and-replace changes to ONE file in a single atomic "
+            "operation -- use this instead of several separate edit_file calls whenever multiple, "
+            "unrelated changes are needed in the same file, so they either all land or none do (never "
+            "a half-edited file). Edits are applied in order, each seeing the previous edit's result. "
+            "Requires the user's explicit yes/no approval (sent to their phone) before it takes effect."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "edits": {
+                    "type": "array",
+                    "description": "Edits to apply in order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {"type": "string"},
+                            "new_string": {"type": "string"},
+                            "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring old_string to be unique. Default false."},
+                        },
+                        "required": ["old_string", "new_string"],
+                    },
+                },
+            },
+            "required": ["path", "edits"],
+        },
+    },
+    {
         "name": "search_files",
         "description": (
             "Regex search for text across every file under a directory (optionally filtered by a filename "
@@ -820,6 +851,40 @@ FILE_TOOLS: List[Dict[str, Any]] = [
                 "case_sensitive": {"type": "boolean"},
             },
             "required": ["pattern"],
+        },
+    },
+    {
+        "name": "read_notebook",
+        "description": (
+            "Read a Jupyter notebook (.ipynb) as a structured list of cells (index, cell_type, source "
+            "text, and a short summary of any existing output) -- use this instead of read_file for "
+            ".ipynb files, since their raw JSON is not meaningfully readable directly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "edit_notebook_cell",
+        "description": (
+            "Edit a Jupyter notebook (.ipynb) at the cell level -- read_notebook first to see current "
+            "cell indices. edit_mode 'replace' rewrites cell_index's source (clearing its now-stale "
+            "output); 'insert' adds a new cell immediately before cell_index (use cell_index == the "
+            "notebook's cell_count to append at the end); 'delete' removes cell_index. Requires the "
+            "user's explicit yes/no approval (sent to their phone) before it takes effect."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "cell_index": {"type": "integer"},
+                "new_source": {"type": "string", "description": "New cell source (required for replace/insert)."},
+                "cell_type": {"type": "string", "enum": ["code", "markdown"], "description": "Defaults to the existing cell's type (replace) or 'code' (insert)."},
+                "edit_mode": {"type": "string", "enum": ["replace", "insert", "delete"], "default": "replace"},
+            },
+            "required": ["path", "cell_index"],
         },
     },
     {
@@ -848,7 +913,7 @@ FILE_TOOLS: List[Dict[str, Any]] = [
     },
 ]
 
-_FILE_WRITE_TOOLS = {"write_file", "edit_file", "delete_file", "move_file"}
+_FILE_WRITE_TOOLS = {"write_file", "edit_file", "multi_edit_file", "edit_notebook_cell", "delete_file", "move_file"}
 
 # Real-world safety net for write_file: a real bug this session was Claude
 # happily writing runnable Python source out to a bare "calculator.txt" --
@@ -1031,7 +1096,13 @@ _WANTS_TOOLS_RE = re.compile(
     # explicit ask to visualize/render something in 3D, not bare mentions of
     # "3d" in other contexts.
     r"(create|render|build|generate|visuali[sz]e) (a |an )?3d (scene|model|environment|render|diagram)|"
-    r"3d (telemetry|visuali[sz]ation)|render .{0,30}\bin 3d\b)\b",
+    r"3d (telemetry|visuali[sz]ation)|render .{0,30}\bin 3d\b|"
+    # Real live HTML/interactive preview (create_artifact) -- an explicit ask
+    # for a visual/interactive result, not just an in-chat code block.
+    r"(create|build|make|show me) (a |an )?(live )?(demo|mockup|prototype|preview)|"
+    r"(build|create|make) (me |us )?(a |an )?(interactive|html) (page|demo|widget)\b|"
+    # Real Jupyter notebook cell-level read/edit (read_notebook/edit_notebook_cell).
+    r"\b(notebook|jupyter|\.ipynb)\b)\b",
     re.IGNORECASE,
 )
 
@@ -1084,7 +1155,7 @@ def _any_tool_backend_configured() -> bool:
 # request needs, cut by name (not by rebuilding the list) so it can't drift
 # out of sync with what FILE_TOOLS/WEB_TOOLS/etc. actually contain.
 _FALLBACK_TOOL_NAMES = {
-    "read_file", "list_directory", "glob_files", "search_files", "write_file", "edit_file",
+    "read_file", "list_directory", "glob_files", "search_files", "write_file", "edit_file", "multi_edit_file",
     "delete_file", "move_file", "execute_command", "fetch_url", "web_search",
     "post_to_canvas", "open_application", "look_at_camera", "run_background_task",
     "browser_navigate", "browser_get_text", "browser_screenshot", "browser_click", "browser_fill",
@@ -1206,6 +1277,33 @@ CREATE_3D_SCENE_TOOL: Dict[str, Any] = {
     },
 }
 
+# A real live-preview surface -- self-contained HTML/CSS/JS rendered
+# client-side in a sandboxed iframe (allow-scripts only; no
+# allow-same-origin/allow-top-navigation, so preview content can never touch
+# the rest of the app or navigate the real page). This is the direct
+# equivalent of Claude's own Artifact tool: a working mockup/demo/interactive
+# page Nancy can show inline, not just describe.
+ARTIFACT_TOOL: Dict[str, Any] = {
+    "name": "create_artifact",
+    "description": (
+        "Post a real, live, self-contained HTML preview to the shared canvas -- a working mockup, "
+        "interactive demo, data visualization, or illustrated document, rendered inline (not just "
+        "described in text). The html must be a single complete, self-contained document: inline all "
+        "CSS in a <style> tag and all JS in a <script> tag, no external stylesheets/scripts/fonts/CDNs "
+        "or network calls (the preview runs sandboxed with no network/parent-page access). Use this "
+        "whenever a visual/interactive result would communicate better than a text or code-block reply "
+        "-- e.g. a UI mockup, a small game, a chart, or an illustrated research page with diagrams."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "html": {"type": "string", "description": "Complete, self-contained HTML document (inline CSS/JS, no external resources)."},
+        },
+        "required": ["title", "html"],
+    },
+}
+
 
 def _attach_python_syntax_check(result: Dict[str, Any], path: str) -> None:
     """Real verification after a write/edit actually lands on disk -- the
@@ -1233,7 +1331,7 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
     function makes structurally impossible to repeat, since editing this
     list edits both callers at once."""
     return (
-        FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL]
+        FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL]
         + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS
         + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS
         + SMS_TOOLS + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
@@ -1288,6 +1386,19 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             return {"success": False, "error": str(e)}
         await event_bus.publish("CANVAS_ITEM_ADDED", {"item": item.to_public_dict()})
         return {"success": True, "item_id": item.id}
+
+    if name == "create_artifact":
+        html = tool_input.get("html", "")
+        lint_findings = security_lint.lint_content(html)
+        try:
+            item = canvas_store.create("html_preview", tool_input.get("title", ""), html)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        await event_bus.publish("CANVAS_ITEM_ADDED", {"item": item.to_public_dict()})
+        result: Dict[str, Any] = {"success": True, "item_id": item.id}
+        if lint_findings:
+            result["lint_warning"] = security_lint.format_findings(lint_findings)
+        return result
 
     if name == "fetch_url":
         return await fetch_url(tool_input.get("url", ""))
@@ -1513,11 +1624,30 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
                 f"- {tool_input.get('old_string', '')[:200]!r}\n"
                 f"+ {tool_input.get('new_string', '')[:200]!r}"
             ),
+            "multi_edit_file": (
+                f"Apply {len(tool_input.get('edits', []))} edits to file: {tool_input.get('path')}\n\n"
+                + "\n".join(
+                    f"- {e.get('old_string', '')[:120]!r}\n+ {e.get('new_string', '')[:120]!r}"
+                    for e in tool_input.get("edits", [])[:5]
+                )
+            ),
+            "edit_notebook_cell": (
+                f"{tool_input.get('edit_mode', 'replace').capitalize()} cell {tool_input.get('cell_index')} "
+                f"in notebook: {tool_input.get('path')}\n\n{tool_input.get('new_source', '')[:200]!r}"
+            ),
             "delete_file": f"Delete: {tool_input.get('path')}",
             "move_file": f"Move {tool_input.get('src')} -> {tool_input.get('dst')}",
         }[name]
         if name in ("write_file", "edit_file"):
             lint_findings = security_lint.lint_content(tool_input.get("content") or tool_input.get("new_string", ""))
+            description += security_lint.format_findings(lint_findings)
+        elif name == "multi_edit_file":
+            lint_findings = security_lint.lint_content(
+                "\n".join(e.get("new_string", "") for e in tool_input.get("edits", []))
+            )
+            description += security_lint.format_findings(lint_findings)
+        elif name == "edit_notebook_cell":
+            lint_findings = security_lint.lint_content(tool_input.get("new_source", ""))
             description += security_lint.format_findings(lint_findings)
         approved = await telegram_notifier.request_approval(
             f"Nancy wants to: {description}", timeout=120.0
@@ -1561,6 +1691,36 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             # file on every edit -- the diagnostics check above already used it.
             result.pop("old_content", None)
             result.pop("new_content", None)
+        return result
+    if name == "multi_edit_file":
+        path = str(tool_input["path"])
+        await lifecycle_hooks.fire_hook("pre_write", {"path": path})
+        result = file_access.multi_edit_file(path, tool_input.get("edits", []))
+        evidence_ledger.record_evidence("multi_edit_file", path, result.get("success", False))
+        if result.get("success"):
+            _attach_python_syntax_check(result, path)
+            try:
+                diag_result = await asyncio.wait_for(
+                    lsp_client.diagnostics_before_after_write(path, result.get("old_content"), result.get("new_content")),
+                    timeout=15.0,
+                )
+                if diag_result.get("success") and not diag_result.get("unsupported") and diag_result.get("new_diagnostics"):
+                    result["new_diagnostics"] = diag_result["new_diagnostics"]
+            except Exception as e:
+                logger.info("lsp_client diagnostics check skipped: %s", e)
+            result.pop("old_content", None)
+            result.pop("new_content", None)
+        return result
+    if name == "read_notebook":
+        return notebook_tools.read_notebook(tool_input["path"])
+    if name == "edit_notebook_cell":
+        path = str(tool_input["path"])
+        await lifecycle_hooks.fire_hook("pre_write", {"path": path})
+        result = notebook_tools.edit_notebook_cell(
+            path, tool_input["cell_index"], tool_input.get("new_source", ""),
+            tool_input.get("cell_type"), tool_input.get("edit_mode", "replace"),
+        )
+        evidence_ledger.record_evidence("edit_notebook_cell", path, result.get("success", False))
         return result
     if name == "write_file":
         await lifecycle_hooks.fire_hook("pre_write", {"path": str(resolved_write_path)})

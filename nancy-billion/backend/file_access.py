@@ -170,6 +170,47 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     return {"success": True, "path": str(p), "replacements_made": count if replace_all else 1, "old_content": content, "new_content": new_content}
 
 
+def multi_edit_file(path: str, edits: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Apply several find-and-replace edits to one file in a single atomic
+    operation -- the same job Claude Code's own MultiEdit tool does. Edits are
+    applied in order against an in-memory copy, each one seeing the previous
+    edit's result, exactly like calling edit_file repeatedly; the difference
+    is atomicity -- if any edit in the middle fails (old_string not found, or
+    not unique without replace_all), nothing is written to disk at all,
+    instead of leaving the file half-changed."""
+    p = Path(resolve_oc_path(path)).expanduser()
+    if not p.exists():
+        return {"success": False, "error": f"No such file: {path}"}
+    if not p.is_file():
+        return {"success": False, "error": f"Not a file: {path}"}
+    if not edits:
+        return {"success": False, "error": "edits must be a non-empty list."}
+    try:
+        content = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+    old_content = content
+    for i, edit in enumerate(edits):
+        old_string = edit.get("old_string", "")
+        new_string = edit.get("new_string", "")
+        replace_all = edit.get("replace_all", False)
+        if old_string == "":
+            return {"success": False, "error": f"Edit #{i + 1}: old_string must not be empty."}
+        count = content.count(old_string)
+        if count == 0:
+            return {"success": False, "error": f"Edit #{i + 1}: old_string was not found (must match exactly, including whitespace)."}
+        if count > 1 and not replace_all:
+            return {"success": False, "error": f"Edit #{i + 1}: old_string is not unique ({count} matches) -- pass more surrounding context, or set replace_all."}
+        content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+
+    try:
+        p.write_text(content, encoding="utf-8")
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    return {"success": True, "path": str(p), "edits_applied": len(edits), "old_content": old_content, "new_content": content}
+
+
 def search_files(pattern: str, path: str = ".", glob: str = "", case_sensitive: bool = False) -> Dict[str, Any]:
     """Regex search for `pattern` across every file under `path` (optionally
     filtered by a filename glob, e.g. "*.py") -- the same job Claude Code's
