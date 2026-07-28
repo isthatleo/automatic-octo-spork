@@ -21,7 +21,14 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 STORE_PATH = Path(__file__).parent / "data" / "canvas.json"
-VALID_TYPES = {"note", "link", "code", "image"}
+# "3d_scene": content is a JSON string describing a real, renderable Three.js
+# scene (see main_new.py's create_3d_scene tool + frontend's Scene3DViewer)
+# -- simplified illustrative primitives (boxes/spheres/cylinders/cones/tori
+# with labels), not CAD-accurate geometry. Deliberately honest scope: for
+# "research and illustrate a nuclear reactor" style requests, real enough to
+# genuinely teach spatial/structural relationships, not a buildable
+# engineering model.
+VALID_TYPES = {"note", "link", "code", "image", "3d_scene"}
 
 
 @dataclass

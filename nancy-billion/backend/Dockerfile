@@ -14,7 +14,13 @@
 # construction fails for any reason, so the app runs correctly on the base
 # install alone -- just with the lighter espeak-based voice instead of the
 # neural one.
-FROM python:3.11-slim
+# Pinned to bookworm (Debian 12), not the floating `python:3.11-slim` tag --
+# that now resolves to Debian 13 "trixie", which renamed several font
+# packages (ttf-unifont -> fonts-unifont, ttf-ubuntu-font-family dropped
+# entirely) that `playwright install --with-deps` hardcodes by their old
+# names, failing the build outright. bookworm is Playwright's actual tested
+# target and avoids this whole class of package-name churn.
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 

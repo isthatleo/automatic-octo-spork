@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { onDomainEvent } from '@/lib/nancy/ws-client'
-import type { CanvasItem } from '@/lib/nancy/types'
+import type { CanvasItem, Scene3DData } from '@/lib/nancy/types'
+import { Scene3DViewer } from './scene-3d-viewer'
 import {
   Loader2, Pin, PinOff, Trash2, Plus, StickyNote, Link2, Code2, Image as ImageIcon,
-  Search, Copy, Check, Pencil, Save, X, Maximize2,
+  Search, Copy, Check, Pencil, Save, X, Maximize2, Box,
 } from 'lucide-react'
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -20,7 +21,7 @@ import {
    ═══════════════════════════════════════════════════════════════════════ */
 
 const TYPE_ICON: Record<CanvasItem['type'], typeof StickyNote> = {
-  note: StickyNote, link: Link2, code: Code2, image: ImageIcon,
+  note: StickyNote, link: Link2, code: Code2, image: ImageIcon, '3d_scene': Box,
 }
 
 type TypeFilter = CanvasItem['type'] | 'all'
@@ -82,7 +83,7 @@ export function CanvasPanel() {
 
   const sorted = [...filtered].sort((a, b) => (a.pinned === b.pinned ? b.created_at - a.created_at : a.pinned ? -1 : 1))
   const counts = useMemo(() => {
-    const c: Record<TypeFilter, number> = { all: items.length, note: 0, link: 0, code: 0, image: 0 }
+    const c: Record<TypeFilter, number> = { all: items.length, note: 0, link: 0, code: 0, image: 0, '3d_scene': 0 }
     for (const i of items) c[i.type]++
     return c
   }, [items])
@@ -120,7 +121,7 @@ export function CanvasPanel() {
           className="h-7 min-w-[140px] flex-1 bg-transparent text-[0.6rem] text-foreground outline-none placeholder:text-muted-foreground/60"
         />
         <div className="flex flex-wrap gap-1.5">
-          {(['all', 'note', 'link', 'code', 'image'] as TypeFilter[]).map((t) => (
+          {(['all', 'note', 'link', 'code', 'image', '3d_scene'] as TypeFilter[]).map((t) => (
             <button
               key={t}
               type="button"
@@ -130,7 +131,7 @@ export function CanvasPanel() {
                 typeFilter === t ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground hover:text-foreground',
               )}
             >
-              {t} {t !== 'all' && `(${counts[t]})`}
+              {t === '3d_scene' ? '3D scene' : t} {t !== 'all' && `(${counts[t]})`}
             </button>
           ))}
         </div>
@@ -271,6 +272,18 @@ function CanvasCard({
 }
 
 function CanvasCardBody({ item, onPreview }: { item: CanvasItem; onPreview: () => void }) {
+  if (item.type === '3d_scene') {
+    let scene: Scene3DData | null = null
+    try {
+      scene = JSON.parse(item.content)
+    } catch {
+      /* malformed scene JSON -- fall through to the error message below */
+    }
+    if (!scene || !Array.isArray(scene.objects)) {
+      return <p className="text-[0.6rem] text-destructive">Couldn't parse this 3D scene.</p>
+    }
+    return <Scene3DViewer scene={scene} />
+  }
   if (item.type === 'image') {
     return (
       <button type="button" onClick={onPreview} className="group relative overflow-hidden rounded-lg">

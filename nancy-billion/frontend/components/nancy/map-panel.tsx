@@ -433,6 +433,7 @@ export function MapPanel({
   place,
   loading,
   onLocate,
+  autoStartTracking,
 }: {
   place: Place | null
   loading: boolean
@@ -441,6 +442,13 @@ export function MapPanel({
    * page.tsx so the search bar and history chips share one real code path
    * rather than duplicating geocoding logic here. */
   onLocate?: (query: string) => void
+  /** Bumped (any new value, e.g. Date.now()) to turn on the existing "Live
+   * Tracking" toggle below from OUTSIDE this component -- e.g. a voice/chat
+   * command ("track my location") -- without touching any of its own
+   * internal state/logic. Previously this real, fully-working live-tracking
+   * feature (watchPosition + OSRM routing, already built) could only be
+   * turned on by clicking its button inside this panel. */
+  autoStartTracking?: number
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<LeafletMap | null>(null)
@@ -488,6 +496,17 @@ export function MapPanel({
   // reported as unavailable.
   const [locateOpen, setLocateOpen] = useState(false)
   const [tracking, setTracking] = useState(false)
+  // External trigger (voice/chat command) for the toggle below -- fires
+  // only on a real change to autoStartTracking, so it can't fight the
+  // button's own onClick by re-forcing tracking back on right after a
+  // manual toggle-off.
+  const prevAutoStartTracking = useRef(autoStartTracking)
+  useEffect(() => {
+    if (autoStartTracking !== undefined && autoStartTracking !== prevAutoStartTracking.current) {
+      prevAutoStartTracking.current = autoStartTracking
+      setTracking(true)
+    }
+  }, [autoStartTracking])
   const { fix: myFix, error: geoError, locateOnce } = useGeolocation(tracking)
   const myLabel = useReverseGeocode(myFix?.lat, myFix?.lon)
   const { route } = useRoute(myFix, place)

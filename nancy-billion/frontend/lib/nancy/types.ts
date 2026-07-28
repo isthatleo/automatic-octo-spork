@@ -195,12 +195,28 @@ export type DomainEventType =
 
 export interface CanvasItem {
   id: string
-  type: 'note' | 'link' | 'code' | 'image'
+  type: 'note' | 'link' | 'code' | 'image' | '3d_scene'
   title: string
   content: string
   language: string | null
   pinned: boolean
   created_at: number
+}
+
+// content for type === '3d_scene' is a JSON string matching this shape --
+// see backend/main_new.py's create_3d_scene tool and canvas_store.py's
+// VALID_TYPES comment: simplified illustrative primitives, not CAD-accurate.
+export interface Scene3DObject {
+  type: 'box' | 'sphere' | 'cylinder' | 'cone' | 'torus'
+  position: [number, number, number]
+  size?: number[]
+  color?: string
+  label?: string
+}
+
+export interface Scene3DData {
+  description?: string
+  objects: Scene3DObject[]
 }
 
 export interface DomainEvent {

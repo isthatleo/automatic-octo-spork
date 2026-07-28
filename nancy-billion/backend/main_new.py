@@ -1025,7 +1025,13 @@ _WANTS_TOOLS_RE = re.compile(
     r"(log|track) (this |an? )?expense\b|(my|list) expenses\b|"
     r"\bping\b|check (if |whether )?.{0,30}\bport\b|"
     r"(copy|paste) .{0,20}clipboard|clipboard\b|"
-    r"(send|text) .{0,30}(an? )?(sms|text message))\b",
+    r"(send|text) .{0,30}(an? )?(sms|text message)|"
+    # Real 3D scene generation (create_3d_scene) -- educational/illustrative
+    # only (see canvas_store.py's VALID_TYPES comment), triggered by an
+    # explicit ask to visualize/render something in 3D, not bare mentions of
+    # "3d" in other contexts.
+    r"(create|render|build|generate|visuali[sz]e) (a |an )?3d (scene|model|environment|render|diagram)|"
+    r"3d (telemetry|visuali[sz]ation)|render .{0,30}\bin 3d\b)\b",
     re.IGNORECASE,
 )
 
@@ -1155,6 +1161,51 @@ CANVAS_TOOL: Dict[str, Any] = {
     },
 }
 
+# Illustrative 3D scenes only -- simplified primitives with labels, meant to
+# teach spatial/structural relationships for a research topic (e.g. "show me
+# a reactor's containment layout"), never a CAD-accurate or buildable model.
+# See canvas_store.py's VALID_TYPES comment for the same honest-scope note.
+CREATE_3D_SCENE_TOOL: Dict[str, Any] = {
+    "name": "create_3d_scene",
+    "description": (
+        "Post an illustrative 3D scene to the shared canvas -- a small set of labeled geometric "
+        "primitives (boxes, spheres, cylinders, cones, tori) arranged in 3D space to visually "
+        "explain a structure or concept the user asked about (e.g. 'show me a 3D diagram of a "
+        "nuclear reactor's core'). Rendered live with a real orbit-controllable 3D viewer. This is "
+        "always a simplified, educational illustration -- never a precise, buildable engineering "
+        "model -- so favor a handful of clearly labeled shapes over an attempt at literal accuracy."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "description": {"type": "string", "description": "one or two sentences of educational context shown alongside the scene"},
+            "objects": {
+                "type": "array",
+                "description": "the shapes making up the scene",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["box", "sphere", "cylinder", "cone", "torus"]},
+                        "position": {
+                            "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                            "description": "[x, y, z]",
+                        },
+                        "size": {
+                            "type": "array", "items": {"type": "number"},
+                            "description": "shape-specific dimensions, e.g. [width,height,depth] for box, [radius] for sphere",
+                        },
+                        "color": {"type": "string", "description": "hex color, e.g. '#ff8800'"},
+                        "label": {"type": "string", "description": "text shown floating above the shape"},
+                    },
+                    "required": ["type", "position"],
+                },
+            },
+        },
+        "required": ["title", "objects"],
+    },
+}
+
 
 def _attach_python_syntax_check(result: Dict[str, Any], path: str) -> None:
     """Real verification after a write/edit actually lands on disk -- the
@@ -1168,6 +1219,28 @@ def _attach_python_syntax_check(result: Dict[str, Any], path: str) -> None:
         error = file_access.check_python_syntax(path)
         if error:
             result["syntax_error"] = error
+
+
+def _all_chat_tools() -> List[Dict[str, Any]]:
+    """The single, real source of truth for "every tool Claude's tool-use
+    loop can call" -- used by BOTH the interactive chat path
+    (_generate_response_via_hierarchy) and the cron/webhook-triggered skill
+    path (_run_skill_with_tools, further down this file). Factored out
+    after finding live that the second call site had silently fallen out of
+    sync with every tool added to the first one today (browser, camera,
+    background tasks, clipboard, SMS, and the whole everyday/archive/
+    network/personal tools batch) -- a real, easy-to-repeat mistake this
+    function makes structurally impossible to repeat, since editing this
+    list edits both callers at once."""
+    return (
+        FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL]
+        + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS
+        + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS
+        + SMS_TOOLS + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
+        + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS
+        + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS
+        + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
+    )
 
 
 async def _open_application_dispatch(target: str, args: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -1199,6 +1272,18 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
                 tool_input.get("type", "note"), tool_input.get("title", ""),
                 tool_input.get("content", ""), tool_input.get("language"),
             )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        await event_bus.publish("CANVAS_ITEM_ADDED", {"item": item.to_public_dict()})
+        return {"success": True, "item_id": item.id}
+
+    if name == "create_3d_scene":
+        scene = {
+            "description": tool_input.get("description", ""),
+            "objects": tool_input.get("objects", []),
+        }
+        try:
+            item = canvas_store.create("3d_scene", tool_input.get("title", ""), json.dumps(scene))
         except ValueError as e:
             return {"success": False, "error": str(e)}
         await event_bus.publish("CANVAS_ITEM_ADDED", {"item": item.to_public_dict()})
@@ -1618,7 +1703,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             # tool_executor(name, input) contract generate_with_tools calls.
             return await _execute_file_tool(name, tool_input, user_hint=user_text)
 
-        all_tools = FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS + SMS_TOOLS + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
+        all_tools = _all_chat_tools()
 
         # A real screenshot/canvas image a tool produces used to only ever
         # be shown to the model internally -- the human never actually saw
@@ -5086,9 +5171,13 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
         f"Additional context for this run: {extra_context or '(none)'}"
     )
     claude = AnthropicLLM()
+    # Same full tool composition as the interactive chat path
+    # (_generate_response_via_hierarchy) -- via _all_chat_tools(), the single
+    # shared source of truth, after this call site was found to have silently
+    # fallen out of sync with every tool added to the other one.
     resp = await asyncio.wait_for(
         claude.generate_with_tools(
-            prompt, FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS, _execute_file_tool, max_tokens=1024
+            prompt, _all_chat_tools(), _execute_file_tool, max_tokens=1024
         ),
         timeout=120.0,
     )

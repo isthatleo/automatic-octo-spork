@@ -4,6 +4,7 @@ import { guessSymbol } from './local-brain'
 export type CommandResult =
   | { type: 'navigate'; panel: PanelKey; reply: string }
   | { type: 'locate'; query: string; reply: string }
+  | { type: 'track'; reply: string }
   | { type: 'launch'; target: string; reply: string }
   | { type: 'chart'; symbol: string; reply: string }
   | { type: 'time'; reply: string }
@@ -211,6 +212,15 @@ export function parseCommand(rawInput: string): CommandResult {
     }
     const target = LAUNCH_TARGETS.find((t) => word.includes(t)) || word
     return { type: 'launch', target, reply: `Launching ${target}, Sir.` }
+  }
+
+  // Real live GPS tracking + live driving-route overlay on Recon -- the
+  // feature itself (watchPosition + OSRM routing) already existed, fully
+  // built, but could only be turned on by clicking its button inside the
+  // Recon panel; this is what makes it voice/chat-requestable too, off by
+  // default either way.
+  if (/\b(start |begin )?(track(ing)?|follow(ing)?) (my (location|position)|me)\b/.test(input)) {
+    return { type: 'track', reply: 'Live tracking engaged, Sir. Opening Recon.' }
   }
 
   // Real geocoding + map fly-to.

@@ -120,6 +120,9 @@ export default function Page() {
   const [panel, setPanel] = useState<PanelKey | null>(null)
   const [place, setPlace] = useState<Place | null>(null)
   const [mapLoading, setMapLoading] = useState(false)
+  // Bumped to a new value to turn on Recon's existing live-tracking toggle
+  // from a voice/chat command -- see MapPanel's autoStartTracking prop.
+  const [trackTrigger, setTrackTrigger] = useState<number | undefined>(undefined)
   const [launched, setLaunched] = useState<string | null>(null)
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [clock, setClock] = useState('')
@@ -436,6 +439,12 @@ export default function Page() {
           nancySay(result.reply)
           void locate(result.query)
           break
+        case 'track':
+          sfx.whooshIn()
+          setPanel('map')
+          setTrackTrigger(Date.now())
+          nancySay(result.reply)
+          break
         case 'launch':
           nancySay(result.reply)
           doLaunch(result.target)
@@ -717,6 +726,7 @@ export default function Page() {
             place={place}
             mapLoading={mapLoading}
             onLocate={locate}
+            trackTrigger={trackTrigger}
             launched={launched}
             onLaunch={doLaunch}
             onClose={closeWorkspace}
@@ -894,6 +904,7 @@ function WorkspaceLayout({
   place,
   mapLoading,
   onLocate,
+  trackTrigger,
   launched,
   onLaunch,
   onClose,
@@ -911,6 +922,8 @@ function WorkspaceLayout({
   place: Place | null
   mapLoading: boolean
   onLocate: (query: string) => void
+  /** See page.tsx's Page(): bumped to turn on Recon's live-tracking toggle from a voice/chat command. */
+  trackTrigger?: number
   launched: string | null
   onLaunch: (t: string) => void
   onClose: () => void
@@ -1038,7 +1051,7 @@ function WorkspaceLayout({
         <div className="relative flex-1 overflow-hidden">
           {isMap ? (
             <div className="absolute inset-0">
-              <MapPanel place={place} loading={mapLoading} onLocate={onLocate} />
+              <MapPanel place={place} loading={mapLoading} onLocate={onLocate} autoStartTracking={trackTrigger} />
             </div>
           ) : isNews ? (
             <div className="absolute inset-0 p-3 md:p-4">
