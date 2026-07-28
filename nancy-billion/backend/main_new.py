@@ -1046,6 +1046,25 @@ def _attach_python_syntax_check(result: Dict[str, Any], path: str) -> None:
             result["syntax_error"] = error
 
 
+async def _open_application_dispatch(target: str, args: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Shared by open_application (chat tool) and /system/open-application
+    (Command Layer REST route) -- this backend runs inside a Docker
+    container with no display of its own (confirmed live:
+    computer_use_tool.take_screenshot already fails the same way, "DISPLAY"
+    unset), so launching anything here directly would only ever affect the
+    invisible container, never the user's real desktop. If a "host" node is
+    registered (node_agent_stub.py, run natively on the real machine),
+    dispatch there instead so the app actually opens somewhere the user can
+    see it; otherwise fall back to launching locally, which is correct when
+    this backend happens to be running natively rather than containerized."""
+    if HOST_NODE_ID in node_host.list_nodes():
+        result = await node_host.dispatch_open_application(HOST_NODE_ID, target, args)
+    else:
+        result = await app_launcher.open_application(target, args)
+    evidence_ledger.record_evidence("open_application", target, result.get("success", False))
+    return result
+
+
 async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: str = "") -> Dict[str, Any]:
     if mcp_manager.is_plugin_tool(name):
         return await mcp_manager.call_tool(name, tool_input)
@@ -1124,25 +1143,9 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         # Ungated -- same risk profile as take_screenshot/get_screen_size:
         # launching an app (not an arbitrary shell command with flags) is
         # the same action as double-clicking an icon, not a destructive one.
-        #
-        # This backend runs inside a Docker container with no display of its
-        # own (confirmed live: computer_use_tool.take_screenshot already
-        # fails the same way, "DISPLAY" unset) -- launching anything here
-        # directly would only ever affect the invisible container, never the
-        # user's real desktop. If a "host" node is registered (see
-        # node_agent_stub.py, run natively on the real machine), dispatch
-        # there instead so the app actually opens somewhere the user can see
-        # it; otherwise fall back to launching locally, which is correct
-        # when this backend happens to be running natively rather than
-        # containerized.
         target = tool_input.get("target", "")
         args = tool_input.get("args")
-        if HOST_NODE_ID in node_host.list_nodes():
-            result = await node_host.dispatch_open_application(HOST_NODE_ID, target, args)
-        else:
-            result = await app_launcher.open_application(target, args)
-        evidence_ledger.record_evidence("open_application", target, result.get("success", False))
-        return result
+        return await _open_application_dispatch(target, args)
 
     if name in COMPUTER_ACTION_TOOLS:
         description = {
@@ -3756,6 +3759,64 @@ async def files_edit_route(req: FileEditRequest):
         result.pop("old_content", None)
         result.pop("new_content", None)
     return result
+
+
+class MkdirRequest(BaseModel):
+    path: str
+
+
+@app.post("/files/mkdir", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def files_mkdir_route(req: MkdirRequest):
+    """"New Folder" for the Command Layer editor -- ungated, same risk
+    profile as creating an empty file: nothing destructive, nothing to
+    lose. Real write/delete/move stay approval-gated below."""
+    return file_access.create_directory(req.path)
+
+
+class DeleteRequest(BaseModel):
+    path: str
+
+
+@app.post("/files/delete", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def files_delete_route(req: DeleteRequest):
+    if not arm_switch.is_armed():
+        approved = await telegram_notifier.request_approval(f"Command Layer wants to: Delete {req.path}", timeout=120.0)
+        if not approved:
+            return {"success": False, "error": "User did not approve this deletion."}
+    result = file_access.delete_file(req.path)
+    evidence_ledger.record_evidence("delete_file", req.path, result.get("success", False))
+    return result
+
+
+class MoveRequest(BaseModel):
+    src: str
+    dst: str
+
+
+@app.post("/files/move", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def files_move_route(req: MoveRequest):
+    """Also doubles as rename -- src and dst in the same directory."""
+    if not arm_switch.is_armed():
+        approved = await telegram_notifier.request_approval(
+            f"Command Layer wants to: Move/rename {req.src} -> {req.dst}", timeout=120.0
+        )
+        if not approved:
+            return {"success": False, "error": "User did not approve this move/rename."}
+    result = file_access.move_file(req.src, req.dst)
+    evidence_ledger.record_evidence("move_file", f"{req.src} -> {req.dst}", result.get("success", False))
+    return result
+
+
+class OpenApplicationRequest(BaseModel):
+    target: str
+    args: Optional[List[str]] = None
+
+
+@app.post("/system/open-application", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def open_application_route(req: OpenApplicationRequest):
+    """Direct Command Layer entry point into the same real app-launching
+    open_application uses as a chat tool -- see _open_application_dispatch."""
+    return await _open_application_dispatch(req.target, req.args)
 
 
 class WebFetchRequest(BaseModel):

@@ -252,6 +252,19 @@ def glob_files(pattern: str, path: str = ".") -> Dict[str, Any]:
     return {"success": True, "pattern": pattern, "matches": matches, "count": len(matches), "truncated": truncated}
 
 
+def create_directory(path: str) -> Dict[str, Any]:
+    """Real "New Folder" -- mkdir -p semantics (no error if it already
+    exists, parents created as needed), same as write_file's own directory
+    creation but callable on its own for the editor panel's New Folder
+    action, which has no file content to imply a path from."""
+    p = Path(resolve_oc_path(path)).expanduser()
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return {"success": True, "path": str(p)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def delete_file(path: str) -> Dict[str, Any]:
     p = Path(resolve_oc_path(path)).expanduser()
     if not p.exists():

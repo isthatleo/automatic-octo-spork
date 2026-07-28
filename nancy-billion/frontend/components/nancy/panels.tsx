@@ -44,6 +44,11 @@ import {
   AlertTriangle,
   Save,
   Search,
+  Trash2,
+  Pencil,
+  FolderPlus,
+  FilePlus,
+  ExternalLink,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import Editor from '@monaco-editor/react'
@@ -1319,14 +1324,16 @@ function FilesApp() {
     }
   }
 
+  const joinPath = (name: string) => (path.endsWith('\\') || path.endsWith('/') ? `${path}${name}` : `${path}/${name}`)
+
   const openEntry = async (name: string, isDir: boolean) => {
-    const next = path.endsWith('\\') || path.endsWith('/') ? `${path}${name}` : `${path}/${name}`
+    const next = joinPath(name)
     if (isDir) { browse(next); return }
     await openPath(next)
   }
 
-  const save = async () => {
-    if (!openFile || saving) return
+  const save = useCallback(async () => {
+    if (!openFile || saving || !dirty) return
     setSaving(true)
     setSaveMsg('Waiting for approval…')
     try {
@@ -1339,6 +1346,67 @@ function FilesApp() {
     } finally {
       setSaving(false)
     }
+  }, [openFile, content, saving, dirty])
+  // Ref mirror so Monaco's Ctrl+S command (bound once, in onMount) always
+  // calls the LATEST save closure instead of a stale one captured at mount time.
+  const saveRef = useRef(save)
+  saveRef.current = save
+
+  const newFile = async () => {
+    const name = window.prompt('New file name (relative to the current directory):')
+    if (!name || !name.trim()) return
+    const target = joinPath(name.trim())
+    const res = await fetch('/api/files/write', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: target, content: '' }),
+    })
+    const json = await res.json().catch(() => ({ success: false }))
+    if (json.success) { await browse(path); await openPath(target) }
+    else setSaveMsg(json.error ?? 'Failed to create file.')
+  }
+
+  const newFolder = async () => {
+    const name = window.prompt('New folder name (relative to the current directory):')
+    if (!name || !name.trim()) return
+    const target = joinPath(name.trim())
+    const res = await fetch('/api/files/mkdir', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: target }),
+    })
+    const json = await res.json().catch(() => ({ success: false }))
+    if (json.success) await browse(path)
+    else setDirError(json.error ?? 'Failed to create folder.')
+  }
+
+  const renameEntry = async (name: string) => {
+    const next = window.prompt(`Rename "${name}" to:`, name)
+    if (!next || !next.trim() || next.trim() === name) return
+    const res = await fetch('/api/files/move', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src: joinPath(name), dst: joinPath(next.trim()) }),
+    })
+    const json = await res.json().catch(() => ({ success: false }))
+    if (json.success) { await browse(path); if (openFile === joinPath(name)) setOpenFile(null) }
+    else setDirError(json.error ?? 'Failed to rename.')
+  }
+
+  const deleteEntry = async (name: string, isDir: boolean) => {
+    if (!window.confirm(`Delete ${isDir ? 'folder' : 'file'} "${name}"? This asks for your approval on your phone before it actually happens.`)) return
+    const target = joinPath(name)
+    const res = await fetch('/api/files/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: target }),
+    })
+    const json = await res.json().catch(() => ({ success: false }))
+    if (json.success) { await browse(path); if (openFile === target) setOpenFile(null) }
+    else setDirError(json.error ?? 'Failed to delete.')
+  }
+
+  const openInDefaultApp = async () => {
+    if (!openFile) return
+    setSaveMsg('Opening…')
+    const res = await fetch('/api/system/open-application', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target: openFile }),
+    })
+    const json = await res.json().catch(() => ({ success: false }))
+    setSaveMsg(json.success ? 'Opened in default app.' : (json.error ?? 'Failed to open.'))
   }
 
   const runSearch = async () => {
@@ -1361,6 +1429,12 @@ function FilesApp() {
           className={cn(cmdInputCls, 'flex-1 font-mono')} />
         <button type="button" onClick={() => browse(path)} className="rounded border border-border px-3 py-1.5 text-[0.6rem] text-muted-foreground hover:text-foreground">
           Go
+        </button>
+        <button type="button" onClick={newFile} title="New file" className="flex items-center gap-1 rounded border border-border px-2.5 py-1.5 text-[0.6rem] text-muted-foreground hover:text-foreground">
+          <FilePlus className="h-3.5 w-3.5" /> File
+        </button>
+        <button type="button" onClick={newFolder} title="New folder" className="flex items-center gap-1 rounded border border-border px-2.5 py-1.5 text-[0.6rem] text-muted-foreground hover:text-foreground">
+          <FolderPlus className="h-3.5 w-3.5" /> Folder
         </button>
       </div>
       <div className="flex gap-2">
@@ -1395,11 +1469,20 @@ function FilesApp() {
             <div className="p-3 text-[0.55rem] text-muted-foreground">Empty directory.</div>
           ) : (
             (entries ?? []).map((e) => (
-              <button key={e.name} type="button" onClick={() => openEntry(e.name, e.is_dir)}
-                className="flex w-full items-center gap-2 border-b border-border/20 px-2 py-1.5 text-left text-[0.58rem] text-foreground last:border-none hover:bg-secondary/20">
-                {e.is_dir ? <Folder className="h-3.5 w-3.5 shrink-0 text-primary" /> : <FileClock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
-                <span className="truncate">{e.name}</span>
-              </button>
+              <div key={e.name} className="group flex w-full items-center gap-2 border-b border-border/20 px-2 py-1.5 text-[0.58rem] text-foreground last:border-none hover:bg-secondary/20">
+                <button type="button" onClick={() => openEntry(e.name, e.is_dir)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                  {e.is_dir ? <Folder className="h-3.5 w-3.5 shrink-0 text-primary" /> : <FileClock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+                  <span className="truncate">{e.name}</span>
+                </button>
+                <button type="button" onClick={() => renameEntry(e.name)} title="Rename" aria-label={`Rename ${e.name}`}
+                  className="shrink-0 text-muted-foreground opacity-0 hover:text-primary group-hover:opacity-100">
+                  <Pencil className="h-3 w-3" />
+                </button>
+                <button type="button" onClick={() => deleteEntry(e.name, e.is_dir)} title="Delete" aria-label={`Delete ${e.name}`}
+                  className="shrink-0 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100">
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </div>
             ))
           )}
         </div>
@@ -1411,13 +1494,16 @@ function FilesApp() {
               language={openFile ? languageForPath(openFile) : 'plaintext'}
               value={openFile ? content : ''}
               onChange={(v) => { if (openFile) { setContent(v ?? ''); setDirty(true) } }}
-              onMount={(editor) => {
+              onMount={(editor, monaco) => {
                 editorRef.current = editor
                 if (pendingLineRef.current) {
                   editor.revealLineInCenter(pendingLineRef.current)
                   editor.setPosition({ lineNumber: pendingLineRef.current, column: 1 })
                   pendingLineRef.current = null
                 }
+                // saveRef (not `save` directly) so this bound-once command
+                // always calls the current closure, not the one from mount time.
+                editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current())
               }}
               options={{ readOnly: !openFile, minimap: { enabled: false }, fontSize: 12, scrollBeyondLastLine: false }}
             />
@@ -1426,8 +1512,13 @@ function FilesApp() {
           {openFile && (
             <div className="flex flex-wrap items-center gap-2">
               <button type="button" onClick={save} disabled={saving || !dirty}
+                title="Save (Ctrl+S)"
                 className="flex items-center gap-1.5 rounded border border-primary bg-primary/15 px-2.5 py-1 text-[0.55rem] text-primary hover:bg-primary/25 disabled:opacity-40">
                 {saving ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} Save
+              </button>
+              <button type="button" onClick={openInDefaultApp} title="Open in default app"
+                className="flex items-center gap-1.5 rounded border border-border px-2.5 py-1 text-[0.55rem] text-muted-foreground hover:text-foreground">
+                <ExternalLink className="h-3 w-3" /> Open externally
               </button>
               <span className="truncate text-[0.5rem] text-muted-foreground">{openFile}</span>
               {saveMsg && <span className="text-[0.5rem] text-muted-foreground">{saveMsg}</span>}
