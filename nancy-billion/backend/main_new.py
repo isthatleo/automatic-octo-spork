@@ -84,6 +84,7 @@ from backup_tool import create_backup, list_backups, BACKUP_TOOLS
 from disk_cleanup import ensure_bootstrap_script
 from channels.home_assistant import HOME_ASSISTANT_TOOLS
 from providers.spotify_tool import SPOTIFY_TOOLS, handle_spotify_tool
+from providers import google_calendar
 from memory import wiki_store, commitments
 import evidence_ledger
 import lifecycle_hooks
@@ -91,6 +92,9 @@ import lsp_client
 from diff_render import post_diff_to_canvas
 import doc_extraction
 import notebook_tools
+import self_healing
+import watch_store
+import voice_id
 import config_migration
 import workflow_engine
 import mdns_discovery
@@ -229,6 +233,41 @@ SMS_TOOLS = [
             "properties": {"to_number": {"type": "string", "description": "E.164 format, e.g. +15551234567"}, "message": {"type": "string"}},
             "required": ["to_number", "message"],
         },
+    },
+]
+
+WATCH_TOOLS = [
+    {
+        "name": "create_watch",
+        "description": (
+            "Set up a real recurring watch on a webpage: Billion checks it on a schedule and pushes "
+            "one Telegram alert when it actually changes -- 'watch this product page and tell me when "
+            "the price drops', 'let me know if this page changes', 'watch this GitHub repo for a new "
+            "release'. By default fires once then stops (one_shot=true); set one_shot=false to keep "
+            "alerting on every future change instead of just the first one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Page URL to watch, or 'owner/repo' when kind is 'github_release'."},
+                "description": {"type": "string", "description": "Short human-readable label for what's being watched, used in the alert."},
+                "kind": {"type": "string", "enum": ["text", "price", "github_release"], "default": "text"},
+                "target_price": {"type": "number", "description": "Required when kind is 'price' -- alert when the page's detected price drops to or below this."},
+                "check_interval_minutes": {"type": "number", "description": "How often to check. Default 60, minimum 5."},
+                "one_shot": {"type": "boolean", "description": "Stop watching after the first alert. Default true."},
+            },
+            "required": ["url", "description"],
+        },
+    },
+    {
+        "name": "list_watches",
+        "description": "List all currently active (and recently stopped) watches Billion is tracking.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "delete_watch",
+        "description": "Stop and remove a watch.",
+        "input_schema": {"type": "object", "properties": {"watch_id": {"type": "string"}}, "required": ["watch_id"]},
     },
 ]
 
@@ -1102,7 +1141,15 @@ _WANTS_TOOLS_RE = re.compile(
     r"(create|build|make|show me) (a |an )?(live )?(demo|mockup|prototype|preview)|"
     r"(build|create|make) (me |us )?(a |an )?(interactive|html) (page|demo|widget)\b|"
     # Real Jupyter notebook cell-level read/edit (read_notebook/edit_notebook_cell).
-    r"\b(notebook|jupyter|\.ipynb)\b)\b",
+    r"\b(notebook|jupyter|\.ipynb)\b|"
+    # Real recurring watch/alert (create_watch/list_watches/delete_watch).
+    r"\bwatch (this|that|the|a) .{0,60}(page|site|link|url|repo|price)|"
+    r"(let me know|tell me|notify me|alert me) (when|if) .{0,60}(changes?|drops?|updates?)|"
+    r"(stop|remove|delete|list|show) (my |the )?watch(es)?\b|"
+    # Real Google Calendar integration (list/check/create/delete_calendar_event).
+    r"\b(my |the )?calendar\b|\b(schedule|book) (a |an )?(meeting|event|call)\b|"
+    r"(am i|check if i'?m) (free|busy|available)|"
+    r"what'?s on my (calendar|schedule)\b)\b",
     re.IGNORECASE,
 )
 
@@ -1334,9 +1381,9 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
         FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL]
         + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS
         + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS
-        + SMS_TOOLS + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
+        + SMS_TOOLS + WATCH_TOOLS + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
         + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS
-        + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS
+        + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + google_calendar.CALENDAR_TOOLS + NODE_TOOLS + DIFF_TOOLS
         + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
     )
 
@@ -1429,6 +1476,31 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
 
     if name == "spotify_control":
         return await handle_spotify_tool(tool_input)
+
+    if name == "list_calendar_events":
+        return await google_calendar.list_events(
+            tool_input.get("time_min"), tool_input.get("time_max"), tool_input.get("max_results", 10),
+        )
+    if name == "check_calendar_conflicts":
+        return await google_calendar.check_conflicts(tool_input.get("start", ""), tool_input.get("end", ""))
+    if name == "create_calendar_event":
+        approved = await telegram_notifier.request_approval(
+            f"Nancy wants to create a calendar event: {tool_input.get('summary')} "
+            f"({tool_input.get('start')} - {tool_input.get('end')})", timeout=120.0,
+        )
+        if not approved:
+            return {"success": False, "error": "User did not approve this calendar event."}
+        return await google_calendar.create_event(
+            tool_input.get("summary", ""), tool_input.get("start", ""), tool_input.get("end", ""),
+            tool_input.get("description"), tool_input.get("location"), tool_input.get("timezone_name"),
+        )
+    if name == "delete_calendar_event":
+        approved = await telegram_notifier.request_approval(
+            f"Nancy wants to delete calendar event: {tool_input.get('event_id')}", timeout=120.0,
+        )
+        if not approved:
+            return {"success": False, "error": "User did not approve deleting this calendar event."}
+        return await google_calendar.delete_event(tool_input.get("event_id", ""))
 
     if name == "node_execute_command":
         return await node_host.dispatch_command(
@@ -1534,6 +1606,22 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         if not providers:
             return {"success": False, "error": "No telephony provider is configured (e.g. TWILIO_ACCOUNT_SID)."}
         return await providers[0].send_sms(to_number, message)
+
+    if name == "create_watch":
+        try:
+            watch = watch_store.watch_store.create(
+                tool_input["url"], tool_input.get("description", ""), tool_input.get("kind", "text"),
+                tool_input.get("target_price"), tool_input.get("check_interval_minutes", 60.0),
+                tool_input.get("one_shot", True),
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, "watch_id": watch.id}
+    if name == "list_watches":
+        return {"success": True, "watches": [w.to_public_dict() for w in watch_store.watch_store.list()]}
+    if name == "delete_watch":
+        deleted = watch_store.watch_store.delete(tool_input.get("watch_id", ""))
+        return {"success": deleted} if deleted else {"success": False, "error": "No such watch."}
 
     if name in ("calculate", "convert_units", "convert_currency", "get_weather", "generate_password", "generate_qr_code", "shorten_url", "get_public_ip_info"):
         fn = getattr(everyday_tools, name)
@@ -4947,6 +5035,36 @@ async def websocket_endpoint(websocket: WebSocket):
                             websocket,
                         )
 
+            # ---- Voice ID: enroll a reference sample ----
+            elif msg_type == "voice_enroll":
+                audio_b64 = message.get("data")
+                if not audio_b64:
+                    await manager.send(json.dumps({"type": "voice_enroll_result", "success": False, "error": "No audio data"}), websocket)
+                else:
+                    try:
+                        decoded = decode_webm_opus_b64_to_pcm(audio_b64, target_sample_rate=voice_id.TARGET_SAMPLE_RATE)
+                        audio_np = pcm_int16_to_float32(decoded.pcm_int16)
+                        loop = asyncio.get_event_loop()
+                        result = await loop.run_in_executor(None, voice_id.enroll, np.asarray(audio_np, dtype=np.float32), voice_id.TARGET_SAMPLE_RATE)
+                    except Exception as e:
+                        result = {"success": False, "error": str(e)}
+                    await manager.send(json.dumps({"type": "voice_enroll_result", **result}), websocket)
+
+            # ---- Voice ID: verify a sample against the enrolled profile ----
+            elif msg_type == "voice_verify":
+                audio_b64 = message.get("data")
+                if not audio_b64:
+                    await manager.send(json.dumps({"type": "voice_verify_result", "success": False, "error": "No audio data"}), websocket)
+                else:
+                    try:
+                        decoded = decode_webm_opus_b64_to_pcm(audio_b64, target_sample_rate=voice_id.TARGET_SAMPLE_RATE)
+                        audio_np = pcm_int16_to_float32(decoded.pcm_int16)
+                        loop = asyncio.get_event_loop()
+                        result = await loop.run_in_executor(None, voice_id.verify, np.asarray(audio_np, dtype=np.float32), voice_id.TARGET_SAMPLE_RATE)
+                    except Exception as e:
+                        result = {"success": False, "error": str(e), "match": None}
+                    await manager.send(json.dumps({"type": "voice_verify_result", **result}), websocket)
+
             # ---- Audio chunk (clap detection) ----
             elif msg_type == "clap_chunk":
                 audio_b64 = message.get("data")
@@ -5152,6 +5270,8 @@ async def startup_event():
     telegram_notifier.start_polling()
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_cron_execution_loop())
+    asyncio.create_task(_self_healing_loop())
+    asyncio.create_task(_watch_execution_loop())
     asyncio.create_task(_economic_calendar_loop())
     asyncio.create_task(_screen_context_loop())
     asyncio.create_task(_prewarm_tts())
@@ -5221,6 +5341,48 @@ async def _daily_briefing_loop() -> None:
         except Exception as e:
             logger.exception("Daily briefing failed: %s", e)
         # Loop back around -- next iteration recomputes tomorrow's target.
+
+
+async def _self_healing_loop() -> None:
+    """Runs self_healing's real resource + primary-LLM-backend checks every
+    SELF_HEALING_INTERVAL_SECONDS (default 5 min), notifying Telegram only
+    when a check's state actually changes (see self_healing._transitioned)
+    -- proactive, but never spammy."""
+    interval = float(os.getenv("SELF_HEALING_INTERVAL_SECONDS", "300"))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            messages = await self_healing.run_check_cycle()
+            for message in messages:
+                await telegram_notifier.send(message)
+        except Exception as e:
+            logger.exception("Self-healing check cycle failed: %s", e)
+
+
+async def _watch_execution_loop() -> None:
+    """Checks every active watch_store watch that's due (per its own
+    check_interval_minutes) every 60s, and pushes exactly one Telegram alert
+    when a real change is actually detected -- see watch_store.check_watch."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            for watch in watch_store.watch_store.due():
+                try:
+                    result = await watch_store.check_watch(watch)
+                    if not result.get("success"):
+                        logger.info("Watch %s check failed: %s", watch.id, result.get("error"))
+                        watch_store.watch_store.record_check(watch.id, None)
+                        continue
+                    if result.get("changed") and result.get("alert"):
+                        await telegram_notifier.send(result["alert"])
+                    watch_store.watch_store.record_check(
+                        watch.id, result.get("new_value"),
+                        deactivate=bool(result.get("changed") and watch.one_shot),
+                    )
+                except Exception:
+                    logger.exception("Watch %s check raised", watch.id)
+        except Exception as e:
+            logger.exception("Watch execution loop failed: %s", e)
 
 
 async def _cron_execution_loop() -> None:
