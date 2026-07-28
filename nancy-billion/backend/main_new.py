@@ -30,7 +30,7 @@ import hashlib
 import threading
 from contextvars import ContextVar
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -78,6 +78,9 @@ from providers.bootstrap import load_all_providers
 from channels.bootstrap import load_all_channels
 import security_lint
 import arm_switch
+import lockdown_switch
+import focus_mode
+import macro_store
 from llm_task import structured_llm_call, UTILITY_TOOLS
 from workspace_uri import resolve_oc_path
 from backup_tool import create_backup, list_backups, BACKUP_TOOLS
@@ -276,6 +279,116 @@ WATCH_TOOLS = [
         "name": "delete_watch",
         "description": "Stop and remove a watch.",
         "input_schema": {"type": "object", "properties": {"watch_id": {"type": "string"}}, "required": ["watch_id"]},
+    },
+]
+
+SECURITY_MODE_TOOLS = [
+    {
+        "name": "enable_lockdown",
+        "description": (
+            "Raise the security bar: while active, ANY sensitive command (file writes, terminal, SMS, "
+            "calendar, phone calls, screen/browser control, agent creation, backups) requires a real, "
+            "confirmed voice match to skip a Telegram approval prompt -- typed commands and unclear "
+            "voice samples are treated as unverified and always trigger one, even during an armed "
+            "session. Use when the user explicitly asks to 'lock down' / 'lock yourself down'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "duration_minutes": {"type": "number", "description": "Default 60, max 1440 (24h)."},
+                "reason": {"type": "string"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "disable_lockdown",
+        "description": "Turn off lockdown mode (also called 'stand down').",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "enable_focus_mode",
+        "description": (
+            "Notification triage: while active, informational Telegram pushes (self-healing status "
+            "changes, watch alerts, scheduled telegram_message cron jobs) are queued instead of sent "
+            "immediately -- approval requests are NEVER queued, they still arrive right away since "
+            "they're genuinely blocking. Queued messages deliver as one digest when focus mode ends."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"duration_minutes": {"type": "number", "description": "Default 60, max 480 (8h)."}},
+            "required": [],
+        },
+    },
+    {
+        "name": "disable_focus_mode",
+        "description": "Turn off focus mode now and immediately deliver whatever was queued, as one digest.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
+MACRO_TOOLS = [
+    {
+        "name": "create_macro",
+        "description": (
+            "Save a named 'scene macro' -- an ordered sequence of tool calls that runs together under "
+            "one name (e.g. 'movie mode' = dim the lights via ha_call_service + open the media app via "
+            "open_application). Each step still goes through its own normal safety gating when the "
+            "macro runs -- creating the macro itself doesn't skip that, it just saves the sequence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "steps": {
+                    "type": "array",
+                    "description": "Steps to run in order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"type": "string", "description": "Name of any other real tool Billion has."},
+                            "args": {"type": "object", "description": "That tool's arguments."},
+                        },
+                        "required": ["tool"],
+                    },
+                },
+            },
+            "required": ["name", "steps"],
+        },
+    },
+    {
+        "name": "run_macro",
+        "description": "Run a saved scene macro by name, executing its steps in order.",
+        "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+    },
+    {
+        "name": "list_macros",
+        "description": "List all saved scene macros and their steps.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "delete_macro",
+        "description": "Delete a saved scene macro.",
+        "input_schema": {"type": "object", "properties": {"macro_id": {"type": "string"}}, "required": ["macro_id"]},
+    },
+]
+
+DEVICE_ROUTING_TOOLS = [
+    {
+        "name": "set_active_device",
+        "description": (
+            "Declare which connected device/tab should be treated as 'where the user currently is' -- "
+            "e.g. 'follow me to the workshop' / 'I'm on my tablet now'. Proactive pushes (background "
+            "task completion, self-healing/watch alerts) that would otherwise go to every connected "
+            "tab get sent to this one instead, when it's actually connected; falls back to broadcasting "
+            "to everyone if it isn't (never silently drops a real notification)."
+        ),
+        "input_schema": {"type": "object", "properties": {"device_label": {"type": "string"}}, "required": ["device_label"]},
+    },
+    {
+        "name": "list_connected_devices",
+        "description": "List the device labels currently connected (see register_device), and which one (if any) is the active follow-me target.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]
 
@@ -534,6 +647,14 @@ class ConnectionManager:
         # each other for TTS playback.
         self._turn_tasks: Dict[WebSocket, "asyncio.Task"] = {}
         self._turn_counters: Dict[WebSocket, int] = {}
+        # Real cross-device "follow me" -- a connected tab can declare a
+        # human-readable label (register_device WS message); set_active_device
+        # then makes proactive personal pushes (_broadcast_reply_to_web)
+        # prefer that one connection instead of every open tab. In-memory
+        # only (tied to live connections, which don't survive a restart
+        # anyway, so there's nothing meaningful to persist).
+        self.device_labels: Dict[WebSocket, str] = {}
+        self.active_device_label: Optional[str] = None
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -547,7 +668,31 @@ class ConnectionManager:
         if task and not task.done():
             task.cancel()
         self._turn_counters.pop(websocket, None)
+        self.device_labels.pop(websocket, None)
         logger.info("WebSocket disconnected. Total: %d", len(self.active_connections))
+
+    def register_device(self, websocket: WebSocket, label: str) -> None:
+        self.device_labels[websocket] = label
+
+    def connected_device_labels(self) -> List[str]:
+        return list(self.device_labels.values())
+
+    async def broadcast_or_route(self, message: str) -> None:
+        """Like broadcast, but prefers the active-device connection (see
+        set_active_device) when one is actually connected -- falls back to a
+        real broadcast to everyone otherwise, so a stale/disconnected
+        preference never silently swallows a real notification."""
+        if self.active_device_label:
+            target = next(
+                (ws for ws, label in self.device_labels.items() if label == self.active_device_label), None,
+            )
+            if target is not None:
+                try:
+                    await target.send_text(message)
+                    return
+                except Exception:
+                    self.disconnect(target)
+        await self.broadcast(message)
 
     async def send(self, message: str, websocket: WebSocket):
         await websocket.send_text(message)
@@ -1157,9 +1302,36 @@ _WANTS_TOOLS_RE = re.compile(
     # Real Google Calendar integration (list/check/create/delete_calendar_event).
     r"\b(my |the )?calendar\b|\b(schedule|book) (a |an )?(meeting|event|call)\b|"
     r"(am i|check if i'?m) (free|busy|available)|"
-    r"what'?s on my (calendar|schedule)\b)\b",
+    r"what'?s on my (calendar|schedule)\b|"
+    # Real lockdown / focus mode toggles (enable/disable_lockdown, enable/disable_focus_mode).
+    r"lock (yourself |your)?self down|(enable|engage|start) lockdown|\bstand down\b|(disable|end|exit) lockdown|"
+    r"(focus mode|do not disturb|heads?[- ]down|quiet mode)\b|"
+    # Real scene macros (create/run/list/delete_macro) -- generic vocabulary;
+    # a saved macro's own custom name (e.g. "movie mode") is matched
+    # separately and dynamically, see _matches_macro_name.
+    r"(run|start|trigger|execute) (the |my )?.{0,30}(macro|scene)\b|"
+    r"(create|save|make) (a |the )?(new )?(macro|scene)\b|(list|show|delete|remove) (my |the )?macros?\b|"
+    # Real cross-device follow-me (set_active_device/list_connected_devices) --
+    # requires an explicit device/place noun, not just any "I'm on/at ..."
+    # sentence (which would false-trigger on ordinary conversation).
+    r"follow me (to|on)|(i'?m|i am) (now )?(on|at) (my |the )?(phone|tablet|laptop|desktop|computer|workshop|office|\w+ device)\b|"
+    r"(list|show) (my |the )?(connected )?devices\b)\b",
     re.IGNORECASE,
 )
+
+
+def _matches_macro_name(user_text: str) -> bool:
+    """A saved macro's own custom name (e.g. "movie mode") can't be baked
+    into _WANTS_TOOLS_RE ahead of time since it's user-defined -- checked
+    dynamically instead, so "Billion, movie mode" routes to the real tool
+    loop the moment that macro exists, with no code change needed."""
+    lower = user_text.lower()
+    return any(m.name.lower() in lower for m in macro_store.macro_store.list())
+
+
+def _wants_tools(user_text: str) -> bool:
+    return bool(_WANTS_TOOLS_RE.search(user_text)) or _matches_macro_name(user_text)
+
 
 # Real tool-use fallback chain -- Claude is tried first (richest: vision
 # support in tool results, native structured tool_use), but confirmed live
@@ -1389,7 +1561,8 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
         FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL]
         + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS
         + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS
-        + SMS_TOOLS + WATCH_TOOLS + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
+        + SMS_TOOLS + WATCH_TOOLS + SECURITY_MODE_TOOLS + MACRO_TOOLS + DEVICE_ROUTING_TOOLS
+        + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
         + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS
         + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + google_calendar.CALENDAR_TOOLS + NODE_TOOLS + DIFF_TOOLS
         + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
@@ -1416,11 +1589,19 @@ async def _open_application_dispatch(target: str, args: Optional[List[str]] = No
 
 
 def _voice_mismatch() -> bool:
-    """True only when THIS turn's audio was actually checked against an
-    enrolled voice profile and it did NOT match -- always False for typed
-    input, and always False when no profile is enrolled (nothing to compare
-    against, so there's no signal to act on)."""
+    """Normally: True only when THIS turn's audio was actually checked
+    against an enrolled voice profile and it did NOT match -- always False
+    for typed input, and always False when no profile is enrolled (nothing
+    to compare against, so there's no signal to act on).
+
+    During lockdown_switch's window, the bar raises: anything short of a
+    real, confirmed voice match counts as a mismatch, including typed text
+    (no voice at all to check) and an inconclusive check (too-short/silent
+    clip) -- "Billion, lock down" means "don't act on anything I didn't
+    personally say," not just "flag the ones that clearly didn't match."""
     voice_match = _current_voice_match.get()
+    if lockdown_switch.is_active():
+        return not (voice_match and voice_match.get("match") is True)
     return bool(voice_match and voice_match.get("match") is False)
 
 
@@ -1438,14 +1619,37 @@ async def _request_approval(description: str, timeout: float = 120.0) -> bool:
     negative (background noise, a cold, a different mic) degrades to "one
     extra approval tap," never to a hard denial."""
     if _voice_mismatch():
-        voice_match = _current_voice_match.get() or {}
-        similarity = voice_match.get("similarity")
-        sim_text = f" (similarity {similarity})" if similarity is not None else ""
-        description = (
-            f"⚠️ VOICE DID NOT MATCH your enrolled profile{sim_text} -- this command came "
-            f"from a voice Billion doesn't recognize.\n\n{description}"
-        )
+        voice_match = _current_voice_match.get()
+        if voice_match and voice_match.get("similarity") is not None:
+            warning = f"⚠️ VOICE DID NOT MATCH your enrolled profile (similarity {voice_match['similarity']}) -- this command came from a voice Billion doesn't recognize."
+        elif lockdown_switch.is_active():
+            warning = "⚠️ LOCKDOWN ACTIVE and this command had no confirmed matching voice (typed, or an unclear sample) -- Billion is treating it as unverified."
+        else:
+            warning = "⚠️ VOICE CHECK inconclusive for this command -- treating it as unverified."
+        description = f"{warning}\n\n{description}"
     return await telegram_notifier.request_approval(description, timeout=timeout)
+
+
+async def _run_macro(macro: "macro_store.Macro") -> Dict[str, Any]:
+    """Replays each step of a saved macro through the exact same
+    _execute_file_tool dispatcher every other tool call goes through, so
+    each step's own safety gating (approval, arm_switch, voice match) still
+    applies exactly as if it had been called directly -- a macro is a
+    shortcut for calling several real tools in a row, never a way to skip
+    what any one of them would normally require. Stops at the first real
+    step failure rather than blindly running the rest."""
+    results: List[Dict[str, Any]] = []
+    for step in macro.steps:
+        step_tool = step.get("tool", "")
+        step_args = step.get("args") or {}
+        try:
+            result = await _execute_file_tool(step_tool, step_args)
+        except Exception as e:
+            result = {"success": False, "error": str(e)}
+        results.append({"tool": step_tool, "result": result})
+        if not result.get("success", True):
+            break
+    return {"success": all(r["result"].get("success", True) for r in results), "steps_run": results}
 
 
 async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: str = "") -> Dict[str, Any]:
@@ -1663,6 +1867,46 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
     if name == "delete_watch":
         deleted = watch_store.watch_store.delete(tool_input.get("watch_id", ""))
         return {"success": deleted} if deleted else {"success": False, "error": "No such watch."}
+
+    if name == "enable_lockdown":
+        return lockdown_switch.enable(tool_input.get("duration_minutes", 60) * 60.0, tool_input.get("reason"))
+    if name == "disable_lockdown":
+        return lockdown_switch.disable()
+    if name == "enable_focus_mode":
+        return focus_mode.enable(tool_input.get("duration_minutes", 60) * 60.0)
+    if name == "disable_focus_mode":
+        queued = focus_mode.disable_and_flush()
+        if queued:
+            digest = "While you were focused, Sir, here's what happened:\n\n" + "\n".join(f"- {m['text']}" for m in queued)
+            await telegram_notifier.send(digest)
+        return {"success": True, "queued_count": len(queued)}
+
+    if name == "create_macro":
+        try:
+            macro = macro_store.macro_store.create(tool_input.get("name", ""), tool_input.get("steps", []))
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, "macro_id": macro.id}
+    if name == "run_macro":
+        macro = macro_store.macro_store.find_by_name(tool_input.get("name", ""))
+        if macro is None:
+            return {"success": False, "error": f"No macro named {tool_input.get('name')!r}."}
+        return await _run_macro(macro)
+    if name == "list_macros":
+        return {"success": True, "macros": [m.to_public_dict() for m in macro_store.macro_store.list()]}
+    if name == "delete_macro":
+        deleted = macro_store.macro_store.delete(tool_input.get("macro_id", ""))
+        return {"success": deleted} if deleted else {"success": False, "error": "No such macro."}
+
+    if name == "set_active_device":
+        manager.active_device_label = tool_input.get("device_label", "").strip() or None
+        return {"success": True, "active_device_label": manager.active_device_label}
+    if name == "list_connected_devices":
+        return {
+            "success": True,
+            "connected_devices": manager.connected_device_labels(),
+            "active_device_label": manager.active_device_label,
+        }
 
     if name in ("calculate", "convert_units", "convert_currency", "get_weather", "generate_password", "generate_qr_code", "shorten_url", "get_public_ip_info"):
         fn = getattr(everyday_tools, name)
@@ -1988,7 +2232,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
     # (up to 5 sequential calls per backend even when no tool ends up being
     # called), which is why this only runs when the message plausibly needs
     # a tool at all -- not for every message the way it originally did.
-    if _WANTS_TOOLS_RE.search(user_text):
+    if _wants_tools(user_text):
         async def _file_tool_executor(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
             # Binds this turn's real user_text in as a write_file extension
             # hint -- see _explicit_language_hint -- without changing the
@@ -2143,7 +2387,7 @@ async def _generate_response_stream(user_text: str):
             routed_key = _auto_route(user_text)
         except Exception:
             routed_key = None
-    wants_tools = _any_tool_backend_configured() and _WANTS_TOOLS_RE.search(user_text)
+    wants_tools = _any_tool_backend_configured() and _wants_tools(user_text)
 
     if routed_key or wants_tools:
         text, debug = await _generate_response_via_hierarchy(user_text)
@@ -2222,7 +2466,7 @@ async def _broadcast_reply_to_web(text: str, images: Optional[List[bytes]] = Non
     follow-up (see set_image_broadcaster) doesn't send it a second time."""
     for image_bytes in (images or []):
         try:
-            await manager.broadcast(json.dumps({
+            await manager.broadcast_or_route(json.dumps({
                 "type": "chat_image",
                 "data": base64.b64encode(image_bytes).decode(),
                 "source": source,
@@ -2232,7 +2476,7 @@ async def _broadcast_reply_to_web(text: str, images: Optional[List[bytes]] = Non
     if not text:
         return
     try:
-        await manager.broadcast(json.dumps({
+        await manager.broadcast_or_route(json.dumps({
             "type": "agent_response",
             "data": text,
             "source": source,
@@ -2518,10 +2762,26 @@ async def _build_real_personal_context() -> "PersonalContext":
     # Populate PersonalContext from Nancy actual data sources instead of
     # the hardcoded demo data in intelligent_greeting.py's own __main__ block
     # (that demo is exactly the "Docker build"/"Roxan deployment" example
-    # text -- illustrative of the tone, not real data). No calendar/meetings
-    # integration exists, so meetings_today is intentionally always empty
-    # rather than fabricated. Every other field is best-effort: any source
-    # that errors has nothing to report is just omitted, not faked.
+    # text -- illustrative of the tone, not real data). meetings_today is
+    # real Google Calendar data when providers/google_calendar.py is
+    # configured (GOOGLE_CALENDAR_REFRESH_TOKEN etc.), and honestly empty --
+    # never fabricated -- when it isn't. Every other field is best-effort:
+    # any source that errors has nothing to report is just omitted, not faked.
+    meetings_today: list = []
+    if google_calendar.is_configured():
+        try:
+            now = datetime.now(timezone.utc)
+            end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
+            cal_result = await google_calendar.list_events(
+                time_min=now.isoformat(), time_max=end_of_day.isoformat(), max_results=10,
+            )
+            if cal_result.get("success"):
+                for event in cal_result.get("events", []):
+                    start = event.get("start") or ""
+                    time_part = start[11:16] if len(start) >= 16 else start
+                    meetings_today.append(f"{event.get('summary', 'Untitled event')} at {time_part}")
+        except Exception as e:
+            logger.debug("Greeting: calendar data unavailable: %s", e)
     # Real pairs the user actually trades/watches -- trading_manager.watched_pairs
     # (explicit) unioned with whatever pairs appear in real trade history, never
     # a hardcoded pair list. Confirmed live: this used to always report EUR/USD
@@ -2582,7 +2842,7 @@ async def _build_real_personal_context() -> "PersonalContext":
         logger.debug("Greeting: system status unavailable: %s", e)
 
     return PersonalContext(
-        meetings_today=[],  # no calendar integration -- honestly empty, not fabricated
+        meetings_today=meetings_today,
         build_status=None,  # no CI/build system integration exists
         market_alerts=market_alerts,
         project_updates=project_updates,
@@ -2596,13 +2856,12 @@ async def _build_real_personal_context() -> "PersonalContext":
 async def get_personalized_greeting(payload: Dict = None):
     """
     Get Nancy's intelligent personalized greeting, built from real data:
-    live forex rates, memory/projects, open trades, and pending
-    self-improvement proposals. No meetings/build-status fields are
-    fabricated -- those sources (calendar, CI) aren't connected, so they're
-    honestly omitted rather than invented.
+    live forex rates, memory/projects, open trades, pending self-improvement
+    proposals, and today's real Google Calendar events when
+    providers/google_calendar.py is configured. build_status is still
+    honestly omitted (no CI integration exists) rather than invented.
 
-    Optional request body fields override/extend the real-data context
-    (e.g. to add a meeting once a calendar integration exists).
+    Optional request body fields override/extend the real-data context.
     """
     context = await _build_real_personal_context()
 
@@ -5316,6 +5575,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         websocket,
                     )
 
+            elif msg_type == "register_device":
+                # Real "which device is this" declaration for cross-device
+                # follow-me (see set_active_device tool / broadcast_or_route).
+                label = str(message.get("label", "")).strip()
+                if label:
+                    manager.register_device(websocket, label)
+
             elif msg_type == "ping":
                 await manager.send(json.dumps({"type": "pong"}), websocket)
 
@@ -5436,18 +5702,39 @@ async def _daily_briefing_loop() -> None:
         # Loop back around -- next iteration recomputes tomorrow's target.
 
 
+async def _send_or_queue(text: str) -> None:
+    """The one chokepoint every INFORMATIONAL proactive push (self-healing
+    status, watch alerts, scheduled telegram_message cron jobs) routes
+    through -- sends immediately unless focus_mode is active, in which case
+    it queues instead and delivers as part of one consolidated digest when
+    focus mode ends. Approval requests never go through this: they're
+    genuinely blocking work, not ambient noise, so they always call
+    telegram_notifier.request_approval directly and arrive right away."""
+    if focus_mode.is_active():
+        focus_mode.queue_message(text)
+    else:
+        await telegram_notifier.send(text)
+
+
 async def _self_healing_loop() -> None:
     """Runs self_healing's real resource + primary-LLM-backend checks every
     SELF_HEALING_INTERVAL_SECONDS (default 5 min), notifying Telegram only
     when a check's state actually changes (see self_healing._transitioned)
-    -- proactive, but never spammy."""
+    -- proactive, but never spammy. Also owns focus_mode's own expiry check,
+    since this loop already runs on a real, steady interval."""
     interval = float(os.getenv("SELF_HEALING_INTERVAL_SECONDS", "300"))
     while True:
         await asyncio.sleep(interval)
         try:
             messages = await self_healing.run_check_cycle()
             for message in messages:
-                await telegram_notifier.send(message)
+                await _send_or_queue(message)
+            expired_queue = focus_mode.check_and_flush_if_expired()
+            if expired_queue:
+                digest = "Focus mode ended, Sir -- here's what happened while you were heads-down:\n\n" + "\n".join(
+                    f"- {m['text']}" for m in expired_queue
+                )
+                await telegram_notifier.send(digest)
         except Exception as e:
             logger.exception("Self-healing check cycle failed: %s", e)
 
@@ -5467,7 +5754,7 @@ async def _watch_execution_loop() -> None:
                         watch_store.watch_store.record_check(watch.id, None)
                         continue
                     if result.get("changed") and result.get("alert"):
-                        await telegram_notifier.send(result["alert"])
+                        await _send_or_queue(result["alert"])
                     watch_store.watch_store.record_check(
                         watch.id, result.get("new_value"),
                         deactivate=bool(result.get("changed") and watch.one_shot),
@@ -5495,7 +5782,7 @@ async def _cron_execution_loop() -> None:
                 try:
                     if job.action_type == "telegram_message":
                         text = job.action_payload.get("text", "")
-                        await telegram_notifier.send(text)
+                        await _send_or_queue(text)
                         cron_store.mark_run(job.id, "sent telegram message")
                         await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": "sent telegram message"})
                     elif job.action_type == "agent_task":
