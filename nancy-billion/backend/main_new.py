@@ -602,11 +602,36 @@ def _live_context_bridge_context() -> str:
 FILE_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "read_file",
-        "description": "Read the text content of a file on the user's computer, given an absolute or ~-relative path.",
+        "description": (
+            "Read the text content of a file on the user's computer, given an absolute or ~-relative path. "
+            "Large files are paginated: the result's has_more/end_line tell you whether there's more -- if "
+            "has_more is true, call again with offset=end_line to continue reading from there."
+        ),
         "input_schema": {
             "type": "object",
-            "properties": {"path": {"type": "string"}},
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "description": "0-indexed line number to start reading from. Default 0 (start of file)."},
+                "limit": {"type": "integer", "description": "Maximum number of lines to read. Default: as many as fit in one call."},
+            },
             "required": ["path"],
+        },
+    },
+    {
+        "name": "glob_files",
+        "description": (
+            "Find files by NAME pattern (e.g. '**/*.py' for every Python file, '*.tsx' for top-level "
+            "TypeScript React files) under a directory, most-recently-modified first. Use this to see what "
+            "files exist before deciding what to read_file/search_files -- complements search_files, which "
+            "searches file CONTENT rather than names."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "path": {"type": "string", "description": "Directory to search under. Defaults to the current directory."},
+            },
+            "required": ["pattern"],
         },
     },
     {
@@ -836,7 +861,15 @@ _WANTS_TOOLS_RE = re.compile(
     r"(write|generate) (some |a |the )?code|"
     r"in (my|the|this) (project|codebase|repo|repository)|"
     r"(your|billion'?s|nancy'?s) (own )?source code|"
-    r"pull request)\b",
+    r"pull request|"
+    # Bare "search"/"find" requests -- confirmed live this session: without
+    # this, a natural phrasing like "search /app for glob_files" matched no
+    # keyword at all, so no tool was even offered, and the model fabricated
+    # a plausible-looking (wrong) answer instead of saying it didn't know.
+    r"search (my |the |this )?(codebase|repo|repository|project|directory|folder|files?)\b|"
+    r"search .{0,60}\bfor\b|"
+    r"find .{0,60}\bin (my|the|this) (codebase|project|repo|repository|directory|folder)|"
+    r"glob)\b",
     re.IGNORECASE,
 )
 
@@ -849,9 +882,29 @@ _WANTS_TOOLS_RE = re.compile(
 # all OpenAI-chat-completions-compatible, tried in order until one actually
 # has a key configured -- see generate_with_tools_openai_compat (llm.py) and
 # its use in _generate_response_via_hierarchy below.
+# Order matters -- tried top to bottom. OpenRouter goes first: live-tested
+# this session, Groq's on-demand tier's 12k-tokens-per-minute cap fails on
+# essentially every real tool-use request regardless of how small the tool
+# list is trimmed (see _trim_tools_for_fallback), so trying it first just
+# burns a guaranteed-fail round trip before ever reaching something that
+# works.
+#
+# OPENROUTER_MODEL stays "openrouter/auto" rather than a pinned model --
+# tried pinning to a real Claude model (anthropic/claude-haiku-4.5) to fix a
+# live-observed fabrication bug (the auto-router's cost-optimized pick
+# skipped calling read_file and invented plausible-looking file content
+# instead of actually reading it). That made things WORSE: this account's
+# OpenRouter tier caps named/premium models at ~9840 prompt tokens, and
+# Nancy's assembled prompt (system prompt + live context + skills + history)
+# runs ~24k tokens even with the trimmed tool list -- every request to the
+# pinned model failed outright (402 Prompt tokens limit exceeded) instead of
+# sometimes fabricating. "auto" evidently routes around that cap. The real
+# fix for the fabrication risk is TOOL_RESULT_FIDELITY_INSTRUCTION (llm.py),
+# not the model choice -- a fallback that answers unreliably beats one that
+# doesn't answer at all.
 TOOL_FALLBACK_BACKENDS = [
-    ("GROQ_API_KEY", "https://api.groq.com/openai/v1", "GROQ_MODEL", "llama-3.3-70b-versatile", "GroqLLM"),
     ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "OPENROUTER_MODEL", "openrouter/auto", "OpenRouterLLM"),
+    ("GROQ_API_KEY", "https://api.groq.com/openai/v1", "GROQ_MODEL", "llama-3.3-70b-versatile", "GroqLLM"),
     ("OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "OPENCODE_MODEL", "big-pickle", "OpenCodeLLM"),
 ]
 
@@ -869,7 +922,7 @@ def _any_tool_backend_configured() -> bool:
 # request needs, cut by name (not by rebuilding the list) so it can't drift
 # out of sync with what FILE_TOOLS/WEB_TOOLS/etc. actually contain.
 _FALLBACK_TOOL_NAMES = {
-    "read_file", "list_directory", "search_files", "write_file", "edit_file",
+    "read_file", "list_directory", "glob_files", "search_files", "write_file", "edit_file",
     "delete_file", "move_file", "execute_command", "fetch_url", "web_search",
     "post_to_canvas",
 }
@@ -944,6 +997,20 @@ CANVAS_TOOL: Dict[str, Any] = {
         "required": ["type", "title", "content"],
     },
 }
+
+
+def _attach_python_syntax_check(result: Dict[str, Any], path: str) -> None:
+    """Real verification after a write/edit actually lands on disk -- the
+    same discipline Claude Code itself follows (compile-check a file right
+    after touching it) rather than trusting a write succeeded just because
+    no exception was raised. Only Python is covered here (file_access's
+    check_python_syntax uses the builtin compiler, no external tooling
+    needed); lsp_client's diagnostics check, called right after this,
+    covers JS/TS too when a language server happens to be available."""
+    if result.get("success") and path.endswith(".py"):
+        error = file_access.check_python_syntax(path)
+        if error:
+            result["syntax_error"] = error
 
 
 async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: str = "") -> Dict[str, Any]:
@@ -1077,9 +1144,11 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             return {"success": False, "error": "User did not approve this file operation."}
 
     if name == "read_file":
-        return file_access.read_file(tool_input["path"])
+        return file_access.read_file(tool_input["path"], tool_input.get("offset", 0), tool_input.get("limit"))
     if name == "list_directory":
         return file_access.list_directory(tool_input["path"])
+    if name == "glob_files":
+        return file_access.glob_files(tool_input.get("pattern", ""), tool_input.get("path", "."))
     if name == "search_files":
         return file_access.search_files(
             tool_input.get("pattern", ""), tool_input.get("path", "."),
@@ -1093,6 +1162,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         )
         evidence_ledger.record_evidence("edit_file", path, result.get("success", False))
         if result.get("success"):
+            _attach_python_syntax_check(result, path)
             try:
                 diag_result = await asyncio.wait_for(
                     lsp_client.diagnostics_before_after_write(path, result.get("old_content"), result.get("new_content")),
@@ -1114,6 +1184,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         result = file_access.write_file(str(resolved_write_path), tool_input["content"])
         evidence_ledger.record_evidence("write_file", str(resolved_write_path), result.get("success", False))
         if result.get("success"):
+            _attach_python_syntax_check(result, str(resolved_write_path))
             try:
                 diag_result = await asyncio.wait_for(
                     lsp_client.diagnostics_before_after_write(str(resolved_write_path), old_content, tool_input["content"]),
@@ -3563,8 +3634,21 @@ async def files_browse_route(path: str = "."):
 
 
 @app.get("/files/read", dependencies=[Depends(require_auth), Depends(rate_limit)])
-async def files_read_route(path: str):
-    return file_access.read_file(path)
+async def files_read_route(path: str, offset: int = 0, limit: Optional[int] = None):
+    """offset/limit added so the Command Layer's code editor can page through
+    a file bigger than the per-call byte cap (this codebase's own
+    main_new.py is one) instead of only ever seeing a silent truncation."""
+    return file_access.read_file(path, offset, limit)
+
+
+@app.get("/files/search", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def files_search_route(pattern: str, path: str = ".", glob: str = "", case_sensitive: bool = False):
+    return file_access.search_files(pattern, path, glob, case_sensitive)
+
+
+@app.get("/files/glob", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def files_glob_route(pattern: str, path: str = "."):
+    return file_access.glob_files(pattern, path)
 
 
 class FileWriteRequest(BaseModel):
@@ -3581,8 +3665,39 @@ async def files_write_route(req: FileWriteRequest):
         approved = await telegram_notifier.request_approval(f"Command Layer wants to: {description}", timeout=120.0)
         if not approved:
             return {"success": False, "error": "User did not approve this file write."}
+    await lifecycle_hooks.fire_hook("pre_write", {"path": req.path})
     result = file_access.write_file(req.path, req.content)
     evidence_ledger.record_evidence("write_file", req.path, result.get("success", False))
+    if result.get("success"):
+        _attach_python_syntax_check(result, req.path)
+    return result
+
+
+class FileEditRequest(BaseModel):
+    path: str
+    old_string: str
+    new_string: str
+    replace_all: bool = False
+
+
+@app.post("/files/edit", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def files_edit_route(req: FileEditRequest):
+    """Surgical old_string/new_string replace for the Command Layer editor --
+    same idiom and safety pipeline as write, see files_write_route."""
+    if not arm_switch.is_armed():
+        description = (
+            f"Edit file: {req.path}\n\n- {req.old_string[:200]!r}\n+ {req.new_string[:200]!r}"
+        )
+        approved = await telegram_notifier.request_approval(f"Command Layer wants to: {description}", timeout=120.0)
+        if not approved:
+            return {"success": False, "error": "User did not approve this file edit."}
+    await lifecycle_hooks.fire_hook("pre_write", {"path": req.path})
+    result = file_access.edit_file(req.path, req.old_string, req.new_string, req.replace_all)
+    evidence_ledger.record_evidence("edit_file", req.path, result.get("success", False))
+    if result.get("success"):
+        _attach_python_syntax_check(result, req.path)
+        result.pop("old_content", None)
+        result.pop("new_content", None)
     return result
 
 

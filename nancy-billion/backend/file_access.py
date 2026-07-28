@@ -14,11 +14,13 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from workspace_uri import resolve_oc_path
 
-MAX_READ_BYTES = 200_000  # cap how much file content gets pulled into a prompt
+MAX_READ_BYTES = 200_000  # per-call cap, regardless of offset/limit -- keeps
+# one call from blowing the model's context even when it deliberately asks
+# for a huge slice
 
 # Directories a real codebase search should never descend into -- matches
 # what a human (or Claude Code's own Grep) would skip: generated/vendored
@@ -32,19 +34,55 @@ MAX_SEARCH_RESULTS = 100
 MAX_SEARCH_FILE_BYTES = 2_000_000  # skip scanning anything bigger (almost certainly not source)
 
 
-def read_file(path: str) -> Dict[str, Any]:
+def read_file(path: str, offset: int = 0, limit: Optional[int] = None) -> Dict[str, Any]:
+    """Read a file's text, optionally from a given 1-indexed line `offset`
+    and capped at `limit` lines -- the same offset/limit idiom as Claude
+    Code's own Read tool. Without this, a file over MAX_READ_BYTES (this
+    project's own main_new.py is one -- 214KB against a 200KB cap) was
+    silently cut off with no way to ever see the rest of it. `has_more`/
+    `end_line` tell the caller exactly how to page to the next chunk."""
     p = Path(resolve_oc_path(path)).expanduser()
     if not p.exists():
         return {"success": False, "error": f"No such file: {path}"}
     if not p.is_file():
         return {"success": False, "error": f"Not a file: {path}"}
     try:
-        data = p.read_bytes()
+        raw = p.read_bytes()
     except Exception as e:
         return {"success": False, "error": str(e)}
-    truncated = len(data) > MAX_READ_BYTES
-    text = data[:MAX_READ_BYTES].decode("utf-8", errors="replace")
-    return {"success": True, "path": str(p), "content": text, "truncated": truncated, "size_bytes": len(data)}
+
+    full_text = raw.decode("utf-8", errors="replace")
+    lines = full_text.splitlines()
+    total_lines = len(lines)
+    start = max(0, offset)
+    selected = lines[start:start + limit] if limit is not None else lines[start:]
+
+    # Hard byte-size safety net even within the requested slice, clipped on
+    # a line boundary so the result is always valid readable text rather
+    # than a mid-line cut.
+    truncated = False
+    kept: List[str] = []
+    size = 0
+    for line in selected:
+        line_size = len(line.encode("utf-8")) + 1
+        if size + line_size > MAX_READ_BYTES:
+            truncated = True
+            break
+        kept.append(line)
+        size += line_size
+
+    end_line = start + len(kept)
+    return {
+        "success": True,
+        "path": str(p),
+        "content": "\n".join(kept),
+        "total_lines": total_lines,
+        "start_line": start,
+        "end_line": end_line,
+        "has_more": end_line < total_lines,
+        "truncated": truncated,
+        "size_bytes": len(raw),
+    }
 
 
 def list_directory(path: str) -> Dict[str, Any]:
@@ -158,6 +196,60 @@ def search_files(pattern: str, path: str = ".", glob: str = "", case_sensitive: 
         "success": True, "pattern": pattern, "matches": matches,
         "files_matched": len(files_matched), "total_matches": len(matches), "truncated": truncated,
     }
+
+
+def check_python_syntax(path: str) -> Optional[str]:
+    """Real syntax check via the builtin compile() -- the exact same
+    AST-parse-level check `python -m py_compile` does, just in-process (no
+    subprocess, no server). This is what Claude Code's own edit loop
+    effectively gets for free from language tooling; without it, a Python
+    write/edit that introduced a syntax error just silently succeeded and
+    the model never found out unless the human noticed and said something.
+    Returns an error string, or None if the file parses cleanly. Only wired
+    up for .py -- see main_new.py's _execute_file_tool."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            source = f.read()
+        compile(source, path, "exec")
+        return None
+    except SyntaxError as e:
+        return f"{e.msg} (line {e.lineno}, col {e.offset})"
+    except Exception as e:
+        return str(e)
+
+
+def glob_files(pattern: str, path: str = ".") -> Dict[str, Any]:
+    """Find files by NAME pattern (e.g. '**/*.py', '*.tsx') under a
+    directory, most-recently-modified first -- the same job Claude Code's
+    own Glob tool does. Complements search_files, which searches file
+    CONTENT: this is for "what files are there" rather than "where does X
+    appear."""
+    root = Path(resolve_oc_path(path)).expanduser()
+    if not root.exists():
+        return {"success": False, "error": f"No such path: {path}"}
+    if not root.is_dir():
+        return {"success": False, "error": f"Not a directory: {path}"}
+    try:
+        candidates = list(root.glob(pattern))
+    except Exception as e:
+        return {"success": False, "error": f"Invalid glob pattern: {e}"}
+
+    dated: List[tuple] = []
+    for p in candidates:
+        if not p.is_file():
+            continue
+        rel_parts = p.relative_to(root).parts[:-1]
+        if any(part in _SEARCH_SKIP_DIRS or part.startswith(".") for part in rel_parts):
+            continue
+        try:
+            dated.append((p.stat().st_mtime, str(p)))
+        except OSError:
+            continue
+
+    dated.sort(key=lambda t: t[0], reverse=True)
+    truncated = len(dated) > MAX_SEARCH_RESULTS
+    matches = [path_str for _, path_str in dated[:MAX_SEARCH_RESULTS]]
+    return {"success": True, "pattern": pattern, "matches": matches, "count": len(matches), "truncated": truncated}
 
 
 def delete_file(path: str) -> Dict[str, Any]:

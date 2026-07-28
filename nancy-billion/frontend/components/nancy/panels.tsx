@@ -43,8 +43,10 @@ import {
   TrendingUp,
   AlertTriangle,
   Save,
+  Search,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import Editor from '@monaco-editor/react'
 
 function useTick(ms = 1000) {
   const [t, setT] = useState(0)
@@ -1250,6 +1252,24 @@ function BrowserApp() {
   )
 }
 
+// Real code-editor language detection from a file's extension, for
+// Monaco's syntax highlighting -- falls back to plain text for anything
+// unrecognized rather than guessing wrong.
+const EXT_TO_MONACO_LANGUAGE: Record<string, string> = {
+  py: 'python', js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  ts: 'typescript', tsx: 'typescript', json: 'json', html: 'html', css: 'css', scss: 'scss',
+  md: 'markdown', sh: 'shell', bash: 'shell', yml: 'yaml', yaml: 'yaml', sql: 'sql',
+  java: 'java', c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp', cs: 'csharp', go: 'go', rs: 'rust',
+  rb: 'ruby', php: 'php', xml: 'xml', toml: 'ini', env: 'ini', dockerfile: 'dockerfile',
+}
+function languageForPath(path: string): string {
+  const name = path.split(/[\\/]/).pop() ?? path
+  const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : name.toLowerCase()
+  return EXT_TO_MONACO_LANGUAGE[ext] ?? 'plaintext'
+}
+
+interface FileSearchMatch { file: string; line: number; text: string }
+
 function FilesApp() {
   const [path, setPath] = useState('.')
   const [entries, setEntries] = useState<any[] | null>(null)
@@ -1260,6 +1280,11 @@ function FilesApp() {
   const [browsing, setBrowsing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
+  const [query, setQuery] = useState('')
+  const [searching, setSearching] = useState(false)
+  const [matches, setMatches] = useState<FileSearchMatch[] | null>(null)
+  const pendingLineRef = useRef<number | null>(null)
+  const editorRef = useRef<any>(null)
 
   const browse = useCallback(async (p: string) => {
     setBrowsing(true)
@@ -1276,18 +1301,28 @@ function FilesApp() {
 
   useEffect(() => { browse('.') }, [browse])
 
-  const openEntry = async (name: string, isDir: boolean) => {
-    const next = path.endsWith('\\') || path.endsWith('/') ? `${path}${name}` : `${path}/${name}`
-    if (isDir) { browse(next); return }
+  const openPath = async (filePath: string, jumpToLine?: number) => {
     setBrowsing(true)
+    pendingLineRef.current = jumpToLine ?? null
     try {
-      const res = await fetch(`/api/files/read?path=${encodeURIComponent(next)}`)
+      const res = await fetch(`/api/files/read?path=${encodeURIComponent(filePath)}`)
       const json = await res.json().catch(() => ({ success: false }))
-      if (json.success) { setOpenFile(json.path); setContent(json.content); setDirty(false); setSaveMsg('') }
-      else setSaveMsg(json.error ?? 'failed to read file')
+      if (json.success) {
+        setOpenFile(json.path); setContent(json.content); setDirty(false); setSaveMsg('')
+        if (jumpToLine && editorRef.current) {
+          editorRef.current.revealLineInCenter(jumpToLine)
+          editorRef.current.setPosition({ lineNumber: jumpToLine, column: 1 })
+        }
+      } else setSaveMsg(json.error ?? 'failed to read file')
     } finally {
       setBrowsing(false)
     }
+  }
+
+  const openEntry = async (name: string, isDir: boolean) => {
+    const next = path.endsWith('\\') || path.endsWith('/') ? `${path}${name}` : `${path}/${name}`
+    if (isDir) { browse(next); return }
+    await openPath(next)
   }
 
   const save = async () => {
@@ -1299,10 +1334,22 @@ function FilesApp() {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: openFile, content }),
       })
       const json = await res.json().catch(() => ({ success: false }))
-      setSaveMsg(json.success ? 'Saved.' : (json.error ?? 'Save failed.'))
+      setSaveMsg(json.success ? (json.syntax_error ? `Saved, but: ${json.syntax_error}` : 'Saved.') : (json.error ?? 'Save failed.'))
       if (json.success) setDirty(false)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const runSearch = async () => {
+    if (!query.trim() || searching) return
+    setSearching(true)
+    try {
+      const res = await fetch(`/api/files/search?pattern=${encodeURIComponent(query.trim())}&path=${encodeURIComponent(path)}`)
+      const json = await res.json().catch(() => ({ success: false }))
+      setMatches(json.success ? json.matches : [])
+    } finally {
+      setSearching(false)
     }
   }
 
@@ -1316,8 +1363,30 @@ function FilesApp() {
           Go
         </button>
       </div>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <div className="max-h-56 overflow-y-auto rounded border border-border/40 bg-background/50">
+      <div className="flex gap-2">
+        <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+          placeholder="Search file contents under this directory…" className={cn(cmdInputCls, 'flex-1 font-mono')} />
+        <button type="button" onClick={runSearch} disabled={searching || !query.trim()} className={cmdRunBtnCls}>
+          {searching ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />} Search
+        </button>
+      </div>
+      {matches && (
+        <div className="max-h-32 overflow-y-auto rounded border border-border/40 bg-background/50">
+          {matches.length === 0 ? (
+            <div className="p-2 text-[0.55rem] text-muted-foreground">No matches.</div>
+          ) : (
+            matches.map((m, i) => (
+              <button key={`${m.file}:${m.line}:${i}`} type="button" onClick={() => openPath(m.file, m.line)}
+                className="flex w-full flex-col gap-0.5 border-b border-border/20 px-2 py-1 text-left last:border-none hover:bg-secondary/20">
+                <span className="truncate text-[0.5rem] text-primary">{m.file}:{m.line}</span>
+                <span className="truncate text-[0.55rem] text-muted-foreground">{m.text}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_2fr]">
+        <div className="max-h-72 overflow-y-auto rounded border border-border/40 bg-background/50">
           {browsing && !entries ? (
             <div className="p-3 text-[0.55rem] text-muted-foreground">Loading…</div>
           ) : dirError ? (
@@ -1335,9 +1404,25 @@ function FilesApp() {
           )}
         </div>
         <div className="flex flex-col gap-1.5">
-          <textarea value={content} onChange={(e) => { setContent(e.target.value); setDirty(true) }} disabled={!openFile}
-            rows={9} className={cn(cmdInputCls, 'resize-y font-mono disabled:opacity-40')}
-            placeholder={openFile ? '' : 'Select a file to view or edit'} />
+          <div className={cn('overflow-hidden rounded border border-border', !openFile && 'opacity-40')}>
+            <Editor
+              height="320px"
+              theme="vs-dark"
+              language={openFile ? languageForPath(openFile) : 'plaintext'}
+              value={openFile ? content : ''}
+              onChange={(v) => { if (openFile) { setContent(v ?? ''); setDirty(true) } }}
+              onMount={(editor) => {
+                editorRef.current = editor
+                if (pendingLineRef.current) {
+                  editor.revealLineInCenter(pendingLineRef.current)
+                  editor.setPosition({ lineNumber: pendingLineRef.current, column: 1 })
+                  pendingLineRef.current = null
+                }
+              }}
+              options={{ readOnly: !openFile, minimap: { enabled: false }, fontSize: 12, scrollBeyondLastLine: false }}
+            />
+          </div>
+          {!openFile && <p className="text-[0.55rem] text-muted-foreground">Select a file to view or edit.</p>}
           {openFile && (
             <div className="flex flex-wrap items-center gap-2">
               <button type="button" onClick={save} disabled={saving || !dirty}

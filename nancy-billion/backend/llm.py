@@ -14,6 +14,26 @@ import usage_analytics
 
 logger = logging.getLogger(__name__)
 
+# Real, live-observed failure mode (via OpenRouter's auto-router): a model
+# asked to show tool-retrieved content (a file's real text, a search result)
+# will sometimes paraphrase or reconstruct plausible-looking content from its
+# own training-data memory instead of quoting the tool_result it was just
+# given -- confirmed live asking Nancy to read a specific line range of her
+# own main_new.py: the reported line number was correct (from a real
+# search_files call) but the "file content" shown afterward was entirely
+# fabricated, not what read_file actually returned. Prepended as a system
+# message to every tool-use call (both Claude and the OpenAI-compat
+# fallbacks) since this is a real correctness risk for a coding agent
+# specifically, not just a style nit.
+TOOL_RESULT_FIDELITY_INSTRUCTION = (
+    "When relaying content that came from a tool result -- file contents, search matches, command "
+    "output, or anything else retrieved rather than reasoned about -- quote it exactly as the tool "
+    "returned it. Never paraphrase, summarize from memory, or reconstruct plausible-looking content "
+    "for factual material like source code or file text. If a tool result doesn't contain what's "
+    "needed to answer, say so explicitly rather than filling the gap with an invented answer."
+)
+
+
 class LLMBackend(ABC):
     @abstractmethod
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -37,16 +57,33 @@ class DummyLLM(LLMBackend):
         return random.choice(responses)
 
 class LlamaCppLLM(LLMBackend):
-    def __init__(self):
+    """Real local inference via llama-cpp-python against a GGUF model file --
+    fully offline, no API key, no per-token cost, works with the network
+    down. Only ever constructed by get_llm_backends() when LLM_MODEL_PATH
+    actually points at a file that exists (see PHASE 3 below) -- previously
+    this class existed but was never reachable in the default chain at all
+    (only via the legacy LLM_BACKENDS=llama_cpp opt-in, which the real .env
+    never set), and LLM_MODEL_PATH was left at a literal placeholder path
+    that was never a real file even when llama_cpp WAS requested."""
+
+    def __init__(self, model_path: Optional[str] = None):
+        # model_path lets get_llm_backends() construct several of these --
+        # e.g. one per comma-separated entry in LLM_MODEL_PATH, so more than
+        # one local GGUF model can sit in the chain (a primary plus a
+        # fallback) -- falls back to reading the env var directly for
+        # backward compat with the legacy LLM_BACKENDS=llama_cpp opt-in,
+        # which only ever knows how to construct this with no arguments.
         self.model = None
-        self.model_path = os.getenv("LLM_MODEL_PATH")
+        self.model_path = model_path or os.getenv("LLM_MODEL_PATH")
         self.n_ctx = int(os.getenv("LLM_N_CTX", "4096"))
         self.n_batch = int(os.getenv("LLM_N_BATCH", "512"))
         self.n_gpu_layers = int(os.getenv("LLM_N_GPU_LAYERS", "0"))
         if not self.model_path:
-            logger.warning("LLM_MODEL_PATH not set; LLM will not function")
+            logger.warning("LLM_MODEL_PATH not set; LlamaCppLLM will not function")
+        elif not os.path.isfile(self.model_path):
+            logger.warning("LLM_MODEL_PATH set to %s but that file doesn't exist; LlamaCppLLM will not function", self.model_path)
         else:
-            logger.info(f"Loading LlamaCpp model from {self.model_path}")
+            logger.info(f"LlamaCppLLM ready, will lazy-load model from {self.model_path} on first use")
 
     def _load_model(self):
         if self.model is None:
@@ -66,17 +103,20 @@ class LlamaCppLLM(LLMBackend):
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
         model = self._load_model()
-        # Run in thread to avoid blocking
         loop = asyncio.get_event_loop()
         def _generate():
-            output = model(
-                prompt,
+            # create_chat_completion (not raw completion) so llama-cpp-python
+            # applies the model's own embedded chat template -- confirmed
+            # live this session: raw completion against an instruct-tuned
+            # model (deepreinforce-ai/Ornith-1.0-9B, a reasoning model) with
+            # an un-templated prompt returned an empty string, immediately
+            # hitting the stop sequence rather than actually answering.
+            output = model.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens,
                 temperature=temperature,
-                stop=["\n", "User:", "Assistant:"],
-                echo=False
             )
-            return output["choices"][0]["text"]
+            return output["choices"][0]["message"]["content"] or ""
         return await loop.run_in_executor(None, _generate)
 
 # =============================================================================
@@ -119,6 +159,37 @@ class OllamaLLM(LLMBackend):
                 else:
                     text = await resp.text()
                     raise Exception(f"Ollama error: {resp.status} - {text}")
+
+class VLLMLLM(LLMBackend):
+    """Real HTTP client for a self-hosted vLLM server's OpenAI-compatible API
+    (`python -m vllm.entrypoints.openai.api_server ...`). vLLM itself needs a
+    real GPU and runs as its own separate process -- this class doesn't
+    start or manage it, only talks to whatever's already running at
+    VLLM_BASE_URL, the same relationship OllamaLLM has with `ollama serve`.
+    Unlike Ollama (commonly already running locally by default), vLLM is
+    only ever added to the backend chain when VLLM_BASE_URL is explicitly
+    set (see get_llm_backends) -- standing up a GPU inference server isn't
+    something to probe for opportunistically."""
+
+    def __init__(self, model: str | None = None):
+        self.base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8001")
+        self.model = model or os.getenv("VLLM_MODEL", "")
+        logger.info(f"VLLMLLM initialized with base_url={self.base_url}, model={self.model or '(server default)'}")
+
+    async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+        import aiohttp
+        url = f"{self.base_url}/v1/completions"
+        payload = {"model": self.model, "prompt": prompt, "max_tokens": max_tokens, "temperature": temperature}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    choices = result.get("choices") or []
+                    return choices[0].get("text", "") if choices else ""
+                else:
+                    text = await resp.text()
+                    raise Exception(f"vLLM error: {resp.status} - {text}")
+
 
 class AnthropicLLM(LLMBackend):
     """Claude backend via the official `anthropic` SDK.
@@ -207,7 +278,7 @@ class AnthropicLLM(LLMBackend):
         tools: List[Dict[str, Any]],
         tool_executor: Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]],
         max_tokens: int = 1024,
-        max_rounds: int = 5,
+        max_rounds: int = 15,
         on_tool_image: Optional[Callable[[bytes], None]] = None,
     ) -> str:
         """Full Claude tool-use loop: send `prompt` + `tools`, execute any
@@ -238,6 +309,7 @@ class AnthropicLLM(LLMBackend):
                 response = await client.messages.create(
                     model=self.model,
                     max_tokens=max_tokens,
+                    system=TOOL_RESULT_FIDELITY_INSTRUCTION,
                     messages=messages,
                     tools=tools,
                 )
@@ -303,7 +375,7 @@ async def generate_with_tools_openai_compat(
     tools: List[Dict[str, Any]],
     tool_executor: Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]],
     max_tokens: int = 1024,
-    max_rounds: int = 5,
+    max_rounds: int = 15,
     provider_label: str = "backend",
     on_tool_image: Optional[Callable[[bytes], None]] = None,
 ) -> str:
@@ -344,7 +416,10 @@ async def generate_with_tools_openai_compat(
         for t in tools if isinstance(t, dict) and "name" in t
     ]
     schema_by_name = {t["name"]: t.get("input_schema", {}) for t in tools if isinstance(t, dict) and "name" in t}
-    messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": TOOL_RESULT_FIDELITY_INSTRUCTION},
+        {"role": "user", "content": prompt},
+    ]
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     async with aiohttp.ClientSession() as session:
@@ -365,6 +440,7 @@ async def generate_with_tools_openai_compat(
             message = data["choices"][0]["message"]
             tool_calls = message.get("tool_calls")
             if not tool_calls:
+                logger.info("%s: model answered without calling any tool (round used, model=%s)", provider_label, model)
                 return message.get("content") or ""
 
             messages.append({
@@ -380,10 +456,12 @@ async def generate_with_tools_openai_compat(
                 except Exception:
                     raw_args = {}
                 tool_input = coerce_tool_input(raw_args, schema_by_name.get(name, {}))
+                logger.info("%s: calling tool %s(%s)", provider_label, name, tool_input)
                 try:
                     result = await tool_executor(name, tool_input)
                 except Exception as e:
                     result = {"success": False, "error": str(e)}
+                logger.info("%s: tool %s result preview: %s", provider_label, name, json.dumps(result)[:300])
                 if isinstance(result, dict):
                     image_b64 = result.pop("_image_base64", None)
                     if image_b64 and on_tool_image:
@@ -918,6 +996,28 @@ def get_llm_backends():
         except Exception as e:
             logger.debug(f"FuryLLM unavailable: {e}")
 
+    # Real local GGUF inference via llama.cpp -- offline, no API cost.
+    # LLM_MODEL_PATH may list more than one real .gguf file, comma-separated
+    # -- each real (existing) one becomes its own LlamaCppLLM in the chain,
+    # in the order listed, so e.g. a coding-specialized primary model can
+    # have a smaller/faster one as a real fallback if the first fails to
+    # load or generate. Any entry that isn't a real file is skipped rather
+    # than raising, same graceful-degrade convention as every other
+    # optional backend here.
+    for raw_path in os.getenv("LLM_MODEL_PATH", "").split(","):
+        llama_cpp_model_path = raw_path.strip()
+        if llama_cpp_model_path and os.path.isfile(llama_cpp_model_path):
+            logger.info("Adding LlamaCppLLM as local GGUF backend (%s)", llama_cpp_model_path)
+            backends.append(LlamaCppLLM(llama_cpp_model_path))
+
+    # Real self-hosted vLLM server (GPU-backed, high-throughput) -- explicit
+    # opt-in only (VLLM_BASE_URL must be set), unlike Ollama's always-probed
+    # default, since a vLLM server is a deliberate GPU setup this backend
+    # never starts on its own.
+    if os.getenv("VLLM_BASE_URL"):
+        logger.info("Adding VLLMLLM as self-hosted GPU backend")
+        backends.append(VLLMLLM())
+
     # ---- PHASE 4: Legacy configured providers (if LLM_BACKENDS env var set) ----
     backends_env = os.getenv("LLM_BACKENDS", "")
     backend_names = [name.strip().lower() for name in backends_env.split(",") if name.strip()]
@@ -926,7 +1026,9 @@ def get_llm_backends():
         if name == "dummy":
             backends.append(DummyLLM())
         elif name == "llama_cpp":
-            backends.append(LlamaCppLLM())
+            # Already added automatically above if LLM_MODEL_PATH is real -- avoid a duplicate.
+            if not any(isinstance(b, LlamaCppLLM) for b in backends):
+                backends.append(LlamaCppLLM())
         elif name == "ollama":
             # Legacy single-model fallback (only if not already added)
             if not any(isinstance(b, OllamaAutoModelsLLM) for b in backends):
