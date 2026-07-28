@@ -120,6 +120,14 @@ HOST_NODE_ID = os.getenv("HOST_NODE_ID", "host")
 # _broadcast_tool_progress below silently no-ops there rather than erroring.
 _current_turn_ctx: ContextVar[Optional[tuple]] = ContextVar("_current_turn_ctx", default=None)
 
+# Set alongside _current_turn_ctx, same per-Task isolation. None means "this
+# turn had no attached audio to check" (typed text, or voice_id isn't
+# enrolled) -- there's nothing to gate on, so sensitive tools fall back to
+# the plain approval flow. A real dict means a live voice sample WAS checked
+# for this turn; {"match": False, ...} is what _execute_file_tool's approval
+# gate escalates on (see _request_approval).
+_current_voice_match: ContextVar[Optional[Dict[str, Any]]] = ContextVar("_current_voice_match", default=None)
+
 
 async def _broadcast_tool_progress(name: str, tool_input: Dict[str, Any]) -> None:
     """Pushed to the UI right before each tool call actually runs, during a
@@ -1407,6 +1415,39 @@ async def _open_application_dispatch(target: str, args: Optional[List[str]] = No
     return result
 
 
+def _voice_mismatch() -> bool:
+    """True only when THIS turn's audio was actually checked against an
+    enrolled voice profile and it did NOT match -- always False for typed
+    input, and always False when no profile is enrolled (nothing to compare
+    against, so there's no signal to act on)."""
+    voice_match = _current_voice_match.get()
+    return bool(voice_match and voice_match.get("match") is False)
+
+
+async def _request_approval(description: str, timeout: float = 120.0) -> bool:
+    """The one place every chat-tool-triggered Telegram approval actually
+    goes through. When this turn's voice didn't match the enrolled profile,
+    prepends a real, visible warning so whoever approves on Telegram sees
+    that signal before deciding -- see the call sites below, several of
+    which also use _voice_mismatch() to force this approval to even be
+    asked in the first place (a case that would otherwise be skipped, e.g.
+    while arm_switch is active). This can never fully lock the real user
+    out: Telegram approval remains the actual, final human gate regardless
+    of what voice_id's real-but-lightweight MFCC matching decides -- a
+    mismatch only makes the ask louder and harder to skip, so a false
+    negative (background noise, a cold, a different mic) degrades to "one
+    extra approval tap," never to a hard denial."""
+    if _voice_mismatch():
+        voice_match = _current_voice_match.get() or {}
+        similarity = voice_match.get("similarity")
+        sim_text = f" (similarity {similarity})" if similarity is not None else ""
+        description = (
+            f"⚠️ VOICE DID NOT MATCH your enrolled profile{sim_text} -- this command came "
+            f"from a voice Billion doesn't recognize.\n\n{description}"
+        )
+    return await telegram_notifier.request_approval(description, timeout=timeout)
+
+
 async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: str = "") -> Dict[str, Any]:
     if mcp_manager.is_plugin_tool(name):
         return await mcp_manager.call_tool(name, tool_input)
@@ -1457,8 +1498,8 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         return await structured_llm_call(tool_input.get("prompt", ""), tool_input.get("json_schema", {}))
 
     if name == "create_backup":
-        if not arm_switch.is_armed():
-            approved = await telegram_notifier.request_approval(
+        if not arm_switch.is_armed() or _voice_mismatch():
+            approved = await _request_approval(
                 "Nancy wants to: create a backup zip of your data/skills/.env", timeout=120.0
             )
             if not approved:
@@ -1484,7 +1525,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
     if name == "check_calendar_conflicts":
         return await google_calendar.check_conflicts(tool_input.get("start", ""), tool_input.get("end", ""))
     if name == "create_calendar_event":
-        approved = await telegram_notifier.request_approval(
+        approved = await _request_approval(
             f"Nancy wants to create a calendar event: {tool_input.get('summary')} "
             f"({tool_input.get('start')} - {tool_input.get('end')})", timeout=120.0,
         )
@@ -1495,7 +1536,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             tool_input.get("description"), tool_input.get("location"), tool_input.get("timezone_name"),
         )
     if name == "delete_calendar_event":
-        approved = await telegram_notifier.request_approval(
+        approved = await _request_approval(
             f"Nancy wants to delete calendar event: {tool_input.get('event_id')}", timeout=120.0,
         )
         if not approved:
@@ -1514,8 +1555,8 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         return doc_extraction.extract_document(tool_input.get("path", ""))
 
     if name == "place_phone_call":
-        if not arm_switch.is_armed():
-            approved = await telegram_notifier.request_approval(
+        if not arm_switch.is_armed() or _voice_mismatch():
+            approved = await _request_approval(
                 f"Nancy wants to call {tool_input.get('to_number')} and say: {tool_input.get('message', '')[:200]}", timeout=120.0,
             )
             if not approved:
@@ -1548,7 +1589,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         # reasoning as open_application: dispatches to the real host node
         # if one's registered, since a webcam is real hardware the Docker
         # container has no path to at all.
-        if not await telegram_notifier.request_approval("Nancy wants to: take a single snapshot from your webcam", timeout=120.0):
+        if not await _request_approval("Nancy wants to: take a single snapshot from your webcam", timeout=120.0):
             return {"success": False, "error": "User did not approve this camera snapshot."}
         if HOST_NODE_ID in node_host.list_nodes():
             result = await node_host.dispatch_camera_snapshot(HOST_NODE_ID)
@@ -1599,7 +1640,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
     if name == "send_sms":
         to_number = tool_input.get("to_number", "")
         message = tool_input.get("message", "")
-        if not await telegram_notifier.request_approval(f"Nancy wants to text {to_number}: {message[:200]}", timeout=120.0):
+        if not await _request_approval(f"Nancy wants to text {to_number}: {message[:200]}", timeout=120.0):
             return {"success": False, "error": "User did not approve this text message."}
         from providers.registry import get_ordered_providers
         providers = get_ordered_providers("telephony")
@@ -1661,7 +1702,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             f"click on the current page: {tool_input.get('selector')}" if name == "browser_click"
             else f"type into the current page ({tool_input.get('selector')}): {tool_input.get('text', '')!r}"
         )
-        approved = await telegram_notifier.request_approval(f"Nancy wants to: {description}", timeout=120.0)
+        approved = await _request_approval(f"Nancy wants to: {description}", timeout=120.0)
         if not approved:
             return {"success": False, "error": "User did not approve this browser action."}
         fn = getattr(browser_tool, name)
@@ -1676,7 +1717,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             "press_key": f"press the '{tool_input.get('key')}' key",
             "scroll_screen": f"scroll by {tool_input.get('amount')}",
         }[name]
-        approved = await telegram_notifier.request_approval(
+        approved = await _request_approval(
             f"Nancy wants to control your screen: {description}", timeout=120.0
         )
         if not approved:
@@ -1690,8 +1731,11 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
 
     if name == "execute_command":
         command = str(tool_input.get("command", ""))
-        if not terminal_tool._is_safe_command(command) and not arm_switch.is_armed():
-            approved = await telegram_notifier.request_approval(
+        # A voice mismatch never forces approval for a genuinely safe/
+        # allowlisted command (git status, ls, ...) -- only escalates the
+        # cases that were already sensitive enough to consider approval.
+        if not terminal_tool._is_safe_command(command) and (not arm_switch.is_armed() or _voice_mismatch()):
+            approved = await _request_approval(
                 f"Nancy wants to run a command:\n\n{command}", timeout=120.0
             )
             if not approved:
@@ -1704,7 +1748,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
     if name == "write_file":
         resolved_write_path = _resolve_write_path(tool_input["path"], tool_input["content"], user_hint)
 
-    if name in _FILE_WRITE_TOOLS and not arm_switch.is_armed():
+    if name in _FILE_WRITE_TOOLS and (not arm_switch.is_armed() or _voice_mismatch()):
         description = {
             "write_file": f"Write to file: {resolved_write_path}",
             "edit_file": (
@@ -1737,7 +1781,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         elif name == "edit_notebook_cell":
             lint_findings = security_lint.lint_content(tool_input.get("new_source", ""))
             description += security_lint.format_findings(lint_findings)
-        approved = await telegram_notifier.request_approval(
+        approved = await _request_approval(
             f"Nancy wants to: {description}", timeout=120.0
         )
         if not approved:
@@ -1851,7 +1895,7 @@ async def _execute_create_subagent_tool(tool_input: Dict[str, Any]) -> Dict[str,
         return {"success": False, "error": validation["error"]}
 
     preview = code[:1200] + ("...(truncated)" if len(code) > 1200 else "")
-    approved = await telegram_notifier.request_approval(
+    approved = await _request_approval(
         f"Nancy wants to create a new agent:\n\n"
         f"Key: {key}\nClass: {class_name}\nDomain: {domain}\nDescription: {description}\n\n"
         f"Code preview:\n{preview}\n\n"
@@ -2198,11 +2242,19 @@ async def _broadcast_reply_to_web(text: str, images: Optional[List[bytes]] = Non
         logger.warning("Failed to broadcast reply to web clients: %s", e)
 
 
-async def _run_chat_turn(websocket: WebSocket, turn_id: int, user_text: str) -> None:
+async def _run_chat_turn(
+    websocket: WebSocket, turn_id: int, user_text: str, voice_match: Optional[Dict[str, Any]] = None,
+) -> None:
     """The actual per-message work, run as its own cancellable asyncio.Task
     (see ConnectionManager.start_turn) so a new message can supersede a slow
-    one in progress instead of queuing behind it."""
+    one in progress instead of queuing behind it. voice_match is the real
+    voice_id.verify() result for this turn's audio, computed by the WS
+    handler before this task started (None if the turn was typed, or no
+    voice profile is enrolled) -- stashed in a ContextVar so the generic
+    tool-dispatch callback (_execute_file_tool) can read it without its
+    signature needing to change."""
     _current_turn_ctx.set((websocket, turn_id))
+    _current_voice_match.set(voice_match)
     if history_manager:
         await history_manager.add({"role": "user", "content": user_text})
 
@@ -3348,6 +3400,22 @@ async def receive_inbound_webhook(hook_id: str, request: Request):
 
     inbound_webhook_store.mark_triggered(hook_id, summary)
     return {"success": True, "result": summary}
+
+
+@app.get("/voice/status")
+async def voice_status():
+    """Whether a voice profile is currently enrolled -- lets the frontend
+    show real enrollment state without needing a live WebSocket connection
+    just to ask (enroll/verify themselves stay on the WS, alongside every
+    other audio message this app already sends that way)."""
+    return {"success": True, "enrolled": voice_id.is_enrolled()}
+
+
+@app.post("/voice/clear", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def voice_clear():
+    """Removes the enrolled voice profile -- after this, _voice_mismatch()
+    is always False again (nothing to compare against) until re-enrolled."""
+    return voice_id.clear_enrollment()
 
 
 @app.get("/canvas")
@@ -4859,14 +4927,18 @@ async def _execute_background_chat_task(mission_id: str, description: str) -> No
     sees it), still real async execution via asyncio.create_task in the
     caller, not a blocking call.
 
-    Explicitly clears the tool-progress turn context (_current_turn_ctx)
-    first -- asyncio.create_task copies the CALLING turn's context by
-    default, and without this, this task's own tool calls would broadcast
-    "tool_progress" messages tagged with the original (now long since
-    answered) turn, confusing that conversation's log. Matches the user's
-    explicit "need-to-know basis" ask directly: no intermediate visibility,
-    exactly one real notification when it's actually done."""
+    Explicitly clears the tool-progress turn context (_current_turn_ctx) and
+    the voice-match context first -- asyncio.create_task copies the CALLING
+    turn's context by default, and without this, this task's own tool calls
+    would both broadcast "tool_progress" messages tagged with the original
+    (now long since answered) turn, AND incorrectly inherit whatever
+    voice-match result the triggering turn happened to have, confusing that
+    conversation's log and misrepresenting this task's own (voice-less)
+    origin. Matches the user's explicit "need-to-know basis" ask directly:
+    no intermediate visibility, exactly one real notification when it's
+    actually done."""
     _current_turn_ctx.set(None)
+    _current_voice_match.set(None)
     try:
         response, debug = await _generate_response_via_hierarchy(description)
         success = True
@@ -5108,6 +5180,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 client_turn_id = message.get("turn_id")
                 logger.info("Received %s: %s", msg_type, text[:80])
 
+                # Real voice-match check for THIS turn -- only runs when the
+                # frontend actually attached the raw audio it just captured
+                # for this utterance (voice-originated turns only; a typed
+                # message has no audio_b64 and skips this entirely) and a
+                # profile is actually enrolled. Computed here, before the turn
+                # starts, so _execute_file_tool's approval gate can read a
+                # real result the instant a sensitive tool call needs it,
+                # rather than trying to fetch/verify audio mid-tool-call.
+                voice_match: Optional[Dict[str, Any]] = None
+                audio_b64_for_turn = message.get("audio_b64")
+                if audio_b64_for_turn and voice_id.is_enrolled():
+                    try:
+                        decoded = decode_webm_opus_b64_to_pcm(audio_b64_for_turn, target_sample_rate=voice_id.TARGET_SAMPLE_RATE)
+                        audio_np = np.asarray(pcm_int16_to_float32(decoded.pcm_int16), dtype=np.float32)
+                        loop = asyncio.get_event_loop()
+                        voice_match = await loop.run_in_executor(None, voice_id.verify, audio_np, voice_id.TARGET_SAMPLE_RATE)
+                        logger.info("Voice match for this turn: %s", voice_match)
+                    except Exception as e:
+                        logger.warning("Voice verification failed for this turn: %s", e)
+                        voice_match = {"success": False, "error": str(e), "match": None}
+
                 # Fire-and-forget: start_turn cancels any still-running previous
                 # turn and spawns this one as its own task, so the receive loop
                 # stays free to read the next message immediately instead of
@@ -5115,7 +5208,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # _run_chat_turn for the actual streaming generation + TTS work.
                 manager.start_turn(
                     websocket,
-                    lambda turn_id, _text=text: _run_chat_turn(websocket, turn_id, _text),
+                    lambda turn_id, _text=text, _vm=voice_match: _run_chat_turn(websocket, turn_id, _text, _vm),
                     turn_id=client_turn_id,
                 )
 

@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { startLiveRecording, type LiveRecording } from './voice-capture'
 
 // Minimal typings for the Web Speech API (not in standard lib DOM types).
 interface SpeechRecognitionResultLike {
@@ -59,7 +60,12 @@ export interface VoiceState {
 }
 
 interface UseVoiceArgs {
-  onCommand: (command: string) => void
+  /** audioBase64 is a real raw-audio capture of exactly this command's
+   *  utterance (WebM/Opus, see voice-capture.ts), present whenever the mic
+   *  was actually available -- undefined only if getUserMedia failed/was
+   *  denied, in which case this behaves exactly like before (no voice-ID
+   *  check for that command, same as typed text). */
+  onCommand: (command: string, audioBase64?: string) => void
   onWake?: () => void
   onTranscript?: (text: string, isFinal: boolean) => void
 }
@@ -80,6 +86,12 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
   const cmdRef = useRef(onCommand)
   const wakeRef = useRef(onWake)
   const transRef = useRef(onTranscript)
+  // Real raw-audio capture for voice_id verification (see voice-capture.ts)
+  // -- SpeechRecognition itself never exposes the underlying audio, so this
+  // runs a second, parallel MediaRecorder specifically to get a real sample
+  // of THIS command's utterance. null whenever nothing is currently being
+  // captured (outside the wake window, or between commands within it).
+  const liveRecordingRef = useRef<LiveRecording | null>(null)
 
   cmdRef.current = onCommand
   wakeRef.current = onWake
@@ -89,17 +101,62 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
     setState((s) => ({ ...s, supported: !!getRecognitionCtor() }))
   }, [])
 
-  const setAwake = useCallback((val: boolean) => {
-    awakeRef.current = val
-    setState((s) => ({ ...s, awake: val }))
-    if (awakeTimer.current) clearTimeout(awakeTimer.current)
-    if (val) {
-      awakeTimer.current = setTimeout(() => {
-        awakeRef.current = false
-        setState((s) => ({ ...s, awake: false }))
-      }, 9000)
-    }
+  // Discards whatever's currently recording without dispatching it (window
+  // closed with nothing said, or a stale capture from before a new one
+  // starts) -- distinct from captureAndDispatch, which stops AND uses it.
+  const discardCapture = useCallback(() => {
+    const rec = liveRecordingRef.current
+    liveRecordingRef.current = null
+    rec?.stop().catch(() => {})
   }, [])
+
+  const beginCapture = useCallback(() => {
+    discardCapture()
+    liveRecordingRef.current = startLiveRecording()
+  }, [discardCapture])
+
+  const setAwake = useCallback(
+    (val: boolean) => {
+      awakeRef.current = val
+      setState((s) => ({ ...s, awake: val }))
+      if (awakeTimer.current) clearTimeout(awakeTimer.current)
+      if (val) {
+        if (!liveRecordingRef.current) beginCapture()
+        awakeTimer.current = setTimeout(() => {
+          awakeRef.current = false
+          setState((s) => ({ ...s, awake: false }))
+          discardCapture()
+        }, 9000)
+      } else {
+        discardCapture()
+      }
+    },
+    [beginCapture, discardCapture],
+  )
+
+  // Stops the in-flight capture (the real audio spoken since the last
+  // command, or since the wake word, whichever was most recent) and
+  // dispatches it alongside the transcript -- then immediately starts
+  // capturing again in case another command follows within the same awake
+  // window. Async because getting the recorded blob out of MediaRecorder
+  // is inherently async; the command still dispatches exactly once either way.
+  const captureAndDispatch = useCallback(
+    (text: string) => {
+      const rec = liveRecordingRef.current
+      liveRecordingRef.current = null
+      if (!rec) {
+        cmdRef.current(text)
+        beginCapture()
+        return
+      }
+      rec
+        .stop()
+        .then((audioBase64) => cmdRef.current(text, audioBase64 ?? undefined))
+        .catch(() => cmdRef.current(text))
+        .finally(() => beginCapture())
+    },
+    [beginCapture],
+  )
 
   const handleText = useCallback(
     (raw: string, isFinal: boolean) => {
@@ -120,17 +177,17 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
         setAwake(true)
         wakeRef.current?.()
         if (after.length > 1) {
-          cmdRef.current(after)
+          captureAndDispatch(after)
         }
         return
       }
 
       if (awakeRef.current) {
         setAwake(true) // refresh window
-        cmdRef.current(lower)
+        captureAndDispatch(lower)
       }
     },
-    [setAwake],
+    [setAwake, captureAndDispatch],
   )
 
   const start = useCallback(() => {
@@ -204,6 +261,8 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
         /* ignore */
       }
       if (awakeTimer.current) clearTimeout(awakeTimer.current)
+      liveRecordingRef.current?.stop().catch(() => {})
+      liveRecordingRef.current = null
     }
   }, [])
 

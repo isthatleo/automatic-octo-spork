@@ -71,11 +71,23 @@ export interface ChatImagePayload {
   source: string
 }
 
+/** Real voice_id.verify()/enroll() result -- see backend/voice_id.py.
+ *  match is null when there was nothing conclusive to compare (too-short/
+ *  silent clip, or no profile enrolled for verify). */
+export interface VoiceCheckResult {
+  success: boolean
+  error?: string
+  match?: boolean | null
+  similarity?: number
+}
+
 let socket: WebSocket | null = null
 let connecting: Promise<WebSocket> | null = null
 let activeTurn: ActiveTurn | null = null
 let turnIdCounter = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let pendingVoiceEnroll: { resolve: (r: VoiceCheckResult) => void } | null = null
+let pendingVoiceVerify: { resolve: (r: VoiceCheckResult) => void } | null = null
 
 const economicAlertListeners = new Set<(payload: EconomicAlertPayload) => void>()
 const domainEventListeners = new Set<(event: DomainEvent) => void>()
@@ -129,6 +141,21 @@ function connect(): Promise<WebSocket> {
       if (msg.type === 'agent_response' && msg.source === 'telegram') {
         const payload: ExternalReplyPayload = { text: (msg.data as string) ?? '', source: 'telegram' }
         for (const cb of externalReplyListeners) cb(payload)
+        return
+      }
+
+      // Real voice_id enroll/verify results (see backend's voice_enroll/
+      // voice_verify WS handlers) -- one-shot request/response, not tied to
+      // a chat turn, so it's resolved through its own pending-promise slot
+      // rather than the activeTurn gate below.
+      if (msg.type === 'voice_enroll_result') {
+        pendingVoiceEnroll?.resolve(msg as unknown as VoiceCheckResult)
+        pendingVoiceEnroll = null
+        return
+      }
+      if (msg.type === 'voice_verify_result') {
+        pendingVoiceVerify?.resolve(msg as unknown as VoiceCheckResult)
+        pendingVoiceVerify = null
         return
       }
 
@@ -261,7 +288,9 @@ export function onChatImage(callback: (payload: ChatImagePayload) => void): () =
  * own local playback state and safely ignore anything that isn't for this
  * turn.
  */
-export function askNancyStreaming(text: string, handlers: TurnHandlers, timeoutMs = 30_000): number {
+export function askNancyStreaming(
+  text: string, handlers: TurnHandlers, timeoutMs = 30_000, audioBase64?: string,
+): number {
   const turnId = ++turnIdCounter
 
   if (activeTurn) clearTimeout(activeTurn.timer)
@@ -278,8 +307,15 @@ export function askNancyStreaming(text: string, handlers: TurnHandlers, timeoutM
   // turn is recognized as "active" even before the socket send resolves.
   activeTurn = { turnId, timer, ...handlers }
 
+  // audioBase64 is only ever set for a voice-originated command (see
+  // use-voice.ts's real capture) -- the backend's voice_id.verify() check
+  // (main_new.py's final_transcript/user_text handler) simply doesn't run
+  // when it's absent, exactly like a typed message today.
+  const payload: Record<string, unknown> = { type: 'user_text', data: text, turn_id: turnId }
+  if (audioBase64) payload.audio_b64 = audioBase64
+
   connect()
-    .then((ws) => ws.send(JSON.stringify({ type: 'user_text', data: text, turn_id: turnId })))
+    .then((ws) => ws.send(JSON.stringify(payload)))
     .catch((err) => {
       if (activeTurn?.turnId === turnId) {
         clearTimeout(timer)
@@ -290,4 +326,51 @@ export function askNancyStreaming(text: string, handlers: TurnHandlers, timeoutM
     })
 
   return turnId
+}
+
+/** Real speaker-verification enrollment -- sends one short raw-audio sample
+ *  to the backend (voice_id.enroll(), see backend/voice_id.py) and resolves
+ *  with the real result. Not tied to a chat turn. */
+export function enrollVoice(audioBase64: string, timeoutMs = 15_000): Promise<VoiceCheckResult> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (pendingVoiceEnroll) {
+        pendingVoiceEnroll = null
+        resolve({ success: false, error: 'Timed out waiting for the backend.' })
+      }
+    }, timeoutMs)
+    pendingVoiceEnroll = { resolve: (r) => { clearTimeout(timer); resolve(r) } }
+    connect()
+      .then((ws) => ws.send(JSON.stringify({ type: 'voice_enroll', data: audioBase64 })))
+      .catch((err) => {
+        if (pendingVoiceEnroll) {
+          clearTimeout(timer)
+          pendingVoiceEnroll = null
+          resolve({ success: false, error: err instanceof Error ? err.message : String(err) })
+        }
+      })
+  })
+}
+
+/** Real speaker-verification test against whatever's currently enrolled --
+ *  same round trip as enrollVoice, different backend call (voice_id.verify()). */
+export function verifyVoice(audioBase64: string, timeoutMs = 15_000): Promise<VoiceCheckResult> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (pendingVoiceVerify) {
+        pendingVoiceVerify = null
+        resolve({ success: false, error: 'Timed out waiting for the backend.' })
+      }
+    }, timeoutMs)
+    pendingVoiceVerify = { resolve: (r) => { clearTimeout(timer); resolve(r) } }
+    connect()
+      .then((ws) => ws.send(JSON.stringify({ type: 'voice_verify', data: audioBase64 })))
+      .catch((err) => {
+        if (pendingVoiceVerify) {
+          clearTimeout(timer)
+          pendingVoiceVerify = null
+          resolve({ success: false, error: err instanceof Error ? err.message : String(err) })
+        }
+      })
+  })
 }

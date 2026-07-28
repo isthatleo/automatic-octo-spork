@@ -20,6 +20,8 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/nancy/time'
 import { THEMEABLE_VARS, type ThemeableVar } from '@/lib/nancy/theme'
 import { motion } from 'framer-motion'
+import { recordAudioClip } from '@/lib/nancy/voice-capture'
+import { enrollVoice, verifyVoice, type VoiceCheckResult } from '@/lib/nancy/ws-client'
 import {
   Send, MessagesSquare, Hash, Phone, Globe2, CheckCircle2, XCircle,
   Wrench, Sparkles, Cpu, Waves, Eye, EyeOff, Key, User, Server,
@@ -2660,6 +2662,134 @@ function PersonaGlassCard({
   )
 }
 
+/* ═══════════════ VOICE ID — real speaker verification (voice_id.py) ═════
+   Enroll/verify record a real ~3s microphone clip and round-trip it over
+   the same WebSocket every other real-time audio message uses. Once
+   enrolled, main_new.py's _voice_mismatch()/_request_approval() actually
+   escalate the Telegram approval prompt for any sensitive tool call whose
+   turn-audio didn't match -- this card is how that gets turned on/off. ═══ */
+function VoiceIdCard() {
+  const [enrolled, setEnrolled] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState<'enroll' | 'verify' | 'clear' | null>(null)
+  const [lastResult, setLastResult] = useState<VoiceCheckResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const refreshStatus = useCallback(() => {
+    fetch('/api/voice/status', { cache: 'no-store' })
+      .then((res) => res.json())
+      .then((json) => { if (json.success) setEnrolled(!!json.enrolled) })
+      .catch(() => setEnrolled(null))
+  }, [])
+
+  useEffect(() => { refreshStatus() }, [refreshStatus])
+
+  const doEnroll = async () => {
+    setBusy('enroll'); setError(null); setLastResult(null)
+    try {
+      const audioBase64 = await recordAudioClip(3000)
+      const result = await enrollVoice(audioBase64)
+      setLastResult(result)
+      if (!result.success) setError(result.error ?? 'Enrollment failed.')
+      else refreshStatus()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const doVerify = async () => {
+    setBusy('verify'); setError(null); setLastResult(null)
+    try {
+      const audioBase64 = await recordAudioClip(3000)
+      const result = await verifyVoice(audioBase64)
+      setLastResult(result)
+      if (!result.success) setError(result.error ?? 'Verification failed.')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const doClear = async () => {
+    setBusy('clear'); setError(null); setLastResult(null)
+    try {
+      const res = await fetch('/api/voice/clear', { method: 'POST' })
+      const json = await res.json()
+      if (json.success) refreshStatus()
+      else setError('Failed to clear enrollment.')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-3 rounded-xl border border-border bg-card/60 p-4">
+      <div className="flex items-center gap-2">
+        <Fingerprint className="h-4 w-4 text-primary" />
+        <span className="font-heading text-xs text-foreground">Voice ID</span>
+        <span
+          className={cn(
+            'ml-1 rounded-full px-2 py-0.5 text-[0.5rem]',
+            enrolled ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground',
+          )}
+        >
+          {enrolled === null ? 'checking…' : enrolled ? 'enrolled' : 'not enrolled'}
+        </span>
+      </div>
+      <p className="text-[0.6rem] leading-relaxed text-muted-foreground">
+        Real speaker verification (MFCC + cosine similarity, see backend/voice_id.py). Once enrolled, any
+        sensitive command spoken by voice (file writes, terminal, SMS, calendar, etc.) is checked against your
+        enrolled voice — a mismatch doesn&apos;t block the action outright, but forces a Telegram approval prompt
+        and flags the mismatch on it, even during an armed session.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={doEnroll}
+          disabled={busy !== null}
+          className="flex items-center gap-1.5 rounded-lg border border-primary/50 bg-primary/10 px-3 py-1.5 text-[0.6rem] text-primary transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {busy === 'enroll' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mic className="h-3.5 w-3.5" />}
+          {enrolled ? 'Re-enroll (speak for 3s)' : 'Enroll my voice (speak for 3s)'}
+        </button>
+        <button
+          type="button"
+          onClick={doVerify}
+          disabled={busy !== null || !enrolled}
+          className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-[0.6rem] text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {busy === 'verify' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+          Test match (speak for 3s)
+        </button>
+        {enrolled && (
+          <button
+            type="button"
+            onClick={doClear}
+            disabled={busy !== null}
+            className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-[0.6rem] text-muted-foreground transition-colors hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busy === 'clear' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+            Clear enrollment
+          </button>
+        )}
+      </div>
+      {error && <p className="text-[0.6rem] text-destructive">{error}</p>}
+      {lastResult && lastResult.success && lastResult.match !== undefined && lastResult.match !== null && (
+        <p className={cn('text-[0.6rem]', lastResult.match ? 'text-primary' : 'text-destructive')}>
+          {lastResult.match ? 'Match' : 'No match'} — similarity {lastResult.similarity}
+        </p>
+      )}
+      {lastResult && lastResult.success && lastResult.match === undefined && (
+        <p className="text-[0.6rem] text-primary">Enrolled successfully.</p>
+      )}
+    </div>
+  )
+}
+
 export function ProfilesPanel() {
   const [active, setActive] = useState<string>('nancy')
   const [switching, setSwitching] = useState<string | null>(null)
@@ -2709,6 +2839,8 @@ export function ProfilesPanel() {
           />
         ))}
       </div>
+
+      <VoiceIdCard />
     </div>
   )
 }

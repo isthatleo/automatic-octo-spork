@@ -427,7 +427,7 @@ export default function Page() {
   )
 
   const runCommand = useCallback(
-    async (input: string) => {
+    async (input: string, audioBase64?: string) => {
       const result = parseCommand(input)
       switch (result.type) {
         case 'navigate':
@@ -484,21 +484,28 @@ export default function Page() {
           // immediately supersedes whatever's still speaking (see
           // askNancyStreaming/beginStreamedTurn).
           setThinking(true)
-          const turnId = askNancyStreaming(input, {
-            onAudioChunk: enqueueAudioChunk,
-            onToolProgress: (toolName) => log('info', describeToolProgress(toolName)),
-            onText: (text) => {
-              const finalText = text || "I'm not sure how to respond to that, Sir."
-              log('nancy', finalText)
-              setCurrentUtterance(finalText)
+          const turnId = askNancyStreaming(
+            input,
+            {
+              onAudioChunk: enqueueAudioChunk,
+              onToolProgress: (toolName) => log('info', describeToolProgress(toolName)),
+              onText: (text) => {
+                const finalText = text || "I'm not sure how to respond to that, Sir."
+                log('nancy', finalText)
+                setCurrentUtterance(finalText)
+              },
+              onDone: () => setThinking(false),
+              onError: () => {
+                sfx.error()
+                setThinking(false)
+                nancySay("I'm having trouble reaching my backend right now, Sir.")
+              },
             },
-            onDone: () => setThinking(false),
-            onError: () => {
-              sfx.error()
-              setThinking(false)
-              nancySay("I'm having trouble reaching my backend right now, Sir.")
-            },
-          })
+            30_000,
+            // Only ever set for a voice-originated command (see use-voice.ts's
+            // real capture) -- absent for typed input, exactly like today.
+            audioBase64,
+          )
           beginStreamedTurn(turnId)
           break
         }
@@ -523,14 +530,14 @@ export default function Page() {
   )
 
   const { state, start, stop } = useVoice({
-    onCommand: (text) => {
+    onCommand: (text, audioBase64) => {
       if (/^\s*(close|exit|dismiss|hide)\b/i.test(text)) {
         sfx.whooshOut()
         setPanel(null)
         nancySay('Closing workspace, Sir.')
         return
       }
-      runCommand(text)
+      runCommand(text, audioBase64)
     },
     onWake: () => { sfx.wake(); log('info', 'Wake word detected — awaiting command') },
   })
