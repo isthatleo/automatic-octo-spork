@@ -53,6 +53,20 @@ services:
     container_name: nancy-frontend
     ports:
       - "3005:3005"
+    environment:
+      # Server-side only (not NEXT_PUBLIC_-prefixed, so it's never baked into
+      # the browser bundle) -- Next.js API routes (app/api/**/route.ts) run
+      # INSIDE this container and need the Docker Compose service DNS name to
+      # reach the backend container. NEXT_PUBLIC_BACKEND_URL stays unset/
+      # defaults to localhost:8000 deliberately: that one IS shipped to the
+      # browser, and the browser runs on the host, where localhost:8000 is
+      # the real published port. Confirmed live: without this, every
+      # Next.js-proxied REST route (canvas, missions, greeting, tts, voice,
+      # ...) 502'd from inside the container while the WS-based chat path
+      # (a direct browser->host:8000 connection, no server-side proxy
+      # involved) worked fine -- two different network paths, only one of
+      # which was ever configured correctly.
+      - BACKEND_URL=http://backend:8000
     depends_on:
       - backend
     restart: unless-stopped

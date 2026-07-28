@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
+const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 // Real semantic search over the whole memory graph (memory/extensions.py's
 // search_memories, itself a thin wrapper over MemoryGraph's real embedding
