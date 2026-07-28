@@ -738,48 +738,51 @@ class ClawRouterLLM(LLMBackend):
 # Fallback LLM Backend
 # =============================================================================
 
-def _get_ollama_models() -> list[str]:
-    """Return installed Ollama model tags, newest-first.
+async def _get_ollama_models(base_url: str) -> list[str]:
+    """Return installed Ollama model tags via Ollama's own real /api/tags
+    REST endpoint -- NOT the `ollama` CLI binary (the previous approach),
+    which doesn't exist inside this backend's own Docker container even
+    when Ollama itself is genuinely reachable at OLLAMA_BASE_URL (the CLI
+    also has no way to respect that env var anyway -- it uses a differently
+    named OLLAMA_HOST). Confirmed live this session: with the CLI approach,
+    OllamaAutoModelsLLM silently found zero models and failed every attempt,
+    regardless of Ollama being installed with 7 real models pulled on the
+    host.
 
-    Uses `ollama list` CLI so we can auto-detect whatever is installed.
+    Purely local (non ':cloud'-suffixed) models are tried before any
+    ':cloud' ones -- those proxy through Ollama's own hosted service and
+    need internet, which defeats the point of this being the *offline*
+    fallback if a genuinely local model is also available.
     """
+    import aiohttp
     try:
-        # PowerShell-friendly execution from Python
-        cmd = ["ollama", "list", "--format", "json"]
-        # Newer Ollama supports --format json; if not supported we'll fall back.
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        out = (proc.stdout or "").strip()
-        if proc.returncode == 0 and out:
-            import json as _json
-            data = _json.loads(out)
-            # Expected shape: [{"name": "llama3.2:3b", ...}, ...] or {"models": [...]}.
-            if isinstance(data, list):
-                models = [m.get("name") or m.get("model") for m in data]
-            else:
-                models = [m.get("name") or m.get("model") for m in data.get("models", [])]
-            models = [m for m in models if m]
-            return models
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/api/tags", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
     except Exception:
-        pass
+        return []
 
-    # Fallback: parse human output of `ollama list`
-    proc = subprocess.run(["ollama", "list"], capture_output=True, text=True, check=False)
-    out = (proc.stdout or "").splitlines()
-    models: list[str] = []
-    for line in out:
-        line = line.strip()
-        if not line or line.lower().startswith("models"):
-            continue
-        # Typical row: <tag> <size> <modified>
-        parts = line.split()
-        if not parts:
-            continue
-        tag = parts[0]
-        # Skip headers like "NAME".
-        if tag.lower() == "name":
-            continue
-        models.append(tag)
+    models = [m.get("name") or m.get("model") for m in data.get("models", [])]
+    models = [m for m in models if m]
+    models.sort(key=lambda m: m.endswith(":cloud"))
     return models
+
+
+def _get_ollama_models_sync(base_url: str) -> list[str]:
+    """Blocking counterpart to _get_ollama_models, for the one call site
+    (select_llm_for_task, a sync function) that can't await it -- same real
+    /api/tags endpoint."""
+    try:
+        import requests
+        resp = requests.get(f"{base_url}/api/tags", timeout=3)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+    except Exception:
+        return []
+    return [m.get("name") or m.get("model") for m in data.get("models", []) if m.get("name") or m.get("model")]
 
 
 class OllamaAutoModelsLLM(LLMBackend):
@@ -791,9 +794,9 @@ class OllamaAutoModelsLLM(LLMBackend):
         logger.info(f"OllamaAutoModelsLLM initialized with base_url={self.base_url}")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
-        models = _get_ollama_models()
+        models = await _get_ollama_models(self.base_url)
         if not models:
-            raise Exception("No Ollama models found via `ollama list`")
+            raise Exception(f"No Ollama models found at {self.base_url}/api/tags")
 
         last_exception: Exception | None = None
         # Keep ordering from ollama list output.
@@ -823,7 +826,12 @@ class FuryLLM(LLMBackend):
             "FURY_SYSTEM_PROMPT",
             "You are Nancy/Billion, a sovereign AI operating system.",
         )
-        self.model = os.getenv("LLM_MODEL_PATH", "llamafactory/Llama-3-8B-Instruct-GGUF")
+        # LLM_MODEL_PATH may now be a comma-separated list (see LlamaCppLLM,
+        # which iterates it to build several real local fallbacks) -- Fury's
+        # own Agent(model=...) expects a single model identifier, so only
+        # the first entry is Fury's. Without this split, a real multi-model
+        # LLM_MODEL_PATH would hand Fury a literal "path1,path2" string.
+        self.model = os.getenv("LLM_MODEL_PATH", "llamafactory/Llama-3-8B-Instruct-GGUF").split(",")[0].strip()
 
         # Import lazily to avoid import cycles during module import.
         # Fury package may not be installed in this backend environment.
@@ -1078,7 +1086,7 @@ def select_llm_for_task(task_hint: str | None = None) -> LLMBackend:
         if os.getenv("OPENCODE_API_KEY"):
             coding_backends.append(OpenCodeLLM())
         coding_model = os.getenv("OLLAMA_CODING_MODEL", "qwen2.5-coder:3b")
-        if coding_model in _get_ollama_models():
+        if coding_model in _get_ollama_models_sync(os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")):
             coding_backends.append(OllamaLLM(model=coding_model))
         if coding_backends:
             logger.info(f"Using coding-task fallback chain for: {task_hint}")

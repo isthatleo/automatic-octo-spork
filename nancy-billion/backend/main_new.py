@@ -96,6 +96,11 @@ import coverage_proxy
 import usage_analytics
 import achievements_store
 
+# The node_host node ID a native, on-the-real-desktop node_agent_stub.py is
+# expected to register under -- see open_application's dispatch logic in
+# _execute_file_tool. Overridable in case a real setup names it differently.
+HOST_NODE_ID = os.getenv("HOST_NODE_ID", "host")
+
 VOICE_CALL_TOOLS = [
     {
         "name": "place_phone_call",
@@ -107,6 +112,27 @@ VOICE_CALL_TOOLS = [
                 "message": {"type": "string"},
             },
             "required": ["to_number", "message"],
+        },
+    },
+]
+
+APP_LAUNCHER_TOOLS = [
+    {
+        "name": "open_application",
+        "description": (
+            "Launch a real GUI application on the user's computer by name (e.g. 'chrome', 'notepad', "
+            "'spotify', 'code', 'explorer', 'calculator'), or open a file/URL with its default (or a "
+            "named) application -- the same as double-clicking an app icon or a file. For anything "
+            "needing command-line flags, piped output, or a result to read back, use execute_command "
+            "instead; this tool doesn't return the app's own output, only whether it launched."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Application name, or a file path/URL to open."},
+                "args": {"type": "array", "items": {"type": "string"}, "description": "Optional extra arguments to pass to the application."},
+            },
+            "required": ["target"],
         },
     },
 ]
@@ -154,6 +180,7 @@ load_all_providers()
 load_all_channels()
 import computer_use_tool
 from computer_use_tool import COMPUTER_USE_TOOLS, ACTION_TOOLS as COMPUTER_ACTION_TOOLS
+import app_launcher
 import screen_context
 from tts import tts_backend
 from neu_tts import NeuTTSBackend, USER_REF_WAV, USER_REF_TXT
@@ -869,7 +896,13 @@ _WANTS_TOOLS_RE = re.compile(
     r"search (my |the |this )?(codebase|repo|repository|project|directory|folder|files?)\b|"
     r"search .{0,60}\bfor\b|"
     r"find .{0,60}\bin (my|the|this) (codebase|project|repo|repository|directory|folder)|"
-    r"glob)\b",
+    r"glob|"
+    # Real GUI application launching (open_application) -- distinct from the
+    # existing "open ... url/link/page" pattern above, which is about
+    # fetching a webpage's text, not launching a real desktop app.
+    r"(open|launch|start) (chrome|firefox|edge|safari|notepad|spotify|discord|slack|steam|"
+    r"vs ?code|vscode|explorer|file explorer|calculator|word|excel|outlook|"
+    r"(the |an? )?(app|application|program|software))\b)\b",
     re.IGNORECASE,
 )
 
@@ -924,7 +957,7 @@ def _any_tool_backend_configured() -> bool:
 _FALLBACK_TOOL_NAMES = {
     "read_file", "list_directory", "glob_files", "search_files", "write_file", "edit_file",
     "delete_file", "move_file", "execute_command", "fetch_url", "web_search",
-    "post_to_canvas",
+    "post_to_canvas", "open_application",
 }
 
 
@@ -1086,6 +1119,30 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         loop = asyncio.get_event_loop()
         fn = computer_use_tool.take_screenshot if name == "take_screenshot" else computer_use_tool.get_screen_size
         return await loop.run_in_executor(None, fn)
+
+    if name == "open_application":
+        # Ungated -- same risk profile as take_screenshot/get_screen_size:
+        # launching an app (not an arbitrary shell command with flags) is
+        # the same action as double-clicking an icon, not a destructive one.
+        #
+        # This backend runs inside a Docker container with no display of its
+        # own (confirmed live: computer_use_tool.take_screenshot already
+        # fails the same way, "DISPLAY" unset) -- launching anything here
+        # directly would only ever affect the invisible container, never the
+        # user's real desktop. If a "host" node is registered (see
+        # node_agent_stub.py, run natively on the real machine), dispatch
+        # there instead so the app actually opens somewhere the user can see
+        # it; otherwise fall back to launching locally, which is correct
+        # when this backend happens to be running natively rather than
+        # containerized.
+        target = tool_input.get("target", "")
+        args = tool_input.get("args")
+        if HOST_NODE_ID in node_host.list_nodes():
+            result = await node_host.dispatch_open_application(HOST_NODE_ID, target, args)
+        else:
+            result = await app_launcher.open_application(target, args)
+        evidence_ledger.record_evidence("open_application", target, result.get("success", False))
+        return result
 
     if name in COMPUTER_ACTION_TOOLS:
         description = {
@@ -1318,7 +1375,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             # tool_executor(name, input) contract generate_with_tools calls.
             return await _execute_file_tool(name, tool_input, user_hint=user_text)
 
-        all_tools = FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
+        all_tools = FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
 
         # A real screenshot/canvas image a tool produces used to only ever
         # be shown to the model internally -- the human never actually saw

@@ -108,6 +108,10 @@ async def dispatch_screenshot(node_id: str) -> Dict[str, Any]:
     return await _call_node(node_id, "/screenshot", {})
 
 
+async def dispatch_open_application(node_id: str, target: str, args: Optional[list] = None) -> Dict[str, Any]:
+    return await _call_node(node_id, "/open_application", {"target": target, "args": args})
+
+
 async def check_node_health(node_id: str) -> Dict[str, Any]:
     nodes = _load_nodes()
     node = nodes.get(node_id)

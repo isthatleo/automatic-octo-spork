@@ -37,6 +37,11 @@ class ExecuteRequest(BaseModel):
     timeout: float = 30.0
 
 
+class OpenApplicationRequest(BaseModel):
+    target: str
+    args: Optional[list[str]] = None
+
+
 @app.post("/execute_command")
 async def execute_command(req: ExecuteRequest, x_node_secret: Optional[str] = Header(None)):
     _check_secret(x_node_secret)
@@ -85,6 +90,18 @@ async def screenshot(x_node_secret: Optional[str] = Header(None)):
         return {"success": True, "image_base64": base64.b64encode(buf.getvalue()).decode("ascii")}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@app.post("/open_application")
+async def open_application_route(req: OpenApplicationRequest, x_node_secret: Optional[str] = Header(None)):
+    """Real GUI app launching on THIS (the node agent's own) machine --
+    the actual point of running this stub on the real Windows desktop
+    rather than inside the main backend's own Docker container, which has
+    no display/GUI access at all (confirmed live: 'chrome' fails there with
+    a missing DISPLAY / missing xdg-open error, not a real launch)."""
+    _check_secret(x_node_secret)
+    import app_launcher
+    return await app_launcher.open_application(req.target, req.args)
 
 
 @app.get("/health")

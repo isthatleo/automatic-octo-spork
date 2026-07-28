@@ -9,7 +9,15 @@
 # `develop.watch` blocks); this script only handles making sure watch is
 # actually running in the first place, without a manual step every login.
 
-$ErrorActionPreference = "Stop"
+# Deliberately NOT "Stop" -- discovered live while debugging the same
+# pattern in start-node-agent.ps1: with it set, ANY native command's normal
+# stderr output (docker.exe/docker-compose.exe both write real informational
+# lines there, not just errors) gets wrapped into a terminating
+# NativeCommandError, silently killing this whole script. This is a
+# plausible real explanation for the earlier unexplained watch-process death
+# this session (logged as STATUS_CONTROL_C_EXIT) that was originally
+# attributed to an accidental taskkill -- it may well have been this instead.
+$ErrorActionPreference = "Continue"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $logDir = Join-Path $PSScriptRoot "logs"
