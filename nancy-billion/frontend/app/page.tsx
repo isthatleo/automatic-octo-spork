@@ -28,6 +28,25 @@ import { askNancyStreaming, onEconomicAlert, onExternalReply, onChatImage } from
 import { synthesizeSpeech } from '@/lib/nancy/tts-client'
 import { geocode } from '@/lib/nancy/geocode'
 import type { KnowledgeCategory, LogEntry, PanelKey, Place } from '@/lib/nancy/types'
+
+// Real-time tool-use progress -- friendly present-progressive text for each
+// real tool name, shown in the console log the instant a multi-round
+// tool-use call actually starts (see onToolProgress/tool_progress), rather
+// than the user seeing nothing until the whole loop finishes.
+const TOOL_PROGRESS_LABELS: Record<string, string> = {
+  read_file: 'Reading a file…', write_file: 'Writing a file…', edit_file: 'Editing a file…',
+  delete_file: 'Deleting a file…', move_file: 'Moving/renaming a file…', list_directory: 'Listing a directory…',
+  glob_files: 'Finding files…', search_files: 'Searching your codebase…', execute_command: 'Running a command…',
+  fetch_url: 'Fetching a page…', web_search: 'Searching the web…', post_to_canvas: 'Pinning to canvas…',
+  open_application: 'Opening an application…', look_at_camera: 'Checking the camera…',
+  browser_navigate: 'Opening a page in the browser…', browser_get_text: 'Reading the page…',
+  browser_screenshot: 'Taking a screenshot of the page…', browser_click: 'Clicking on the page…',
+  browser_fill: 'Typing into the page…', take_screenshot: 'Taking a screenshot…',
+  create_subagent: 'Creating a new agent…', extract_document_text: 'Reading a document…',
+}
+function describeToolProgress(toolName: string): string {
+  return TOOL_PROGRESS_LABELS[toolName] ?? `Using ${toolName.replace(/_/g, ' ')}…`
+}
 import { cn } from '@/lib/utils'
 import { sfx, unlockSfx, duckSfx } from '@/lib/nancy/sfx'
 
@@ -458,6 +477,7 @@ export default function Page() {
           setThinking(true)
           const turnId = askNancyStreaming(input, {
             onAudioChunk: enqueueAudioChunk,
+            onToolProgress: (toolName) => log('info', describeToolProgress(toolName)),
             onText: (text) => {
               const finalText = text || "I'm not sure how to respond to that, Sir."
               log('nancy', finalText)

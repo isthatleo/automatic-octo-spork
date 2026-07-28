@@ -280,6 +280,7 @@ class AnthropicLLM(LLMBackend):
         max_tokens: int = 1024,
         max_rounds: int = 15,
         on_tool_image: Optional[Callable[[bytes], None]] = None,
+        on_tool_call: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
     ) -> str:
         """Full Claude tool-use loop: send `prompt` + `tools`, execute any
         requested tool calls via `tool_executor(name, input) -> result_dict`,
@@ -293,6 +294,14 @@ class AnthropicLLM(LLMBackend):
         asked for it. `on_tool_image`, if given, is called with the raw PNG
         bytes for every such image so the caller can actually surface it
         (see main_new.py's _generate_response_via_hierarchy).
+
+        `on_tool_call`, if given, is awaited right before EACH tool actually
+        runs, with (name, tool_input) -- lets the caller push a real-time
+        "Nancy is reading X..." update to the UI while a multi-round tool
+        loop is in flight, instead of the user staring at a blank screen for
+        however long the whole loop takes (previously nothing was visible
+        until the final reply, unlike Claude Code's own real-time tool-call
+        visibility).
 
         Not part of the LLMBackend interface (other backends don't do tool
         use yet) -- call directly when tool-enabled generation is wanted, same
@@ -323,10 +332,8 @@ class AnthropicLLM(LLMBackend):
                 return ""
 
             messages.append({"role": "assistant", "content": response.content})
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
+
+            async def _run_tool_call(block):
                 # Even through Claude's real structured tool-use API, an
                 # argument can come back in the wrong JSON-schema shape (a
                 # stringified number/bool/object) -- coerce toward the
@@ -334,6 +341,11 @@ class AnthropicLLM(LLMBackend):
                 # Python function with normal type hints. Never raises: an
                 # uncoercible value passes through unchanged.
                 tool_input = coerce_tool_input(block.input, schema_by_name.get(block.name, {}))
+                if on_tool_call:
+                    try:
+                        await on_tool_call(block.name, tool_input)
+                    except Exception as e:
+                        logger.warning("on_tool_call callback failed: %s", e)
                 try:
                     result = await tool_executor(block.name, tool_input)
                 except Exception as e:
@@ -357,12 +369,18 @@ class AnthropicLLM(LLMBackend):
                             logger.warning("on_tool_image callback failed: %s", e)
                 else:
                     content = json.dumps(result)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": content,
-                })
-            messages.append({"role": "user", "content": tool_results})
+                return {"type": "tool_result", "tool_use_id": block.id, "content": content}
+
+            # Real concurrent execution when Claude requests several
+            # independent tool calls in one round -- matches how Claude
+            # Code itself runs independent tool calls in parallel rather
+            # than one at a time. gather() (not as_completed) keeps results
+            # positionally aligned with tool_use_blocks even though
+            # execution overlaps, so tool_use_id pairing stays correct
+            # regardless of which finishes first.
+            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+            tool_results = await asyncio.gather(*(_run_tool_call(b) for b in tool_use_blocks))
+            messages.append({"role": "user", "content": list(tool_results)})
 
         raise Exception("Exceeded max tool-use rounds without a final answer")
 
@@ -378,6 +396,7 @@ async def generate_with_tools_openai_compat(
     max_rounds: int = 15,
     provider_label: str = "backend",
     on_tool_image: Optional[Callable[[bytes], None]] = None,
+    on_tool_call: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
 ) -> str:
     """Real tool-use loop for any OpenAI-chat-completions-compatible backend
     (Groq, OpenRouter, and OpenCode Zen all use this exact API shape) -- lets
@@ -448,7 +467,8 @@ async def generate_with_tools_openai_compat(
                 "content": message.get("content"),
                 "tool_calls": tool_calls,
             })
-            for tc in tool_calls:
+
+            async def _run_tool_call(tc):
                 fn = tc.get("function", {})
                 name = fn.get("name", "")
                 try:
@@ -457,6 +477,11 @@ async def generate_with_tools_openai_compat(
                     raw_args = {}
                 tool_input = coerce_tool_input(raw_args, schema_by_name.get(name, {}))
                 logger.info("%s: calling tool %s(%s)", provider_label, name, tool_input)
+                if on_tool_call:
+                    try:
+                        await on_tool_call(name, tool_input)
+                    except Exception as e:
+                        logger.warning("on_tool_call callback failed: %s", e)
                 try:
                     result = await tool_executor(name, tool_input)
                 except Exception as e:
@@ -470,11 +495,11 @@ async def generate_with_tools_openai_compat(
                             on_tool_image(base64.b64decode(image_b64))
                         except Exception as e:
                             logger.warning("on_tool_image callback failed: %s", e)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", ""),
-                    "content": json.dumps(result),
-                })
+                return {"role": "tool", "tool_call_id": tc.get("id", ""), "content": json.dumps(result)}
+
+            # Same real concurrent-execution reasoning as AnthropicLLM.generate_with_tools above.
+            tool_messages = await asyncio.gather(*(_run_tool_call(tc) for tc in tool_calls))
+            messages.extend(tool_messages)
 
     raise Exception(f"Exceeded max tool-use rounds without a final answer ({provider_label})")
 

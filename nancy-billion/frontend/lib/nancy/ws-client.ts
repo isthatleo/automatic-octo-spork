@@ -25,6 +25,11 @@ export interface TurnHandlers {
   /** Fired once, with the complete reply text, as soon as generation finishes
    *  (may arrive before the last sentence's audio does). */
   onText?: (text: string, debug?: unknown) => void
+  /** Fired right before each real tool call runs during a multi-round
+   *  tool-use loop -- previously nothing was visible until the whole loop
+   *  (which can take 30-90s) finished. See main_new.py's
+   *  _broadcast_tool_progress. */
+  onToolProgress?: (toolName: string) => void
   /** Fired once all audio chunks for this turn have been sent. */
   onDone?: () => void
   onError?: (err: Error) => void
@@ -136,6 +141,8 @@ function connect(): Promise<WebSocket> {
       if (activeTurn && msgTurnId === activeTurn.turnId) {
         if (msg.type === 'tts_audio_chunk') {
           activeTurn.onAudioChunk?.((msg.data as string) ?? '', (msg.seq as number) ?? 0)
+        } else if (msg.type === 'tool_progress') {
+          activeTurn.onToolProgress?.((msg.tool as string) ?? '')
         } else if (msg.type === 'agent_response') {
           activeTurn.onText?.((msg.data as string) ?? '', msg.debug)
         } else if (msg.type === 'tts_done') {

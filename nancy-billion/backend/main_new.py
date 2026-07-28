@@ -28,6 +28,7 @@ import re
 import hmac
 import hashlib
 import threading
+from contextvars import ContextVar
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -68,6 +69,7 @@ from blueprint_catalog import CATALOG as BLUEPRINT_CATALOG, get_blueprint, bluep
 from skill_bundles import skill_bundle_store
 import run_script_tool
 from web_tool import fetch_url, web_search, extract_urls, WEB_TOOLS
+import browser_tool
 from providers.bootstrap import load_all_providers
 from channels.bootstrap import load_all_channels
 import security_lint
@@ -101,6 +103,34 @@ import achievements_store
 # _execute_file_tool. Overridable in case a real setup names it differently.
 HOST_NODE_ID = os.getenv("HOST_NODE_ID", "host")
 
+# Real-time tool-use progress visibility. Set at the top of _run_chat_turn --
+# each turn runs as its own asyncio.Task (see ConnectionManager.start_turn),
+# and a ContextVar's value is isolated per-Task, so concurrent turns on
+# different websockets never cross-broadcast. None outside an active web/
+# voice turn (e.g. the Telegram path never sets this), so
+# _broadcast_tool_progress below silently no-ops there rather than erroring.
+_current_turn_ctx: ContextVar[Optional[tuple]] = ContextVar("_current_turn_ctx", default=None)
+
+
+async def _broadcast_tool_progress(name: str, tool_input: Dict[str, Any]) -> None:
+    """Pushed to the UI right before each tool call actually runs, during a
+    multi-round tool-use loop -- previously nothing was visible until the
+    whole loop finished (which can take 30-90s across several rounds and
+    several backend fallback attempts), unlike Claude Code's own real-time
+    visibility into which tool is currently running. Passed as
+    generate_with_tools'/generate_with_tools_openai_compat's on_tool_call."""
+    ctx = _current_turn_ctx.get()
+    if ctx is None:
+        return
+    websocket, turn_id = ctx
+    try:
+        await manager.send(
+            json.dumps({"type": "tool_progress", "tool": name, "turn_id": turn_id}),
+            websocket,
+        )
+    except Exception as e:
+        logger.warning("Failed to broadcast tool progress: %s", e)
+
 VOICE_CALL_TOOLS = [
     {
         "name": "place_phone_call",
@@ -133,6 +163,41 @@ APP_LAUNCHER_TOOLS = [
                 "args": {"type": "array", "items": {"type": "string"}, "description": "Optional extra arguments to pass to the application."},
             },
             "required": ["target"],
+        },
+    },
+    {
+        "name": "look_at_camera",
+        "description": (
+            "Open the user's real webcam, capture exactly ONE frame, and close it immediately -- for "
+            "when the user explicitly asks you to look at something right now (e.g. 'take a look at my "
+            "desk', 'walk me through setting this up', holding a device up to the camera). You'll "
+            "actually SEE the captured image. Identify what's in it (a device's name/manufacturer if "
+            "one is visible), and if the user needs help with it, follow up with web_search for real "
+            "setup instructions or a tutorial. Only ever a single snapshot, never continuous/ambient -- "
+            "there is no 'start watching' mode. Requires the user's explicit approval first, same as "
+            "screen/mouse control."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
+BACKGROUND_TASK_TOOLS = [
+    {
+        "name": "run_background_task",
+        "description": (
+            "Start real independent work in the background -- the SAME tool arsenal this conversation "
+            "has (files, terminal, web, browser, camera, everything), but it runs on its own without "
+            "blocking this conversation. Use this for anything that takes a while, or that doesn't need "
+            "you to babysit it. You will NOT see progress updates from it here -- you'll get exactly one "
+            "notification (on Telegram, and in the web UI) when it's actually done, need-to-know only. "
+            "It's also tracked as a real mission in Mission Control if the user wants to check on it "
+            "before then. Give a self-contained description -- it has no memory of this conversation "
+            "beyond what you put in the description."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"description": {"type": "string", "description": "What to do, in enough detail to work from independently."}},
+            "required": ["description"],
         },
     },
 ]
@@ -630,9 +695,10 @@ FILE_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "read_file",
         "description": (
-            "Read the text content of a file on the user's computer, given an absolute or ~-relative path. "
-            "Large files are paginated: the result's has_more/end_line tell you whether there's more -- if "
-            "has_more is true, call again with offset=end_line to continue reading from there."
+            "Read a file on the user's computer, given an absolute or ~-relative path. For text/code, "
+            "returns the content -- large files are paginated: the result's has_more/end_line tell you "
+            "whether there's more, call again with offset=end_line to continue. For an image file "
+            "(.png/.jpg/.jpeg/.gif/.webp/.bmp), you actually SEE the image itself, not just its bytes."
         ),
         "input_schema": {
             "type": "object",
@@ -902,7 +968,18 @@ _WANTS_TOOLS_RE = re.compile(
     # fetching a webpage's text, not launching a real desktop app.
     r"(open|launch|start) (chrome|firefox|edge|safari|notepad|spotify|discord|slack|steam|"
     r"vs ?code|vscode|explorer|file explorer|calculator|word|excel|outlook|"
-    r"(the |an? )?(app|application|program|software))\b)\b",
+    r"(the |an? )?(app|application|program|software))|"
+    # Real on-demand webcam capture (look_at_camera) -- deliberately narrow:
+    # only phrasing that clearly asks Nancy to visually look at something
+    # right now, not generic uses of "look"/"camera" in conversation.
+    r"(take|have) a look at (my|this|the)|"
+    r"(look|point|turn on|use) (your |the )?camera|"
+    r"(check out|show you) (my|this|the) (desk|device|setup|screen|room)|"
+    # Real background-task delegation (run_background_task) -- "in the
+    # background" is the clear, deliberate signal (matches the tool's own
+    # framing); bare "while I'm away"/"let me know when" alone are too
+    # generic/ambiguous to trigger on safely.
+    r"in the background)\b",
     re.IGNORECASE,
 )
 
@@ -957,7 +1034,8 @@ def _any_tool_backend_configured() -> bool:
 _FALLBACK_TOOL_NAMES = {
     "read_file", "list_directory", "glob_files", "search_files", "write_file", "edit_file",
     "delete_file", "move_file", "execute_command", "fetch_url", "web_search",
-    "post_to_canvas", "open_application",
+    "post_to_canvas", "open_application", "look_at_camera", "run_background_task",
+    "browser_navigate", "browser_get_text", "browser_screenshot", "browser_click", "browser_fill",
 }
 
 
@@ -1147,6 +1225,74 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         args = tool_input.get("args")
         return await _open_application_dispatch(target, args)
 
+    if name == "look_at_camera":
+        # Gated -- turning on the user's real webcam is meaningfully more
+        # privacy-sensitive than a screenshot, even though the user just
+        # asked for it in this same turn; a phone approval is a cheap extra
+        # check against a model deciding to check the camera when the user
+        # didn't really mean it. Same container-has-no-hardware-access
+        # reasoning as open_application: dispatches to the real host node
+        # if one's registered, since a webcam is real hardware the Docker
+        # container has no path to at all.
+        if not await telegram_notifier.request_approval("Nancy wants to: take a single snapshot from your webcam", timeout=120.0):
+            return {"success": False, "error": "User did not approve this camera snapshot."}
+        if HOST_NODE_ID in node_host.list_nodes():
+            result = await node_host.dispatch_camera_snapshot(HOST_NODE_ID)
+        else:
+            return {"success": False, "error": "No camera-capable node is registered (see node_agent_stub.py) and this backend has no direct camera access."}
+        evidence_ledger.record_evidence("look_at_camera", "webcam", result.get("success", False))
+        if result.get("success") and result.get("image_base64"):
+            result["_image_base64"] = result.pop("image_base64")
+        return result
+
+    if name == "run_background_task":
+        # Ungated -- starting the task itself is harmless; whatever real
+        # actions it performs along the way (file writes, commands, ...)
+        # still go through their own normal approval gates individually,
+        # same as any chat-driven tool call.
+        description = str(tool_input.get("description", "")).strip()
+        if not description:
+            return {"success": False, "error": "description is required"}
+        mission = mission_store.create(
+            title=description[:80], description=description,
+            owner="nancy_background", priority="medium", risk="low", tags=["background"],
+        )
+        await event_bus.publish("MISSION_CREATED", {"mission": mission.to_public_dict()})
+        try:
+            mission_store.transition(mission.id, "execution")
+        except MissionError as e:
+            return {"success": False, "error": f"Could not start background task: {e}"}
+        started = mission_store.get(mission.id)
+        mission_store.set_dispatched(mission.id)
+        await event_bus.publish("MISSION_STARTED", {"mission": started.to_public_dict() if started else None})
+        asyncio.create_task(_execute_background_chat_task(mission.id, description))
+        return {
+            "success": True,
+            "mission_id": mission.id,
+            "response": "Started in the background -- I'll notify you when it's done, nothing until then.",
+        }
+
+    if name in ("browser_navigate", "browser_get_text", "browser_screenshot"):
+        # Ungated, read-oriented -- same tier as fetch_url/take_screenshot.
+        # SSRF-checked inside browser_navigate itself (net_policy.is_blocked_host).
+        fn = getattr(browser_tool, name)
+        kwargs = {k: v for k, v in tool_input.items() if v is not None}
+        return await fn(**kwargs)
+
+    if name in ("browser_click", "browser_fill"):
+        # Gated -- a real action on a real page (submitting a form, following
+        # a link, etc.), same tier as computer_use_tool's click/type actions.
+        description = (
+            f"click on the current page: {tool_input.get('selector')}" if name == "browser_click"
+            else f"type into the current page ({tool_input.get('selector')}): {tool_input.get('text', '')!r}"
+        )
+        approved = await telegram_notifier.request_approval(f"Nancy wants to: {description}", timeout=120.0)
+        if not approved:
+            return {"success": False, "error": "User did not approve this browser action."}
+        fn = getattr(browser_tool, name)
+        kwargs = {k: v for k, v in tool_input.items() if v is not None}
+        return await fn(**kwargs)
+
     if name in COMPUTER_ACTION_TOOLS:
         description = {
             "click_screen": f"click the screen at ({tool_input.get('x')}, {tool_input.get('y')})",
@@ -1204,7 +1350,10 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             return {"success": False, "error": "User did not approve this file operation."}
 
     if name == "read_file":
-        return file_access.read_file(tool_input["path"], tool_input.get("offset", 0), tool_input.get("limit"))
+        result = file_access.read_file(tool_input["path"], tool_input.get("offset", 0), tool_input.get("limit"))
+        if result.get("is_image") and result.get("image_base64"):
+            result["_image_base64"] = result.pop("image_base64")
+        return result
     if name == "list_directory":
         return file_access.list_directory(tool_input["path"])
     if name == "glob_files":
@@ -1378,7 +1527,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             # tool_executor(name, input) contract generate_with_tools calls.
             return await _execute_file_tool(name, tool_input, user_hint=user_text)
 
-        all_tools = FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
+        all_tools = FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
 
         # A real screenshot/canvas image a tool produces used to only ever
         # be shown to the model internally -- the human never actually saw
@@ -1394,6 +1543,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
                     claude.generate_with_tools(
                         prompt, all_tools, _file_tool_executor, max_tokens=1024,
                         on_tool_image=captured_images.append,
+                        on_tool_call=_broadcast_tool_progress,
                     ),
                     timeout=45.0,
                 )
@@ -1413,6 +1563,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
                         prompt, fallback_tools, _file_tool_executor,
                         max_tokens=1024, provider_label=label,
                         on_tool_image=captured_images.append,
+                        on_tool_call=_broadcast_tool_progress,
                     ),
                     timeout=45.0,
                 )
@@ -1627,6 +1778,7 @@ async def _run_chat_turn(websocket: WebSocket, turn_id: int, user_text: str) -> 
     """The actual per-message work, run as its own cancellable asyncio.Task
     (see ConnectionManager.start_turn) so a new message can supersede a slow
     one in progress instead of queuing behind it."""
+    _current_turn_ctx.set((websocket, turn_id))
     if history_manager:
         await history_manager.add({"role": "user", "content": user_text})
 
@@ -4273,6 +4425,48 @@ async def _dispatch_mission(mission_id: str) -> None:
     )
 
 
+async def _execute_background_chat_task(mission_id: str, description: str) -> None:
+    """Real background execution for the run_background_task chat tool --
+    unlike _dispatch_mission above (which only runs a mission that has a
+    specialized agent assigned), this runs the description through the SAME
+    general tool-use hierarchy any chat message gets (files, terminal, web,
+    browser, camera, everything), for a task that isn't mapped to one of the
+    47 specialized agents. Still tracked as a real mission (Mission Control
+    sees it), still real async execution via asyncio.create_task in the
+    caller, not a blocking call.
+
+    Explicitly clears the tool-progress turn context (_current_turn_ctx)
+    first -- asyncio.create_task copies the CALLING turn's context by
+    default, and without this, this task's own tool calls would broadcast
+    "tool_progress" messages tagged with the original (now long since
+    answered) turn, confusing that conversation's log. Matches the user's
+    explicit "need-to-know basis" ask directly: no intermediate visibility,
+    exactly one real notification when it's actually done."""
+    _current_turn_ctx.set(None)
+    try:
+        response, debug = await _generate_response_via_hierarchy(description)
+        success = True
+    except Exception as e:
+        response = f"Background task failed: {e}"
+        debug = {}
+        success = False
+
+    mission_store.record_result(mission_id, success=success, text=response)
+    next_stage = "validation" if success else "agent_assignment"
+    try:
+        updated = mission_store.transition(mission_id, next_stage)
+    except MissionError:
+        updated = mission_store.get(mission_id)
+    await event_bus.publish(
+        "MISSION_COMPLETED" if success else "MISSION_UPDATED",
+        {"mission": updated.to_public_dict() if updated else None},
+    )
+
+    prefix = "Background task done, Sir" if success else "Background task failed, Sir"
+    await telegram_notifier.send(f"{prefix}: {description[:100]}\n\n{response}")
+    await _broadcast_reply_to_web(response, debug.get("images"), source="background_task")
+
+
 @app.get("/missions")
 async def list_missions():
     return {"success": True, "missions": [m.to_public_dict() for m in mission_store.list()]}
@@ -4940,6 +5134,7 @@ async def shutdown_event():
     await agent_service.shutdown()
     await telegram_notifier.stop_polling()
     await mcp_manager.disconnect_all()
+    await browser_tool.shutdown_browser()
     logger.info("Nancy/Billion backend shut down.")
 
 

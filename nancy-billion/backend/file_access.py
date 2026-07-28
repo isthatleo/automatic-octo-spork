@@ -34,18 +34,40 @@ MAX_SEARCH_RESULTS = 100
 MAX_SEARCH_FILE_BYTES = 2_000_000  # skip scanning anything bigger (almost certainly not source)
 
 
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+MAX_IMAGE_BYTES = 15_000_000  # generous -- vision models cap around here anyway
+
+
 def read_file(path: str, offset: int = 0, limit: Optional[int] = None) -> Dict[str, Any]:
     """Read a file's text, optionally from a given 1-indexed line `offset`
     and capped at `limit` lines -- the same offset/limit idiom as Claude
     Code's own Read tool. Without this, a file over MAX_READ_BYTES (this
     project's own main_new.py is one -- 214KB against a 200KB cap) was
     silently cut off with no way to ever see the rest of it. `has_more`/
-    `end_line` tell the caller exactly how to page to the next chunk."""
+    `end_line` tell the caller exactly how to page to the next chunk.
+
+    An image path returns real base64 image data instead of decoded text --
+    same thing Claude Code's own Read tool does for a screenshot/diagram
+    file. main_new.py's read_file dispatch promotes this to the reserved
+    `_image_base64` result key so the model actually SEES it, the same
+    mechanism take_screenshot/browser_screenshot already use."""
     p = Path(resolve_oc_path(path)).expanduser()
     if not p.exists():
         return {"success": False, "error": f"No such file: {path}"}
     if not p.is_file():
         return {"success": False, "error": f"Not a file: {path}"}
+
+    if p.suffix.lower() in IMAGE_EXTENSIONS:
+        try:
+            size = p.stat().st_size
+            if size > MAX_IMAGE_BYTES:
+                return {"success": False, "error": f"Image too large ({size} bytes, cap {MAX_IMAGE_BYTES})"}
+            import base64
+            data = p.read_bytes()
+            return {"success": True, "path": str(p), "is_image": True, "image_base64": base64.b64encode(data).decode("ascii"), "size_bytes": size}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     try:
         raw = p.read_bytes()
     except Exception as e:

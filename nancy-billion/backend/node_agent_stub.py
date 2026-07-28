@@ -92,6 +92,37 @@ async def screenshot(x_node_secret: Optional[str] = Header(None)):
         return {"success": False, "error": str(e)}
 
 
+@app.post("/camera_snapshot")
+async def camera_snapshot(x_node_secret: Optional[str] = Header(None)):
+    """Real, single, on-demand webcam frame -- opens the camera, grabs
+    exactly one frame, closes it immediately. Never left running: this is
+    "look right now" (the user explicitly asked in this turn), not ambient
+    surveillance -- there is no separate "start watching" endpoint."""
+    _check_secret(x_node_secret)
+    try:
+        import base64
+        import cv2
+        cam = cv2.VideoCapture(0)
+        try:
+            if not cam.isOpened():
+                return {"success": False, "error": "No camera found or it's in use by another application."}
+            # A cold-started webcam's first frame or two is often black/
+            # unexposed -- read and discard a couple of warmup frames before
+            # keeping one.
+            for _ in range(3):
+                ok, frame = cam.read()
+            if not ok or frame is None:
+                return {"success": False, "error": "Camera opened but returned no frame."}
+            ok, buf = cv2.imencode(".png", frame)
+            if not ok:
+                return {"success": False, "error": "Failed to encode the captured frame."}
+            return {"success": True, "image_base64": base64.b64encode(buf.tobytes()).decode("ascii")}
+        finally:
+            cam.release()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @app.post("/open_application")
 async def open_application_route(req: OpenApplicationRequest, x_node_secret: Optional[str] = Header(None)):
     """Real GUI app launching on THIS (the node agent's own) machine --

@@ -38,6 +38,11 @@ COPY nancy-billion/backend/requirements.txt .
 RUN grep -v '^-e ' requirements.txt > requirements.docker.txt \
     && pip install --no-cache-dir -r requirements.docker.txt
 
+# Real headless Chromium for browser_tool.py -- --with-deps pulls the actual
+# system libraries Chromium needs (this base image has none of them); the
+# pip package above only gets the Python driver, not a real browser binary.
+RUN playwright install --with-deps chromium
+
 COPY nancy-billion/backend/ .
 
 RUN mkdir -p /app/data

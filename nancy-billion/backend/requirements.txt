@@ -154,3 +154,16 @@ zeroconf>=0.140.0
 # Real Docker-backed multi-tenant sandboxes (fleet/*.py) -- requires Docker
 # Desktop (or another Docker Engine) actually running on this machine.
 docker>=7.0.0
+
+# Real browser automation (browser_tool.py) -- navigate/click/fill/screenshot
+# actual rendered pages with real JS execution, headless (no display needed,
+# unlike app_launcher.py's GUI launching). The Dockerfile runs
+# `playwright install --with-deps chromium` to fetch the actual browser
+# binary; that step is required beyond just this pip package.
+playwright>=1.48.0
+
+# Real on-demand webcam capture (node_agent_stub.py's /camera_snapshot).
+# Only ever actually exercised when node_agent_stub.py runs natively on the
+# real machine (see scripts/start-node-agent.ps1) -- the container has no
+# camera hardware to open, same as it has no display for app_launcher.py.
+opencv-python>=4.10.0
