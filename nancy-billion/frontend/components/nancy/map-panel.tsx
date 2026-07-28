@@ -405,9 +405,25 @@ const ESRI_SAT =
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
 const ESRI_LABELS =
   'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'
-// CARTO dark-matter — perfect JARVIS night tone for cities in darkness.
-const CARTO_DARK =
-  'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+// Real NASA GIBS VIIRS City Lights composite -- genuine night-lights
+// satellite imagery, not a CSS filter over the day tiles. Same source
+// backend/map_snapshot.py uses for Telegram night snapshots, so both show
+// the same real thing. Only published up to zoom 8 (night-lights data has
+// no street-level resolution to begin with) -- maxNativeZoom below makes
+// Leaflet upscale that zoom-8 tile instead of requesting nonexistent
+// deeper-zoom tiles.
+const GIBS_NIGHT =
+  'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_CityLights_2012/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg'
+const GIBS_NIGHT_MAX_NATIVE_ZOOM = 8
+// Past this zoom, switch to real day satellite imagery even in night mode --
+// VIIRS night-lights data has no street/building-level resolution at any
+// zoom, so upscaling its zoom-8 tile further doesn't reveal more real
+// detail, it just gets blurrier (and some GIBS tile coordinates outside
+// this layer's real extent 404 once upscaled far enough, showing as a
+// blank/white tile with only the separate label layer drawn over it).
+const NIGHT_LIGHTS_MAX_ZOOM = 11
+// CARTO's label-only layer -- real place-name labels overlaid on the night
+// imagery above (GIBS itself carries no labels).
 const CARTO_DARK_LABELS =
   'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png'
 
@@ -451,6 +467,12 @@ export function MapPanel({
   const [phase, setPhase] = useState<Phase>('globe')
   const phaseRef = useRef<Phase>('globe')
   phaseRef.current = phase
+  // Real NASA night-lights imagery tops out at zoom 8 (VIIRS has no
+  // street/building-level resolution at all -- it physically cannot show
+  // that regardless of zoom). Past this zoom we show the same real ESRI
+  // satellite imagery day mode uses instead of an upscaled, blurred-out
+  // night-lights tile -- real streets/buildings, not a blank/white tile.
+  const [zoom, setZoom] = useState(5)
 
   // Day/night controls — persisted per city (name+country) in localStorage.
   const [modeOverride, setModeOverride] = useState<'auto' | 'day' | 'night'>('auto')
@@ -538,13 +560,14 @@ export function MapPanel({
       }).addTo(map)
       dayLayersRef.current = [daySat, dayLabels]
 
-      // Night: CARTO dark-matter — also added, but held at opacity 0 so its
-      // tiles preload alongside day tiles. Swapping is a pure opacity flip
-      // with no unload/reload flicker.
-      const nightBase = L.tileLayer(CARTO_DARK, {
+      // Night: real NASA GIBS night-lights imagery — also added, but held at
+      // opacity 0 so its tiles preload alongside day tiles. Swapping is a
+      // pure opacity flip with no unload/reload flicker.
+      const nightBase = L.tileLayer(GIBS_NIGHT, {
         maxZoom: 19,
+        maxNativeZoom: GIBS_NIGHT_MAX_NATIVE_ZOOM,
         className: 'hud-map-tiles hud-basemap-night',
-        attribution: '&copy; OpenStreetMap &copy; CARTO',
+        attribution: 'Imagery &copy; NASA GIBS / VIIRS',
         opacity: 0,
       }).addTo(map)
       const nightLabels = L.tileLayer(CARTO_DARK_LABELS, {
@@ -559,6 +582,7 @@ export function MapPanel({
         if (phaseRef.current === 'satellite' && map.getZoom() <= REVERT_ZOOM) {
           setPhase('globe')
         }
+        setZoom(map.getZoom())
       })
 
       mapRef.current = map
@@ -651,23 +675,23 @@ export function MapPanel({
   const nightMode =
     modeOverride === 'night' ? true : modeOverride === 'day' ? false : autoNight
 
-  // Night rendering: keep the ESRI satellite imagery on screen (so the user
-  // still sees 3D/satellite terrain of the city), but apply a heavy blue night
-  // tint via CSS filter, and fade in the CARTO dark labels overlay for
-  // readable place names. The flat CARTO basemap is kept hidden so we never
-  // lose the satellite look.
+  // Night rendering: real NASA GIBS night-lights imagery (genuine satellite
+  // data, not a CSS filter over the day tiles) for wide/orbital views, but
+  // real ESRI satellite imagery once zoomed in past NIGHT_LIGHTS_MAX_ZOOM --
+  // see that constant's comment for why (night-lights data simply has no
+  // street/building detail to reveal at deeper zoom).
   useEffect(() => {
     const map = mapRef.current
     if (!map || !ready) return
-    const wantMode: 'day' | 'night' = nightMode ? 'night' : 'day'
+    const showNightLights = nightMode && zoom <= NIGHT_LIGHTS_MAX_ZOOM
+    const wantMode: 'day' | 'night' = showNightLights ? 'night' : 'day'
     if (wantMode === currentModeRef.current) return
     const [daySat, dayLabels] = dayLayersRef.current
     const [nightBase, nightLabels] = nightLayersRef.current
     if (wantMode === 'night') {
-      // Satellite stays fully visible — tinted by CSS class below.
-      daySat?.setOpacity(1)
+      daySat?.setOpacity(0)
       dayLabels?.setOpacity(0)
-      nightBase?.setOpacity(0)
+      nightBase?.setOpacity(1)
       nightLabels?.setOpacity(0.85)
     } else {
       daySat?.setOpacity(1)
@@ -675,11 +699,8 @@ export function MapPanel({
       nightBase?.setOpacity(0)
       nightLabels?.setOpacity(0)
     }
-    // Toggle the tint class on the map root so the day-layer tiles turn blue at night.
-    const el = map.getContainer()
-    el.classList.toggle('hud-night-mode', wantMode === 'night')
     currentModeRef.current = wantMode
-  }, [nightMode, ready])
+  }, [nightMode, zoom, ready])
 
   // Real self-location marker + GPS accuracy circle on the surface map --
   // updates live while `tracking` is on, since myFix itself updates live.

@@ -6,7 +6,7 @@ import random
 import subprocess
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable, Dict, List
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from tool_args import coerce_tool_input
 from retry_util import retry_async, is_transient_llm_error
@@ -208,11 +208,20 @@ class AnthropicLLM(LLMBackend):
         tool_executor: Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]],
         max_tokens: int = 1024,
         max_rounds: int = 5,
+        on_tool_image: Optional[Callable[[bytes], None]] = None,
     ) -> str:
         """Full Claude tool-use loop: send `prompt` + `tools`, execute any
         requested tool calls via `tool_executor(name, input) -> result_dict`,
         feed results back as tool_result blocks, repeat until Claude stops
         requesting tools or `max_rounds` is hit.
+
+        A real screenshot/canvas image a tool produces (the reserved
+        `_image_base64` result key) was previously only ever shown to Claude
+        internally, inside the tool_result block -- the human never actually
+        saw it in either the web UI or Telegram, regardless of which one
+        asked for it. `on_tool_image`, if given, is called with the raw PNG
+        bytes for every such image so the caller can actually surface it
+        (see main_new.py's _generate_response_via_hierarchy).
 
         Not part of the LLMBackend interface (other backends don't do tool
         use yet) -- call directly when tool-enabled generation is wanted, same
@@ -268,6 +277,12 @@ class AnthropicLLM(LLMBackend):
                         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_b64}},
                         {"type": "text", "text": json.dumps(result)},
                     ]
+                    if on_tool_image:
+                        try:
+                            import base64
+                            on_tool_image(base64.b64decode(image_b64))
+                        except Exception as e:
+                            logger.warning("on_tool_image callback failed: %s", e)
                 else:
                     content = json.dumps(result)
                 tool_results.append({
@@ -278,6 +293,113 @@ class AnthropicLLM(LLMBackend):
             messages.append({"role": "user", "content": tool_results})
 
         raise Exception("Exceeded max tool-use rounds without a final answer")
+
+
+async def generate_with_tools_openai_compat(
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    tools: List[Dict[str, Any]],
+    tool_executor: Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]],
+    max_tokens: int = 1024,
+    max_rounds: int = 5,
+    provider_label: str = "backend",
+    on_tool_image: Optional[Callable[[bytes], None]] = None,
+) -> str:
+    """Real tool-use loop for any OpenAI-chat-completions-compatible backend
+    (Groq, OpenRouter, and OpenCode Zen all use this exact API shape) -- lets
+    Nancy's real tool-calling (file access, terminal, canvas, ...) survive
+    Anthropic being unavailable, instead of silently degrading straight to a
+    tool-less plain-text guess the moment Claude's own tool-use loop fails
+    (see main_new.py's _generate_response_via_hierarchy, which now tries
+    this as a real fallback before giving up on tools entirely).
+
+    Converts Nancy's Anthropic-shaped tool definitions ({name, description,
+    input_schema}) to OpenAI's ({"type": "function", "function": {...}})
+    format once per call; the tool_executor callback is the exact same one
+    AnthropicLLM.generate_with_tools uses, so a tool behaves identically
+    regardless of which backend ends up calling it.
+
+    One real, disclosed limitation vs Claude: an executor's real screenshot
+    image (the reserved _image_base64 result key) can't be shown to the
+    MODEL here -- these APIs don't accept inline images in a tool result the
+    way Claude's does, so the model itself never sees it. The human still
+    can, though: on_tool_image (if given) still fires with the raw bytes
+    before the key is dropped, same as AnthropicLLM.generate_with_tools, so
+    the caller can surface the real image regardless of which backend
+    handled the tool call.
+    """
+    import aiohttp
+
+    openai_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+            },
+        }
+        for t in tools if isinstance(t, dict) and "name" in t
+    ]
+    schema_by_name = {t["name"]: t.get("input_schema", {}) for t in tools if isinstance(t, dict) and "name" in t}
+    messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    async with aiohttp.ClientSession() as session:
+        for _ in range(max_rounds):
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "tools": openai_tools,
+                "tool_choice": "auto",
+            }
+            async with session.post(f"{base_url}/chat/completions", json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise Exception(f"{provider_label} error: {resp.status} - {text}")
+                data = await resp.json()
+
+            message = data["choices"][0]["message"]
+            tool_calls = message.get("tool_calls")
+            if not tool_calls:
+                return message.get("content") or ""
+
+            messages.append({
+                "role": "assistant",
+                "content": message.get("content"),
+                "tool_calls": tool_calls,
+            })
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                try:
+                    raw_args = json.loads(fn.get("arguments") or "{}")
+                except Exception:
+                    raw_args = {}
+                tool_input = coerce_tool_input(raw_args, schema_by_name.get(name, {}))
+                try:
+                    result = await tool_executor(name, tool_input)
+                except Exception as e:
+                    result = {"success": False, "error": str(e)}
+                if isinstance(result, dict):
+                    image_b64 = result.pop("_image_base64", None)
+                    if image_b64 and on_tool_image:
+                        try:
+                            import base64
+                            on_tool_image(base64.b64decode(image_b64))
+                        except Exception as e:
+                            logger.warning("on_tool_image callback failed: %s", e)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": json.dumps(result),
+                })
+
+    raise Exception(f"Exceeded max tool-use rounds without a final answer ({provider_label})")
+
 
 class OpenAILLM(LLMBackend):
     def __init__(self):

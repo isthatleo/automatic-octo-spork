@@ -5,11 +5,13 @@ satellite tiles into one high-resolution image -- sent as a Telegram document
 (not a compressed photo) so the recipient can actually pinch-zoom into real
 street/town detail instead of Telegram's photo pipeline downscaling it.
 
-Day tiles are ESRI World Imagery -- the same source the frontend's own
-map/globe uses (see components/nancy/map-panel.tsx's ESRI_SAT constant). If
-it's currently night at the target location (real solar-altitude calculation,
-not a fixed local hour), NASA GIBS's VIIRS night-lights composite is used
-instead, matching the app's own day/night-aware map.
+Day tiles are ESRI World Imagery -- the same source the frontend's own Recon
+map uses (see components/nancy/map-panel.tsx's ESRI_SAT constant). If it's
+currently night at the target location (real solar-altitude calculation, not
+a fixed local hour), real NASA GIBS VIIRS City Lights satellite imagery is
+used instead -- both here and in Recon's own night mode (map-panel.tsx's
+GIBS_NIGHT_TEMPLATE), which previously just applied a CSS brightness/hue
+filter to the day tiles instead of showing genuine night-lights imagery.
 
 Both tile servers have usage policies meant for low-volume/personal use --
 swap in a paid static-map provider if this ever needs to scale beyond one
@@ -199,8 +201,8 @@ async def fetch_map_snapshot(
 
 async def snapshot_for_query(query: str) -> Optional[Tuple[bytes, str, bool]]:
     """Best-effort: geocode `query` and fetch a high-resolution satellite (or,
-    if it's currently night there, real night-lights) map snapshot sized to
-    the feature's real extent.
+    if it's currently night there, real NASA night-lights) map snapshot sized
+    to the feature's real extent.
 
     Returns (png_bytes, display_name, was_night), or None if geocoding/fetch
     failed -- callers should fall back to a text-only reply in that case.

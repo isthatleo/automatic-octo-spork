@@ -49,23 +49,40 @@ export function ConsoleBar({
         className="h-12 overflow-y-auto rounded-lg border border-border bg-background/60 p-1.5 text-[0.68rem] leading-snug"
       >
         {logs.map((l) => (
-          <div key={l.id} className="flex gap-1.5">
-            <span className="shrink-0 text-muted-foreground/60">
-              {new Date(l.ts).toLocaleTimeString('en-GB')}
-            </span>
-            <span
-              className={cn(
-                l.level === 'nancy' && 'text-primary',
-                l.level === 'user' && 'text-foreground',
-                l.level === 'ok' && 'text-primary/80',
-                l.level === 'warn' && 'text-destructive',
-                l.level === 'info' && 'text-muted-foreground',
-              )}
-            >
-              {l.level === 'nancy' && 'Nancy: '}
-              {l.level === 'user' && 'You: '}
-              {l.text}
-            </span>
+          <div key={l.id} className="flex flex-col gap-1">
+            <div className="flex gap-1.5">
+              <span className="shrink-0 text-muted-foreground/60">
+                {new Date(l.ts).toLocaleTimeString('en-GB')}
+              </span>
+              <span
+                className={cn(
+                  l.level === 'nancy' && 'text-primary',
+                  l.level === 'user' && 'text-foreground',
+                  l.level === 'ok' && 'text-primary/80',
+                  l.level === 'warn' && 'text-destructive',
+                  l.level === 'info' && 'text-muted-foreground',
+                )}
+              >
+                {l.level === 'nancy' && 'Nancy: '}
+                {l.level === 'user' && 'You: '}
+                {l.text}
+              </span>
+            </div>
+            {l.imageBase64 && (
+              <a
+                href={`data:image/png;base64,${l.imageBase64}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open full size"
+                className="ml-[4.5rem] block w-fit"
+              >
+                <img
+                  src={`data:image/png;base64,${l.imageBase64}`}
+                  alt="Shared image"
+                  className="h-16 w-auto rounded border border-border/60 object-cover hover:border-primary/50"
+                />
+              </a>
+            )}
           </div>
         ))}
         {interim && (

@@ -55,7 +55,7 @@ except ImportError:
 
 # Local imports
 from stt import stt_backend
-from llm import llm_backend, select_llm_for_task, AnthropicLLM, LLM_PROVIDER_CATALOG
+from llm import llm_backend, select_llm_for_task, AnthropicLLM, LLM_PROVIDER_CATALOG, generate_with_tools_openai_compat
 import file_access
 import subagent_factory
 import terminal_tool
@@ -637,6 +637,45 @@ FILE_TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "edit_file",
+        "description": (
+            "Make a targeted change to an EXISTING file by replacing exact text -- read_file it first "
+            "so old_string matches real content byte-for-byte (including whitespace/indentation). Prefer "
+            "this over write_file for any change to a file that already has content you want to mostly "
+            "keep: it only touches what actually changed instead of resending (and risking corrupting) "
+            "the whole file. old_string must be unique in the file unless replace_all is true. "
+            "Requires the user's explicit yes/no approval (sent to their phone) before it takes effect."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_string": {"type": "string"},
+                "new_string": {"type": "string"},
+                "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring old_string to be unique. Default false."},
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+    },
+    {
+        "name": "search_files",
+        "description": (
+            "Regex search for text across every file under a directory (optionally filtered by a filename "
+            "glob like '*.py'). Use this to find where something is defined or used BEFORE editing, instead "
+            "of guessing which file to read_file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex pattern to search for."},
+                "path": {"type": "string", "description": "Directory (or file) to search under. Defaults to the current directory."},
+                "glob": {"type": "string", "description": "Optional filename glob filter, e.g. '*.py' or '*.tsx'."},
+                "case_sensitive": {"type": "boolean"},
+            },
+            "required": ["pattern"],
+        },
+    },
+    {
         "name": "delete_file",
         "description": (
             "Delete a file or directory (recursively) on the user's computer. "
@@ -662,7 +701,7 @@ FILE_TOOLS: List[Dict[str, Any]] = [
     },
 ]
 
-_FILE_WRITE_TOOLS = {"write_file", "delete_file", "move_file"}
+_FILE_WRITE_TOOLS = {"write_file", "edit_file", "delete_file", "move_file"}
 
 # Real-world safety net for write_file: a real bug this session was Claude
 # happily writing runnable Python source out to a bare "calculator.txt" --
@@ -780,9 +819,64 @@ _WANTS_TOOLS_RE = re.compile(
     r"(take|grab) (a |)?screenshot|screen ?shot|"
     r"click (the|on)|move (the |)?mouse|type (this|that|the following)|press (the |)?\w+ key|"
     r"control (my|the) (screen|computer|mouse|keyboard)|"
-    r"(pin|post|save|add) (this|that|it) to (the |your )?canvas|canvas)\b",
+    r"(pin|post|save|add) (this|that|it) to (the |your )?canvas|canvas|"
+    # Real coding-action intent -- write/fix/refactor actual code in this
+    # project (as opposed to an abstract "how do I..." question, which is
+    # fine as plain conversation and shouldn't pay the tool-loop's latency).
+    # Without this, requests like "there's a bug in my code" or "refactor
+    # this class" matched no keyword here at all and fell straight through
+    # to a specialized agent's shallow _llm_answer consultation (or plain
+    # chat) instead of Claude's real file-read/write/terminal tool loop.
+    r"(write|implement|create|build|refactor|fix|debug|update|modify|add|optimi[sz]e|rewrite|generate|scaffold) "
+    r"(me |us )?(a |an |the |my |your |this |that )?"
+    r"(function|method|class|script|program|component|module|endpoint|api|feature|bug|test|tests|"
+    r"hook|service|route|schema|migration|query|interface|config|dockerfile|dependency|library|package)|"
+    r"(code review|review (this|my|the) code)|"
+    r"(there'?s a bug|found a bug|bug in|error in|exception in|stack ?trace|traceback)|"
+    r"(write|generate) (some |a |the )?code|"
+    r"in (my|the|this) (project|codebase|repo|repository)|"
+    r"(your|billion'?s|nancy'?s) (own )?source code|"
+    r"pull request)\b",
     re.IGNORECASE,
 )
+
+# Real tool-use fallback chain -- Claude is tried first (richest: vision
+# support in tool results, native structured tool_use), but confirmed live
+# this session that when Anthropic is unavailable (e.g. out of API credit),
+# every real tool call (file access, terminal, canvas, ...) used to fail
+# and silently fall all the way through to a tool-less plain-chat guess.
+# Each of these is a genuinely separate provider with its own real API key,
+# all OpenAI-chat-completions-compatible, tried in order until one actually
+# has a key configured -- see generate_with_tools_openai_compat (llm.py) and
+# its use in _generate_response_via_hierarchy below.
+TOOL_FALLBACK_BACKENDS = [
+    ("GROQ_API_KEY", "https://api.groq.com/openai/v1", "GROQ_MODEL", "llama-3.3-70b-versatile", "GroqLLM"),
+    ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "OPENROUTER_MODEL", "openrouter/auto", "OpenRouterLLM"),
+    ("OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "OPENCODE_MODEL", "big-pickle", "OpenCodeLLM"),
+]
+
+
+def _any_tool_backend_configured() -> bool:
+    return bool(os.getenv("ANTHROPIC_API_KEY")) or any(os.getenv(env_var) for env_var, *_ in TOOL_FALLBACK_BACKENDS)
+
+# Claude gets the full tool arsenal -- its context/rate limits comfortably
+# absorb it. The OpenAI-compatible fallbacks don't: live-tested this session,
+# sending the complete ~35-tool schema list (every tool list combined) blew
+# straight through Groq's on-demand-tier 12k-tokens-per-minute cap on the
+# FIRST fallback attempt (413 rate_limit_exceeded, ~22k tokens requested) --
+# meaning the "fallback chain" would have silently never worked at all for
+# smaller backends. Trimmed here to the tools an actual coding/file/terminal
+# request needs, cut by name (not by rebuilding the list) so it can't drift
+# out of sync with what FILE_TOOLS/WEB_TOOLS/etc. actually contain.
+_FALLBACK_TOOL_NAMES = {
+    "read_file", "list_directory", "search_files", "write_file", "edit_file",
+    "delete_file", "move_file", "execute_command", "fetch_url", "web_search",
+    "post_to_canvas",
+}
+
+
+def _trim_tools_for_fallback(all_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [t for t in all_tools if t.get("name") in _FALLBACK_TOOL_NAMES]
 
 # Explicit opt-in only -- Mixture-of-Agents costs real latency (several
 # parallel model calls plus a synthesis call) that would fight the Phase 1
@@ -965,11 +1059,16 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
     if name in _FILE_WRITE_TOOLS and not arm_switch.is_armed():
         description = {
             "write_file": f"Write to file: {resolved_write_path}",
+            "edit_file": (
+                f"Edit file: {tool_input.get('path')}\n\n"
+                f"- {tool_input.get('old_string', '')[:200]!r}\n"
+                f"+ {tool_input.get('new_string', '')[:200]!r}"
+            ),
             "delete_file": f"Delete: {tool_input.get('path')}",
             "move_file": f"Move {tool_input.get('src')} -> {tool_input.get('dst')}",
         }[name]
-        if name == "write_file":
-            lint_findings = security_lint.lint_content(tool_input.get("content", ""))
+        if name in ("write_file", "edit_file"):
+            lint_findings = security_lint.lint_content(tool_input.get("content") or tool_input.get("new_string", ""))
             description += security_lint.format_findings(lint_findings)
         approved = await telegram_notifier.request_approval(
             f"Nancy wants to: {description}", timeout=120.0
@@ -981,6 +1080,33 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         return file_access.read_file(tool_input["path"])
     if name == "list_directory":
         return file_access.list_directory(tool_input["path"])
+    if name == "search_files":
+        return file_access.search_files(
+            tool_input.get("pattern", ""), tool_input.get("path", "."),
+            tool_input.get("glob", ""), tool_input.get("case_sensitive", False),
+        )
+    if name == "edit_file":
+        path = str(tool_input["path"])
+        await lifecycle_hooks.fire_hook("pre_write", {"path": path})
+        result = file_access.edit_file(
+            path, tool_input["old_string"], tool_input["new_string"], tool_input.get("replace_all", False),
+        )
+        evidence_ledger.record_evidence("edit_file", path, result.get("success", False))
+        if result.get("success"):
+            try:
+                diag_result = await asyncio.wait_for(
+                    lsp_client.diagnostics_before_after_write(path, result.get("old_content"), result.get("new_content")),
+                    timeout=15.0,
+                )
+                if diag_result.get("success") and not diag_result.get("unsupported") and diag_result.get("new_diagnostics"):
+                    result["new_diagnostics"] = diag_result["new_diagnostics"]
+            except Exception as e:
+                logger.info("lsp_client diagnostics check skipped: %s", e)
+            # Don't balloon the model's context with the whole before/after
+            # file on every edit -- the diagnostics check above already used it.
+            result.pop("old_content", None)
+            result.pop("new_content", None)
+        return result
     if name == "write_file":
         await lifecycle_hooks.fire_hook("pre_write", {"path": str(resolved_write_path)})
         old_content_result = file_access.read_file(str(resolved_write_path))
@@ -1068,9 +1194,28 @@ def _build_chat_prompt(user_text: str, history_text: str) -> str:
 
 
 async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
-    """Route a chat message to a real specialized agent when the text clearly
-    matches one of the 29 registered domains; otherwise fall back to the
+    """Route a chat message to Claude's real tool-use loop when it clearly
+    wants a real action, to a real specialized agent when the text clearly
+    matches one of the 29 registered domains, or otherwise to the
     general-purpose LLM.
+
+    Tool-use is checked BEFORE specialized-agent routing -- it used to be the
+    other way around, which meant a message like "list the files in the
+    current directory" (containing "file", routing to file_management) never
+    reached Claude's real list_directory tool at all: file_management's
+    process_task only recognizes specific structured task types ("list",
+    "create", "read", ...), not the generic {"type": "query", ...} payload
+    this function used to send unconditionally, so it fell through to
+    _general_file_overview -- a bare LLM guess with no real filesystem
+    access, dressed up as a successful response (confirmed live: a real
+    "list the files" request got routed here, "succeeded", and returned a
+    plain-text non-answer instead of an actual directory listing). Several
+    other specialized agents have the exact same generic-query fallback
+    shape; reordering these two checks fixes it for all of them at once
+    instead of special-casing file_management. Domain-expertise questions
+    that don't ask for a real action (astrophysics, quantum reasoning, etc.)
+    never match _WANTS_TOOLS_RE, so they still route to their specialist
+    agent exactly as before.
 
     The previous implementation imported `orchestration.integration.run_nancy_hierarchy`,
     whose relative imports fail at runtime (`from ..llm import ...` outside package
@@ -1083,6 +1228,66 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
     fallback does.
     """
     history_text = _history_to_text()
+    prompt = _build_chat_prompt(user_text, history_text)
+
+    # Real tool-use, with a real multi-backend fallback chain. Claude is
+    # tried first (richest: vision support in tool results, native
+    # structured tool_use) -- but confirmed live this session that when
+    # Anthropic alone is unavailable, every real tool call (file access,
+    # terminal, canvas, ...) used to fail and silently fall all the way
+    # through to a tool-less plain-chat guess, even though other configured
+    # backends could have handled it. Each round-trip costs real latency
+    # (up to 5 sequential calls per backend even when no tool ends up being
+    # called), which is why this only runs when the message plausibly needs
+    # a tool at all -- not for every message the way it originally did.
+    if _WANTS_TOOLS_RE.search(user_text):
+        async def _file_tool_executor(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+            # Binds this turn's real user_text in as a write_file extension
+            # hint -- see _explicit_language_hint -- without changing the
+            # tool_executor(name, input) contract generate_with_tools calls.
+            return await _execute_file_tool(name, tool_input, user_hint=user_text)
+
+        all_tools = FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
+
+        # A real screenshot/canvas image a tool produces used to only ever
+        # be shown to the model internally -- the human never actually saw
+        # it in either the web UI or Telegram. Collected here so both
+        # channels can push it out for real (see _run_chat_turn and
+        # _telegram_chat_handler).
+        captured_images: List[bytes] = []
+
+        if os.getenv("ANTHROPIC_API_KEY"):
+            try:
+                claude = AnthropicLLM()
+                resp = await asyncio.wait_for(
+                    claude.generate_with_tools(
+                        prompt, all_tools, _file_tool_executor, max_tokens=1024,
+                        on_tool_image=captured_images.append,
+                    ),
+                    timeout=45.0,
+                )
+                return _enforce_sir(resp), {"tool_use": True, "tool_backend": "AnthropicLLM", "images": captured_images}
+            except Exception as e:
+                logger.warning("Claude tool-use path failed, trying next tool-capable backend: %s", e)
+
+        fallback_tools = _trim_tools_for_fallback(all_tools)
+        for env_var, base_url, model_env, model_default, label in TOOL_FALLBACK_BACKENDS:
+            api_key = os.getenv(env_var)
+            if not api_key:
+                continue
+            try:
+                resp = await asyncio.wait_for(
+                    generate_with_tools_openai_compat(
+                        base_url, api_key, os.getenv(model_env, model_default),
+                        prompt, fallback_tools, _file_tool_executor,
+                        max_tokens=1024, provider_label=label,
+                        on_tool_image=captured_images.append,
+                    ),
+                    timeout=45.0,
+                )
+                return _enforce_sir(resp), {"tool_use": True, "tool_backend": label, "images": captured_images}
+            except Exception as e:
+                logger.warning("%s tool-use path failed, trying next tool-capable backend: %s", label, e)
 
     if agent_service.is_ready():
         try:
@@ -1110,39 +1315,6 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
                 )
             except Exception as e:
                 logger.warning("Specialized agent '%s' failed, falling back to LLM: %s", routed_key, e)
-
-    prompt = _build_chat_prompt(user_text, history_text)
-
-    # File access + subagent-creation only work through Claude's multi-round
-    # tool-use loop (generate_with_tools) -- the other backends in the
-    # fallback chain are plain text completion with no tool-calling at all.
-    # That loop costs real latency: up to 5 sequential Claude round-trips
-    # even when no tool ends up being called, which is why this used to run
-    # for EVERY message (including plain chat like "how are you") whenever
-    # an Anthropic key was configured -- a real contributor to 60s+ replies.
-    # Only pay that cost when the message plausibly needs a tool.
-    if os.getenv("ANTHROPIC_API_KEY") and _WANTS_TOOLS_RE.search(user_text):
-        try:
-            claude = AnthropicLLM()
-
-            async def _file_tool_executor(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
-                # Binds this turn's real user_text in as a write_file extension
-                # hint -- see _explicit_language_hint -- without changing the
-                # tool_executor(name, input) contract generate_with_tools calls.
-                return await _execute_file_tool(name, tool_input, user_hint=user_text)
-
-            resp = await asyncio.wait_for(
-                claude.generate_with_tools(
-                    prompt,
-                    FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + COMPUTER_USE_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS,
-                    _file_tool_executor,
-                    max_tokens=1024,
-                ),
-                timeout=45.0,
-            )
-            return _enforce_sir(resp), {"tool_use": True}
-        except Exception as e:
-            logger.warning("Claude tool-use path failed, falling back to plain chain: %s", e)
 
     try:
         resp = await asyncio.wait_for(
@@ -1206,19 +1378,24 @@ async def _generate_response_stream(user_text: str):
             yield {"kind": "meta", "debug": {"moa": True, "error": result.get("error")}}
         return
 
+    # Either condition below hands off to _generate_response_via_hierarchy,
+    # which internally tries Claude's real tool-use loop before specialized-
+    # agent routing (see its docstring) -- so it doesn't matter here which
+    # condition fired, only whether either did. A message wanting a real
+    # action (matches _WANTS_TOOLS_RE) or matching a specialist domain
+    # (agent_service auto-route) both need that non-streaming path; only
+    # genuinely plain conversational text falls through to direct streaming
+    # below.
+    routed_key = None
     if agent_service.is_ready():
         try:
             from agents.agent_service import _auto_route
             routed_key = _auto_route(user_text)
         except Exception:
             routed_key = None
-        if routed_key:
-            text, debug = await _generate_response_via_hierarchy(user_text)
-            yield {"kind": "delta", "text": text}
-            yield {"kind": "meta", "debug": debug}
-            return
+    wants_tools = _any_tool_backend_configured() and _WANTS_TOOLS_RE.search(user_text)
 
-    if os.getenv("ANTHROPIC_API_KEY") and _WANTS_TOOLS_RE.search(user_text):
+    if routed_key or wants_tools:
         text, debug = await _generate_response_via_hierarchy(user_text)
         yield {"kind": "delta", "text": text}
         yield {"kind": "meta", "debug": debug}
@@ -1268,6 +1445,53 @@ async def _synthesize_and_send_chunk(websocket: WebSocket, turn_id: int, seq: in
         pass  # connection likely gone; the outer turn will be cancelled/cleaned up
 
 
+async def _push_reply_to_telegram(text: str, images: Optional[List[bytes]] = None) -> None:
+    """Mirrors a real reply from the web/voice UI into Telegram, so the two
+    conversations are genuinely the same conversation -- not two separate
+    ones that happen to share memory. Best-effort and fire-and-forget from
+    the caller's perspective: a failed Telegram push should never affect
+    the channel that actually generated the reply."""
+    try:
+        await telegram_notifier.send(text)
+        for image_bytes in (images or []):
+            await telegram_notifier.send_document(image_bytes, filename="capture.png")
+    except Exception as e:
+        logger.warning("Failed to mirror reply to Telegram: %s", e)
+
+
+async def _broadcast_reply_to_web(text: str, images: Optional[List[bytes]] = None, *, source: str) -> None:
+    """Mirrors a real reply from Telegram into every connected web/voice UI
+    session, same reasoning as _push_reply_to_telegram in the other
+    direction. Images go out as a separate real message (type: chat_image)
+    the frontend renders inline in the transcript -- previously a real
+    screenshot/canvas image a tool produced was never actually shown to the
+    human in either channel, only fed to the model internally. `text` is
+    optional (empty/falsy skips the agent_response broadcast entirely) --
+    a Telegram location-query reply's real caption text was already
+    broadcast once via the normal chat-reply path, so its image-only
+    follow-up (see set_image_broadcaster) doesn't send it a second time."""
+    for image_bytes in (images or []):
+        try:
+            await manager.broadcast(json.dumps({
+                "type": "chat_image",
+                "data": base64.b64encode(image_bytes).decode(),
+                "source": source,
+            }))
+        except Exception as e:
+            logger.warning("Failed to broadcast image to web clients: %s", e)
+    if not text:
+        return
+    try:
+        await manager.broadcast(json.dumps({
+            "type": "agent_response",
+            "data": text,
+            "source": source,
+            "turn_id": 0,
+        }))
+    except Exception as e:
+        logger.warning("Failed to broadcast reply to web clients: %s", e)
+
+
 async def _run_chat_turn(websocket: WebSocket, turn_id: int, user_text: str) -> None:
     """The actual per-message work, run as its own cancellable asyncio.Task
     (see ConnectionManager.start_turn) so a new message can supersede a slow
@@ -1314,6 +1538,13 @@ async def _run_chat_turn(websocket: WebSocket, turn_id: int, user_text: str) -> 
             }),
             websocket,
         )
+
+        # Real conversation sync -- Telegram sees the same reply, including
+        # any real image a tool call produced (previously only ever shown
+        # to the model internally, never to a human in either channel).
+        # Fire-and-forget: never let a Telegram hiccup delay or break the
+        # reply already delivered above.
+        asyncio.create_task(_push_reply_to_telegram(full_text, debug_payload.get("images")))
 
         if sentence_buffer.strip():
             seq += 1
@@ -4132,10 +4363,15 @@ async def _telegram_chat_handler(text: str) -> str:
     """Routes a Telegram message through the same chat pipeline the voice/web
     UI uses, so 'chat with Billion from Telegram' means the same Billion --
     same context history, same agent routing, same LLM fallback chain."""
-    response, _debug = await _generate_response_via_hierarchy(text)
+    response, debug = await _generate_response_via_hierarchy(text)
     if history_manager:
         await history_manager.add({"role": "user", "content": f"[telegram] {text}"})
         await history_manager.add({"role": "assistant", "content": response})
+    # Real conversation sync -- the web/voice UI sees this reply too
+    # (including any real image a tool call produced), not just whichever
+    # channel happened to receive the message. Fire-and-forget: this must
+    # never delay or break the reply Telegram itself is about to send.
+    asyncio.create_task(_broadcast_reply_to_web(response, debug.get("images"), source="telegram"))
     return response
 
 
@@ -4147,6 +4383,9 @@ async def startup_event():
     # Initialise all 29 specialized agents in background so startup is fast
     asyncio.create_task(_init_agents())
     telegram_notifier.set_chat_handler(_telegram_chat_handler)
+    telegram_notifier.set_image_broadcaster(
+        lambda image_bytes, caption: _broadcast_reply_to_web("", [image_bytes], source="telegram")
+    )
     telegram_notifier.start_polling()
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_cron_execution_loop())

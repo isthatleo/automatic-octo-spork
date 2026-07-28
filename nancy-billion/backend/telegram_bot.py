@@ -66,6 +66,7 @@ class TelegramNotifier:
         # outstanding request first -- fine for this single-user assistant.
         self._pending_approvals: Dict[str, "asyncio.Future[bool]"] = {}
         self._chat_handler: Optional[ChatHandler] = None
+        self._image_broadcaster: Optional[Callable[[bytes, str], Awaitable[None]]] = None
         self._load_error: Optional[str] = None
         if not self.token or not self.chat_id:
             self._load_error = "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not configured"
@@ -76,6 +77,15 @@ class TelegramNotifier:
         voice/web UI uses (_generate_response_via_hierarchy), set after both
         modules are loaded to avoid a circular import."""
         self._chat_handler = handler
+
+    def set_image_broadcaster(self, callback: Callable[[bytes, str], Awaitable[None]]) -> None:
+        """Register a callback(image_bytes, caption) fired whenever this
+        module sends a real image (currently: a location-query map
+        snapshot) -- main_new.py wires this to broadcast the same image to
+        every connected web/voice UI session, same real-conversation-sync
+        reasoning as set_chat_handler above, just for images instead of
+        text."""
+        self._image_broadcaster = callback
 
     @property
     def status(self) -> dict:
@@ -223,6 +233,13 @@ class TelegramNotifier:
                 prefix = "\U0001f319 Night view" if was_night else "\U0001f6f0 Satellite view"
                 caption = f"{reply}\n\n{prefix} · {display_name}"
                 await self.send_document(image_bytes, filename="snapshot.png", caption=caption)
+                # Real conversation sync -- the web/voice UI sees this same
+                # snapshot too, not just Telegram (see set_image_broadcaster).
+                if self._image_broadcaster:
+                    try:
+                        await self._image_broadcaster(image_bytes, caption)
+                    except Exception as e:
+                        logger.warning("image_broadcaster failed: %s", e)
                 return
 
         await self.send(reply)

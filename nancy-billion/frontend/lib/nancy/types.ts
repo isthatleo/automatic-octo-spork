@@ -5,6 +5,10 @@ export interface LogEntry {
   ts: number
   level: LogLevel
   text: string
+  /** A real image pushed alongside this entry (a Telegram map snapshot, or
+   *  a screenshot/canvas image a tool call produced) -- base64 PNG data,
+   *  no data: URI prefix. */
+  imageBase64?: string
 }
 
 export type PanelKey =

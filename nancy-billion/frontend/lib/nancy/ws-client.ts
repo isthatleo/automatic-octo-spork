@@ -47,6 +47,25 @@ export interface EconomicAlertPayload {
   [key: string]: unknown
 }
 
+/** A real reply that originated in a different channel (currently: Telegram)
+ *  rather than a turn this tab itself started -- see main_new.py's
+ *  _broadcast_reply_to_web. This is what keeps the web UI and Telegram
+ *  showing the same real conversation instead of two separate ones that
+ *  just happen to share memory. */
+export interface ExternalReplyPayload {
+  text: string
+  source: string
+}
+/** A real image (currently: a Telegram location-query map snapshot, or a
+ *  screenshot/canvas image a tool call produced) pushed from another
+ *  channel -- see main_new.py's _broadcast_reply_to_web /
+ *  set_image_broadcaster. Previously a tool-produced image was never shown
+ *  to a human in either channel at all, only fed to the model internally. */
+export interface ChatImagePayload {
+  imageBase64: string
+  source: string
+}
+
 let socket: WebSocket | null = null
 let connecting: Promise<WebSocket> | null = null
 let activeTurn: ActiveTurn | null = null
@@ -55,6 +74,8 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
 const economicAlertListeners = new Set<(payload: EconomicAlertPayload) => void>()
 const domainEventListeners = new Set<(event: DomainEvent) => void>()
+const externalReplyListeners = new Set<(payload: ExternalReplyPayload) => void>()
+const chatImageListeners = new Set<(payload: ChatImagePayload) => void>()
 
 function connect(): Promise<WebSocket> {
   if (socket && socket.readyState === WebSocket.OPEN) return Promise.resolve(socket)
@@ -88,6 +109,21 @@ function connect(): Promise<WebSocket> {
       // not something that polls to find out what already happened.
       if (typeof msg.type === 'string' && DOMAIN_EVENT_TYPES.has(msg.type as DomainEventType)) {
         for (const cb of domainEventListeners) cb(msg as unknown as DomainEvent)
+        return
+      }
+
+      // A real reply/image pushed from another channel (Telegram) -- not
+      // tied to any turn this tab itself started (turn_id is a synthetic
+      // 0), so it's dispatched here rather than through the activeTurn gate
+      // below, which only ever matches this tab's own in-flight turn.
+      if (msg.type === 'chat_image') {
+        const payload: ChatImagePayload = { imageBase64: (msg.data as string) ?? '', source: (msg.source as string) ?? 'unknown' }
+        for (const cb of chatImageListeners) cb(payload)
+        return
+      }
+      if (msg.type === 'agent_response' && msg.source === 'telegram') {
+        const payload: ExternalReplyPayload = { text: (msg.data as string) ?? '', source: 'telegram' }
+        for (const cb of externalReplyListeners) cb(payload)
         return
       }
 
@@ -170,6 +206,35 @@ export function onDomainEvent(callback: (event: DomainEvent) => void): () => voi
   connect().catch((err) => console.warn('[ws-client] domain-event subscription connect failed:', err))
   return () => {
     domainEventListeners.delete(callback)
+  }
+}
+
+/**
+ * Subscribe to real replies pushed from another channel (currently:
+ * Telegram) so the web/voice UI's own conversation transcript can show the
+ * exact same reply Telegram just received -- real two-way sync, not two
+ * separate conversations that merely share memory. Returns an unsubscribe
+ * function.
+ */
+export function onExternalReply(callback: (payload: ExternalReplyPayload) => void): () => void {
+  externalReplyListeners.add(callback)
+  connect().catch((err) => console.warn('[ws-client] external-reply subscription connect failed:', err))
+  return () => {
+    externalReplyListeners.delete(callback)
+  }
+}
+
+/**
+ * Subscribe to real images pushed from another channel or produced by a
+ * tool call (map snapshots, screenshots, canvas renders) -- these used to
+ * never actually reach a human in either channel. Returns an unsubscribe
+ * function.
+ */
+export function onChatImage(callback: (payload: ChatImagePayload) => void): () => void {
+  chatImageListeners.add(callback)
+  connect().catch((err) => console.warn('[ws-client] chat-image subscription connect failed:', err))
+  return () => {
+    chatImageListeners.delete(callback)
   }
 }
 

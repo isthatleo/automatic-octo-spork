@@ -356,13 +356,6 @@
 .leaflet-layer.hud-basemap-night {
   transition: opacity 350ms ease-out, filter 500ms ease-out;
 }
-.hud-basemap-day.hud-night-tint {
-  filter: brightness(0.34) contrast(1.3) saturate(0.6) hue-rotate(190deg);
-}
-.hud-night-mode .leaflet-layer.hud-basemap-day,
-.hud-night-mode .hud-basemap-day {
-  filter: brightness(0.3) contrast(1.35) saturate(0.55) hue-rotate(190deg);
-}
 
 /* Fullscreen workspace container */
 .workspace-fullscreen {

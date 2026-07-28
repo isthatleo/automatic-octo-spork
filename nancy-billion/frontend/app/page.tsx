@@ -24,7 +24,7 @@ import {
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
 import { TradingViewDialog } from '@/components/nancy/tradingview'
-import { askNancyStreaming, onEconomicAlert } from '@/lib/nancy/ws-client'
+import { askNancyStreaming, onEconomicAlert, onExternalReply, onChatImage } from '@/lib/nancy/ws-client'
 import { synthesizeSpeech } from '@/lib/nancy/tts-client'
 import { geocode } from '@/lib/nancy/geocode'
 import type { KnowledgeCategory, LogEntry, PanelKey, Place } from '@/lib/nancy/types'
@@ -140,9 +140,9 @@ export default function Page() {
   const isPlayingQueueRef = useRef(false)
   const currentTurnIdRef = useRef<number | null>(null)
 
-  const log = useCallback((level: LogEntry['level'], text: string) => {
+  const log = useCallback((level: LogEntry['level'], text: string, imageBase64?: string) => {
     setLogs((prev) =>
-      [...prev, { id: `l${logSeq++}`, ts: Date.now(), level, text }].slice(-60),
+      [...prev, { id: `l${logSeq++}`, ts: Date.now(), level, text, imageBase64 }].slice(-60),
     )
   }, [])
 
@@ -350,6 +350,29 @@ export default function Page() {
     })
     return unsubscribe
   }, [nancySay])
+
+  // Real conversation sync -- a reply that actually originated in Telegram
+  // (see main_new.py's _broadcast_reply_to_web) shows up here too, logged
+  // but not spoken -- Nancy replying out loud unprompted because a message
+  // came in on a phone in another room would be more surprising than
+  // helpful. This is what makes the two conversations genuinely the same
+  // conversation instead of two that merely share memory.
+  useEffect(() => {
+    const unsubscribe = onExternalReply((payload) => {
+      log('nancy', `[via Telegram] ${payload.text}`)
+    })
+    return unsubscribe
+  }, [log])
+
+  // Real images pushed from another channel or produced by a tool call
+  // (map snapshots, screenshots, canvas renders) -- previously never shown
+  // to a human in either channel at all.
+  useEffect(() => {
+    const unsubscribe = onChatImage((payload) => {
+      log('nancy', payload.source === 'telegram' ? '[via Telegram] sent an image' : 'Captured an image', payload.imageBase64)
+    })
+    return unsubscribe
+  }, [log])
 
   const doLaunch = useCallback((target: string) => {
     setPanel('system')
