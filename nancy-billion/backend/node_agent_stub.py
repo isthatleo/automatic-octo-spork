@@ -135,6 +135,34 @@ async def open_application_route(req: OpenApplicationRequest, x_node_secret: Opt
     return await app_launcher.open_application(req.target, req.args)
 
 
+class ClipboardWriteRequest(BaseModel):
+    text: str
+
+
+@app.post("/clipboard_read")
+async def clipboard_read_route(x_node_secret: Optional[str] = Header(None)):
+    """Real OS clipboard read -- another real-hardware/session-scoped
+    action the container has no path to (there's no shared clipboard
+    between a headless Linux container and the user's real desktop)."""
+    _check_secret(x_node_secret)
+    try:
+        import pyperclip
+        return {"success": True, "text": pyperclip.paste()}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/clipboard_write")
+async def clipboard_write_route(req: ClipboardWriteRequest, x_node_secret: Optional[str] = Header(None)):
+    _check_secret(x_node_secret)
+    try:
+        import pyperclip
+        pyperclip.copy(req.text)
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @app.get("/health")
 async def health():
     return {"success": True, "configured": bool(NODE_SHARED_SECRET)}

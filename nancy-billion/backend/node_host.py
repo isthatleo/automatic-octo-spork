@@ -116,6 +116,14 @@ async def dispatch_camera_snapshot(node_id: str) -> Dict[str, Any]:
     return await _call_node(node_id, "/camera_snapshot", {})
 
 
+async def dispatch_clipboard_read(node_id: str) -> Dict[str, Any]:
+    return await _call_node(node_id, "/clipboard_read", {})
+
+
+async def dispatch_clipboard_write(node_id: str, text: str) -> Dict[str, Any]:
+    return await _call_node(node_id, "/clipboard_write", {"text": text})
+
+
 async def check_node_health(node_id: str) -> Dict[str, Any]:
     nodes = _load_nodes()
     node = nodes.get(node_id)

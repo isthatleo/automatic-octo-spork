@@ -66,6 +66,12 @@ class TelephonyProvider(ABC):
     async def place_call(self, to_number: str, **kw: Any) -> Dict[str, Any]:
         """Returns {"success", "call_id", "error"?}."""
 
+    async def send_sms(self, to_number: str, message: str) -> Dict[str, Any]:
+        """Not abstract -- not every telephony vendor's API necessarily
+        covers SMS the same way it covers voice calls. Default: unsupported;
+        a provider that does support it overrides this."""
+        return {"success": False, "error": "This telephony provider does not support SMS."}
+
 
 class SandboxProvider(ABC):
     @abstractmethod

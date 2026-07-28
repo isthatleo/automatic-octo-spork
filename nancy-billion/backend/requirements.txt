@@ -71,12 +71,19 @@ pydantic-settings>=2.6.0  # config/settings.py needs this separately-packaged sp
 numpy>=1.24.0
 sounddevice>=0.4.6
 fastapi>=0.104.0
-uvicorn>=0.24.0
+# Pinned exact -- a loose >= range here sent pip's resolver into a
+# multi-thousand-second backtracking loop trying every uvicorn release from
+# 0.50.2 down to 0.39.0 one at a time hunting for a graph that satisfies
+# everything; confirmed this is pre-existing (unrelated to anything added
+# today) by reproducing it with the loose range restored. Pinned to the
+# version already proven working (this exact codebase, running natively).
+uvicorn==0.51.0
 aiohttp>=3.9.0
 # Imported directly (main_new.py's economic-calendar/webhook calls) -- was
 # only ever present transitively (via anthropic/fury-sdk), which means a
 # future version of either dropping it would silently break this file.
-httpx>=0.28.0
+# Pinned exact for the same resolver-backtracking reason as uvicorn above.
+httpx==0.28.1
 psutil>=5.9.0
 scipy>=1.11.0
 scikit-learn>=1.3.0
@@ -159,11 +166,23 @@ docker>=7.0.0
 # actual rendered pages with real JS execution, headless (no display needed,
 # unlike app_launcher.py's GUI launching). The Dockerfile runs
 # `playwright install --with-deps chromium` to fetch the actual browser
-# binary; that step is required beyond just this pip package.
-playwright>=1.48.0
+# binary; that step is required beyond just this pip package. Pinned exact
+# (not >=) -- a loose range here sent pip's resolver into a multi-thousand-
+# second backtracking loop re-walking unrelated packages (uvicorn, one
+# version at a time) trying to satisfy the whole graph; an exact pin skips
+# that search entirely.
+playwright==1.48.0
 
 # Real on-demand webcam capture (node_agent_stub.py's /camera_snapshot).
 # Only ever actually exercised when node_agent_stub.py runs natively on the
 # real machine (see scripts/start-node-agent.ps1) -- the container has no
 # camera hardware to open, same as it has no display for app_launcher.py.
-opencv-python>=4.10.0
+# -headless variant: this runs inside a server container with no GUI of its
+# own anyway, so the regular package's Qt/GTK GUI bindings would be dead
+# weight -- headless drops that, which also shrinks its own dependency
+# surface (helps the exact-pin reasoning above too). Also pinned exact for
+# the same backtracking reason.
+opencv-python-headless==4.10.0.84
+
+# Real QR code generation (everyday_tools.py's generate_qr_code).
+qrcode==7.4.2

@@ -60,6 +60,24 @@ class TwilioTelephonyProvider(TelephonyProvider):
             logger.warning("TwilioTelephonyProvider: place_call failed: %s", e)
             return {"success": False, "error": str(e)}
 
+    async def send_sms(self, to_number: str, message: str) -> Dict[str, Any]:
+        url = f"{TWILIO_API_BASE}/Accounts/{self.account_sid}/Messages.json"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    url,
+                    data={"To": to_number, "From": self.from_number, "Body": message},
+                    auth=(self.account_sid, self.auth_token),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return {"success": True, "message_id": data.get("sid"), "status": data.get("status")}
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "error": f"Twilio API error {e.response.status_code}: {e.response.text[:300]}"}
+        except Exception as e:
+            logger.warning("TwilioTelephonyProvider: send_sms failed: %s", e)
+            return {"success": False, "error": str(e)}
+
     async def get_call_status(self, call_id: str) -> Dict[str, Any]:
         url = f"{TWILIO_API_BASE}/Accounts/{self.account_sid}/Calls/{call_id}.json"
         try:

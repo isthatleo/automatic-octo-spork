@@ -70,6 +70,10 @@ from skill_bundles import skill_bundle_store
 import run_script_tool
 from web_tool import fetch_url, web_search, extract_urls, WEB_TOOLS
 import browser_tool
+import everyday_tools
+import archive_tools
+import network_tools
+import personal_tools
 from providers.bootstrap import load_all_providers
 from channels.bootstrap import load_all_channels
 import security_lint
@@ -198,6 +202,31 @@ BACKGROUND_TASK_TOOLS = [
             "type": "object",
             "properties": {"description": {"type": "string", "description": "What to do, in enough detail to work from independently."}},
             "required": ["description"],
+        },
+    },
+]
+
+CLIPBOARD_TOOLS = [
+    {
+        "name": "clipboard_read",
+        "description": "Read the real current contents of the user's clipboard.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "clipboard_write",
+        "description": "Copy real text to the user's clipboard (so they can paste it elsewhere).",
+        "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+    },
+]
+
+SMS_TOOLS = [
+    {
+        "name": "send_sms",
+        "description": "Send a real SMS text message. Requires a telephony provider (e.g. Twilio) to be configured. Requires the user's explicit approval first.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"to_number": {"type": "string", "description": "E.164 format, e.g. +15551234567"}, "message": {"type": "string"}},
+            "required": ["to_number", "message"],
         },
     },
 ]
@@ -979,7 +1008,24 @@ _WANTS_TOOLS_RE = re.compile(
     # background" is the clear, deliberate signal (matches the tool's own
     # framing); bare "while I'm away"/"let me know when" alone are too
     # generic/ambiguous to trigger on safely.
-    r"in the background)\b",
+    r"in the background|"
+    # Everyday-usage tools (everyday_tools.py/archive_tools.py/network_tools.py/
+    # personal_tools.py/clipboard/SMS) -- each phrase here is a clear,
+    # deliberate imperative naming its own action, not generic conversation.
+    r"(what'?s the |check the )?weather (in|for|at)|"
+    r"convert .{0,40}(to|into) |"
+    r"\bcalculate\b|"
+    r"generate (a |an )?(password|qr code|qr)\b|"
+    r"shorten (this |that |the )?(url|link)\b|"
+    r"(my|the) public ip\b|"
+    r"\bzip (this|that|these|the) |unzip |extract .{0,30}\.zip|"
+    r"merge .{0,30}pdfs?\b|split .{0,30}pdf\b|"
+    r"resize (this |that |the )?(image|photo|picture)\b|"
+    r"(add|save|take) a note\b|remember (this|that)\b|"
+    r"(log|track) (this |an? )?expense\b|(my|list) expenses\b|"
+    r"\bping\b|check (if |whether )?.{0,30}\bport\b|"
+    r"(copy|paste) .{0,20}clipboard|clipboard\b|"
+    r"(send|text) .{0,30}(an? )?(sms|text message))\b",
     re.IGNORECASE,
 )
 
@@ -1272,6 +1318,51 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             "response": "Started in the background -- I'll notify you when it's done, nothing until then.",
         }
 
+    if name in ("clipboard_read", "clipboard_write"):
+        # Same container-has-no-real-desktop reasoning as open_application/
+        # look_at_camera -- a headless Linux container has no OS clipboard of
+        # its own to share with the user's real desktop.
+        if HOST_NODE_ID not in node_host.list_nodes():
+            return {"success": False, "error": "No node is registered (see node_agent_stub.py) and this backend has no direct clipboard access."}
+        if name == "clipboard_read":
+            return await node_host.dispatch_clipboard_read(HOST_NODE_ID)
+        return await node_host.dispatch_clipboard_write(HOST_NODE_ID, tool_input.get("text", ""))
+
+    if name == "send_sms":
+        to_number = tool_input.get("to_number", "")
+        message = tool_input.get("message", "")
+        if not await telegram_notifier.request_approval(f"Nancy wants to text {to_number}: {message[:200]}", timeout=120.0):
+            return {"success": False, "error": "User did not approve this text message."}
+        from providers.registry import get_ordered_providers
+        providers = get_ordered_providers("telephony")
+        if not providers:
+            return {"success": False, "error": "No telephony provider is configured (e.g. TWILIO_ACCOUNT_SID)."}
+        return await providers[0].send_sms(to_number, message)
+
+    if name in ("calculate", "convert_units", "convert_currency", "get_weather", "generate_password", "generate_qr_code", "shorten_url", "get_public_ip_info"):
+        fn = getattr(everyday_tools, name)
+        kwargs = {k: v for k, v in tool_input.items() if v is not None}
+        return await fn(**kwargs)
+
+    if name in ("zip_files", "unzip_file", "resize_image", "merge_pdfs", "split_pdf"):
+        # Sync functions (pure local file I/O, same convention as file_access.py) -- ungated:
+        # these are additive/reorganizing operations on files the user already has, not
+        # destructive ones (nothing existing gets overwritten or deleted).
+        fn = getattr(archive_tools, name)
+        kwargs = {k: v for k, v in tool_input.items() if v is not None}
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: fn(**kwargs))
+
+    if name in ("ping_host", "check_port_open"):
+        fn = getattr(network_tools, name)
+        kwargs = {k: v for k, v in tool_input.items() if v is not None}
+        return await fn(**kwargs)
+
+    if name in ("add_note", "list_notes", "search_notes", "track_expense", "list_expenses"):
+        fn = getattr(personal_tools, name)
+        kwargs = {k: v for k, v in tool_input.items() if v is not None}
+        return await fn(**kwargs)
+
     if name in ("browser_navigate", "browser_get_text", "browser_screenshot"):
         # Ungated, read-oriented -- same tier as fetch_url/take_screenshot.
         # SSRF-checked inside browser_navigate itself (net_policy.is_blocked_host).
@@ -1527,7 +1618,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
             # tool_executor(name, input) contract generate_with_tools calls.
             return await _execute_file_tool(name, tool_input, user_hint=user_text)
 
-        all_tools = FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
+        all_tools = FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL] + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS + SMS_TOOLS + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + NODE_TOOLS + DIFF_TOOLS + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
 
         # A real screenshot/canvas image a tool produces used to only ever
         # be shown to the model internally -- the human never actually saw
