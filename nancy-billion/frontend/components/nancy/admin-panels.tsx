@@ -3252,7 +3252,16 @@ type GraphNode = {
   created_at: string
 }
 
-type SimNode = GraphNode & { x: number; y: number; vx: number; vy: number }
+type SimNode = GraphNode & { x: number; y: number; vx: number; vy: number; bornAt: number; twinklePhase: number }
+
+// A node graduates from "star" to "planet" once it's a real recurring
+// topic (merged mentions, see memory/graph.py's add_or_merge_memory) or
+// carries enough weight on its own -- distinct rendering, not just a
+// bigger dot: planets get a steady glow and a ring, stars twinkle.
+function isPlanet(n: GraphNode): boolean {
+  const mentionCount = (n.metadata as { mention_count?: number } | undefined)?.mention_count ?? 1
+  return mentionCount >= 3 || n.importance >= 0.75
+}
 
 const GALAXY_TYPE_STYLE: Record<string, { color: string; icon: typeof MessageCircle }> = {
   conversation: { color: '#7dd3fc', icon: MessageCircle },
@@ -3284,12 +3293,24 @@ function MemoryGalaxyView() {
   const selectedIdRef = useRef<string | null>(null)
   const hiddenTypesRef = useRef<Set<string>>(new Set())
   const dragRef = useRef<{ mode: 'pan' | 'node'; id?: string; startX: number; startY: number; moved: boolean } | null>(null)
+  // Real, eased camera-pan animation -- clicking a node smoothly flies the
+  // view to center it instead of an instant jump cut, the "sleek
+  // transition" the galaxy is supposed to feel like.
+  const cameraAnimRef = useRef<{ from: { x: number; y: number; scale: number }; to: { x: number; y: number; scale: number }; start: number; duration: number } | null>(null)
+  // Purely decorative fixed backdrop -- generated once, independent of any
+  // real memory data, just atmosphere.
+  const backgroundStarsRef = useRef<Array<{ x: number; y: number; r: number; phase: number }>>(
+    Array.from({ length: 140 }, () => ({
+      x: Math.random(), y: Math.random(), r: 0.4 + Math.random() * 1.1, phase: Math.random() * Math.PI * 2,
+    })),
+  )
 
   const [nodes, setNodes] = useState<GraphNode[]>([])
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<GraphNode | null>(null)
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set())
   const [, forceTick] = useState(0)
+  const [shareStatus, setShareStatus] = useState<'sending' | 'sent' | 'error' | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -3336,7 +3357,11 @@ function MemoryGalaxyView() {
       } else {
         const angle = (i / Math.max(nodes.length, 1)) * Math.PI * 2
         const r = 100 + Math.random() * 100
-        map.set(n.id, { ...n, x: w / 2 + Math.cos(angle) * r, y: h / 2 + Math.sin(angle) * r, vx: 0, vy: 0 })
+        map.set(n.id, {
+          ...n,
+          x: w / 2 + Math.cos(angle) * r, y: h / 2 + Math.sin(angle) * r, vx: 0, vy: 0,
+          bornAt: performance.now(), twinklePhase: Math.random() * Math.PI * 2,
+        })
       }
     })
   }, [nodes])
@@ -3418,13 +3443,40 @@ function MemoryGalaxyView() {
         }
       }
 
+      // Eased camera-fly-to -- see cameraAnimRef, set by selectNode/jumpTo.
+      const camAnim = cameraAnimRef.current
+      if (camAnim) {
+        const elapsed = performance.now() - camAnim.start
+        const t = Math.min(1, elapsed / camAnim.duration)
+        const eased = 1 - Math.pow(1 - t, 3) // ease-out cubic
+        viewRef.current = {
+          x: camAnim.from.x + (camAnim.to.x - camAnim.from.x) * eased,
+          y: camAnim.from.y + (camAnim.to.y - camAnim.from.y) * eased,
+          scale: camAnim.from.scale + (camAnim.to.scale - camAnim.from.scale) * eased,
+        }
+        if (t >= 1) cameraAnimRef.current = null
+      }
+
       const view = viewRef.current
       const hiddenTypes = hiddenTypesRef.current
       const selectedId = selectedIdRef.current
       const hoveredId = hoveredIdRef.current
+      const now = performance.now()
 
       ctx.setTransform(dprRef.current, 0, 0, dprRef.current, 0, 0)
       ctx.clearRect(0, 0, w, h)
+
+      // Fixed decorative starfield backdrop -- drawn in raw screen space
+      // (before the pan/zoom transform below), so it reads as a distant sky
+      // rather than something that scrolls with the graph.
+      for (const bs of backgroundStarsRef.current) {
+        const twinkle = 0.35 + 0.35 * (0.5 + 0.5 * Math.sin(now * 0.0006 + bs.phase))
+        ctx.beginPath()
+        ctx.arc(bs.x * w, bs.y * h, bs.r, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(226, 232, 240, ${twinkle.toFixed(3)})`
+        ctx.fill()
+      }
+
       ctx.save()
       ctx.translate(view.x, view.y)
       ctx.scale(view.scale, view.scale)
@@ -3455,23 +3507,59 @@ function MemoryGalaxyView() {
         if (!visible(n)) continue
         const style = GALAXY_TYPE_STYLE[n.type]
         const color = style?.color ?? GALAXY_FALLBACK_COLOR
-        const radius = 4 + (n.importance ?? 0.5) * 7
+        const planet = isPlanet(n)
+        const baseRadius = 4 + (n.importance ?? 0.5) * 7
+        const radius = planet ? baseRadius * 1.6 : baseRadius
         const isSelected = n.id === selectedId
         const isNeighbor = !!selectedNode && (selectedNode.links.includes(n.id) || n.links.includes(selectedNode.id))
         const isHovered = n.id === hoveredId
         const dimmed = !!selectedNode && !isSelected && !isNeighbor
 
+        // Entrance animation: fade + scale in over the first 500ms of life.
+        const age = now - n.bornAt
+        const entrance = Math.min(1, age / 500)
+        const entranceEase = 1 - Math.pow(1 - entrance, 2)
+        const drawRadius = radius * (0.3 + 0.7 * entranceEase)
+
+        // Planets hold a steady glow; stars twinkle (alpha oscillates on a
+        // real per-node phase so they don't all pulse in lockstep).
+        const alpha = planet
+          ? (dimmed ? 0.3 : 1) * entranceEase
+          : (dimmed ? 0.2 : 0.65 + 0.35 * (0.5 + 0.5 * Math.sin(now * 0.0025 + n.twinklePhase))) * entranceEase
+
+        ctx.save()
+        ctx.globalAlpha = alpha
+        ctx.shadowColor = color
+        ctx.shadowBlur = (planet ? 18 : 8) * view.scale
         ctx.beginPath()
-        ctx.arc(n.x, n.y, radius, 0, Math.PI * 2)
+        ctx.arc(n.x, n.y, drawRadius, 0, Math.PI * 2)
         ctx.fillStyle = color
-        ctx.globalAlpha = dimmed ? 0.25 : 1
         ctx.fill()
+        ctx.restore()
+
+        if (planet) {
+          // A faint orbital ring -- the visual cue that separates "a real
+          // recurring topic" from an ordinary single-mention star.
+          ctx.save()
+          ctx.globalAlpha = (dimmed ? 0.15 : 0.5) * entranceEase
+          ctx.lineWidth = 1 / view.scale
+          ctx.strokeStyle = color
+          ctx.beginPath()
+          ctx.ellipse(n.x, n.y, drawRadius * 1.8, drawRadius * 0.7, Math.PI / 5, 0, Math.PI * 2)
+          ctx.stroke()
+          ctx.restore()
+        }
+
         if (isSelected || isHovered) {
+          ctx.save()
+          ctx.globalAlpha = entranceEase
           ctx.lineWidth = 2 / view.scale
           ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(255,255,255,0.6)'
+          ctx.beginPath()
+          ctx.arc(n.x, n.y, drawRadius, 0, Math.PI * 2)
           ctx.stroke()
+          ctx.restore()
         }
-        ctx.globalAlpha = 1
       }
       ctx.restore()
 
@@ -3539,6 +3627,18 @@ function MemoryGalaxyView() {
     }
   }
 
+  // Real eased camera-fly-to: animates the view to center on a node instead
+  // of an instant jump cut. Keeps the current zoom level, just re-centers.
+  const flyToNode = useCallback((node: SimNode) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const w = canvas.width / dprRef.current
+    const h = canvas.height / dprRef.current
+    const from = { ...viewRef.current }
+    const to = { x: w / 2 - node.x * from.scale, y: h / 2 - node.y * from.scale, scale: from.scale }
+    cameraAnimRef.current = { from, to, start: performance.now(), duration: 550 }
+  }, [])
+
   const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const drag = dragRef.current
     dragRef.current = null
@@ -3547,6 +3647,7 @@ function MemoryGalaxyView() {
       if (hit) {
         const { x, y, vx, vy, ...plain } = hit
         setSelected(plain)
+        flyToNode(hit)
       } else {
         setSelected(null)
       }
@@ -3581,6 +3682,30 @@ function MemoryGalaxyView() {
     if (!node) return
     const { x, y, vx, vy, ...plain } = node
     setSelected(plain)
+    flyToNode(node)
+  }
+
+  const shareNode = async (node: GraphNode) => {
+    setShareStatus('sending')
+    try {
+      const res = await fetch(`/api/memory/graph/${encodeURIComponent(node.id)}/share`, { method: 'POST' })
+      const json = await res.json().catch(() => null)
+      setShareStatus(json?.success ? 'sent' : 'error')
+    } catch {
+      setShareStatus('error')
+    } finally {
+      setTimeout(() => setShareStatus(null), 2500)
+    }
+  }
+
+  const downloadNode = (node: GraphNode) => {
+    const blob = new Blob([JSON.stringify(node, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `memory-${node.type}-${node.id}.json`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   const typeCounts = useMemo(() => {
@@ -3663,13 +3788,34 @@ function MemoryGalaxyView() {
             </div>
             {Object.keys(selected.metadata ?? {}).length > 0 && (
               <div className="flex flex-col gap-0.5 border-t border-border/50 pt-2">
-                {Object.entries(selected.metadata).map(([k, v]) => (
-                  <div key={k} className="flex gap-1 text-[0.52rem] text-muted-foreground">
-                    <span className="text-foreground/70">{k}:</span> <span className="truncate">{String(v)}</span>
-                  </div>
-                ))}
+                {Object.entries(selected.metadata)
+                  .filter(([k]) => k !== 'mentions')
+                  .map(([k, v]) => (
+                    <div key={k} className="flex gap-1 text-[0.52rem] text-muted-foreground">
+                      <span className="text-foreground/70">{k}:</span> <span className="truncate">{String(v)}</span>
+                    </div>
+                  ))}
               </div>
             )}
+            <div className="flex gap-1.5 border-t border-border/50 pt-2">
+              <button
+                type="button"
+                onClick={() => shareNode(selected)}
+                disabled={shareStatus === 'sending'}
+                className="flex flex-1 items-center justify-center gap-1 rounded border border-border px-2 py-1 text-[0.55rem] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+              >
+                <Send className="h-3 w-3" />
+                {shareStatus === 'sending' ? 'Sending…' : shareStatus === 'sent' ? 'Sent!' : shareStatus === 'error' ? 'Failed' : 'Share to Telegram'}
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadNode(selected)}
+                className="flex items-center justify-center gap-1 rounded border border-border px-2 py-1 text-[0.55rem] text-muted-foreground transition-colors hover:text-foreground"
+                title="Download as JSON"
+              >
+                <Save className="h-3 w-3" />
+              </button>
+            </div>
             <div className="border-t border-border/50 pt-2">
               <div className="mb-1 text-[0.5rem] uppercase text-muted-foreground">
                 Interconnected ({selected.links.length})

@@ -470,6 +470,45 @@ export function useCronStatus() {
   return useSimplePoll<{ success: boolean; jobs: CronJob[] }>('/api/cron/status', 60000)
 }
 
+export interface ActivityMission {
+  id: string
+  title: string
+  stage: string
+  assigned_agent: string | null
+  [key: string]: unknown
+}
+export interface ActivityWatch {
+  id: string
+  url: string
+  description: string
+  kind: string
+  next_check_in_s: number
+  [key: string]: unknown
+}
+export interface ActivityCronJob {
+  id: string
+  name: string
+  hour: number
+  minute: number
+  [key: string]: unknown
+}
+export interface SystemActivity {
+  success: boolean
+  active_missions: ActivityMission[]
+  active_watches: ActivityWatch[]
+  upcoming_cron_jobs: ActivityCronJob[]
+  macro_count: number
+  lockdown: { locked_down: boolean; remaining_s: number; reason: string | null }
+  focus_mode: { active: boolean; remaining_s: number; queued_count: number }
+}
+// Real, live "what is Billion doing right now" aggregation (see
+// /system/activity) -- every in-flight background mission, active watch,
+// upcoming scheduled job, and security-mode state in one poll, instead of
+// only finding any of it out via a Telegram ping when something finishes.
+export function useSystemActivity() {
+  return useSimplePoll<SystemActivity>('/api/system/activity', 10000)
+}
+
 // Real non-secret backend configuration (see /config/public).
 export function useConfigPublic() {
   return useSimplePoll<{ success: boolean; config: Record<string, string | number | boolean> }>('/api/config/public', 60000)

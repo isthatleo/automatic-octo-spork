@@ -5,7 +5,7 @@ import type { ElementType, ReactNode } from 'react'
 import { HudPanel, RadialGauge, StatBar, AnimatedNumber } from './hud-bits'
 import type { AgentInfo, PanelKey } from '@/lib/nancy/types'
 import { listAgents, type AgentListResponse } from '@/lib/nancy/agent-client'
-import { useSystemHealth, useTradeHistory, useLlmStatus, useCronStatus, useTelegramStatus, captureScreenContextNow } from '@/hooks/useSystemData'
+import { useSystemHealth, useTradeHistory, useLlmStatus, useCronStatus, useTelegramStatus, captureScreenContextNow, useSystemActivity } from '@/hooks/useSystemData'
 import {
   Area,
   AreaChart,
@@ -49,6 +49,11 @@ import {
   FolderPlus,
   FilePlus,
   ExternalLink,
+  Lock,
+  EyeOff,
+  Radar,
+  Clock,
+  Rocket,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import Editor from '@monaco-editor/react'
@@ -297,6 +302,72 @@ function HudTooltip({ active, payload, label, unit = '' }: { active?: boolean; p
   )
 }
 
+/* ── ACTIVITY WIDGET — real, live "what is Billion doing right now"
+   (see /system/activity): every in-flight background mission, active
+   watch (with a live countdown to its next check), upcoming scheduled
+   job, and security-mode state, polled every 10s. Previously the only
+   way to find any of this out was a Telegram ping once something
+   finished. Renders nothing extra when everything's idle — this is a
+   status glance, not a permanent wall of boxes. ── */
+function formatCountdown(seconds: number): string {
+  if (seconds <= 0) return 'now'
+  const m = Math.floor(seconds / 60)
+  const h = Math.floor(m / 60)
+  if (h > 0) return `${h}h ${m % 60}m`
+  if (m > 0) return `${m}m`
+  return `${Math.round(seconds)}s`
+}
+
+function ActivityWidget() {
+  const { data, loading } = useSystemActivity()
+
+  if (loading || !data?.success) return null
+  const { active_missions, active_watches, upcoming_cron_jobs, lockdown, focus_mode } = data
+  const nothingActive =
+    active_missions.length === 0 && active_watches.length === 0 && !lockdown.locked_down && !focus_mode.active
+
+  if (nothingActive) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-card/40 px-4 py-2.5 text-[0.58rem] text-muted-foreground">
+        <Radar className="h-3.5 w-3.5 text-primary/70" /> Nothing in flight right now — no background tasks, no active watches.
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-card/60 px-4 py-2.5">
+      <Radar className="h-3.5 w-3.5 shrink-0 text-primary animate-hud-breathe" />
+      <span className="text-[0.58rem] font-medium text-foreground">Right now</span>
+
+      {lockdown.locked_down && (
+        <span className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-[0.52rem] text-destructive">
+          <Lock className="h-2.5 w-2.5" /> Lockdown · {formatCountdown(lockdown.remaining_s)}
+        </span>
+      )}
+      {focus_mode.active && (
+        <span className="flex items-center gap-1 rounded-full border border-gold/40 bg-gold/10 px-2 py-0.5 text-[0.52rem] text-gold">
+          <EyeOff className="h-2.5 w-2.5" /> Focus mode · {focus_mode.queued_count} queued
+        </span>
+      )}
+      {active_missions.map((m) => (
+        <span key={m.id} title={m.title} className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[0.52rem] text-primary">
+          <Rocket className="h-2.5 w-2.5" /> {m.stage.replace(/_/g, ' ')}: {m.title.slice(0, 28)}
+        </span>
+      ))}
+      {active_watches.map((w) => (
+        <span key={w.id} title={w.description || w.url} className="flex items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-[0.52rem] text-muted-foreground">
+          <Eye className="h-2.5 w-2.5" /> {(w.description || w.url).slice(0, 24)} · next check {formatCountdown(w.next_check_in_s)}
+        </span>
+      ))}
+      {upcoming_cron_jobs.length > 0 && (
+        <span className="ml-auto flex items-center gap-1 text-[0.5rem] text-muted-foreground">
+          <Clock className="h-3 w-3" /> next scheduled: {upcoming_cron_jobs[0].name} at {String(upcoming_cron_jobs[0].hour).padStart(2, '0')}:{String(upcoming_cron_jobs[0].minute).padStart(2, '0')}
+        </span>
+      )}
+    </div>
+  )
+}
+
 /* ═══════════════════════════════════════════════════════════════
    OVERVIEW — Mission Control
    Big hero arc-reactor, live rings, world telemetry, comms feed.
@@ -362,6 +433,8 @@ export function OverviewPanel({ onNavigate }: { onNavigate?: (key: PanelKey) => 
           </ul>
         )}
       </div>
+
+      <ActivityWidget />
 
       {/* ── KPI strip: the numbers actually worth checking day to day, one
           dense row in priority order, instead of scattered across several
