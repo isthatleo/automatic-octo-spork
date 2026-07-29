@@ -63,7 +63,7 @@ class MemoryManager:
             if role == "user":
                 # Check for project mentions
                 if any(x in content.lower() for x in ["working on", "project", "building", "developing"]):
-                    node = self.graph.add_memory(
+                    node = self.graph.add_or_merge_memory(
                         content,
                         MemoryType.PROJECT,
                         {"source": "conversation", "role": role},
@@ -73,7 +73,7 @@ class MemoryManager:
 
                 # Check for trading activity
                 if any(x in content.lower() for x in ["trade", "buy", "sell", "forex", "eur/usd"]):
-                    node = self.graph.add_memory(
+                    node = self.graph.add_or_merge_memory(
                         content,
                         MemoryType.TRADE,
                         {"source": "conversation"},
@@ -83,7 +83,7 @@ class MemoryManager:
 
                 # Check for decisions
                 if any(x in content.lower() for x in ["decided", "decided to", "will", "planning to"]):
-                    node = self.graph.add_memory(
+                    node = self.graph.add_or_merge_memory(
                         content,
                         MemoryType.DECISION,
                         {"source": "conversation"},
@@ -93,7 +93,7 @@ class MemoryManager:
 
             # Store conversation snippets
             if content.strip():
-                node = self.graph.add_memory(
+                node = self.graph.add_or_merge_memory(
                     content,
                     MemoryType.CONVERSATION,
                     {"source": role, "timestamp": msg.get("timestamp")},
@@ -103,6 +103,40 @@ class MemoryManager:
 
         self.last_extracted_ids = [m.id for m in memories]
         logger.info(f"Extracted {len(memories)} memories from conversation")
+        return memories
+
+    def extract_memories_from_message(self, content: str, role: str = "user") -> List[MemoryNode]:
+        """Same real extraction heuristics as extract_memories_from_conversation
+        (project/trade/decision keyword detection + a conversation-snippet
+        node for everything), but works directly off ONE passed-in message
+        instead of self.context.get_recent_context() -- the real chat
+        pipeline (main_new.py's _generate_response_via_hierarchy, used by
+        every actual conversation surface: WS chat/voice, Telegram,
+        background tasks, cron skills) never populates self.context, so the
+        context-dependent version silently extracted nothing for any of
+        them. This is the one every real caller actually uses now."""
+        if not content or not content.strip():
+            return []
+        memories = []
+        lower = content.lower()
+
+        if role == "user":
+            if any(x in lower for x in ["working on", "project", "building", "developing"]):
+                memories.append(self.graph.add_or_merge_memory(
+                    content, MemoryType.PROJECT, {"source": "conversation", "role": role}, importance=0.7,
+                ))
+            if any(x in lower for x in ["trade", "buy", "sell", "forex", "eur/usd"]):
+                memories.append(self.graph.add_or_merge_memory(
+                    content, MemoryType.TRADE, {"source": "conversation"}, importance=0.8,
+                ))
+            if any(x in lower for x in ["decided", "decided to", "will", "planning to"]):
+                memories.append(self.graph.add_or_merge_memory(
+                    content, MemoryType.DECISION, {"source": "conversation"}, importance=0.6,
+                ))
+
+        memories.append(self.graph.add_or_merge_memory(
+            content, MemoryType.CONVERSATION, {"source": role}, importance=0.3,
+        ))
         return memories
 
     def get_relevant_memories(self, query: str, top_k: int = 5) -> List[Dict]:
@@ -126,7 +160,7 @@ class MemoryManager:
         logger.debug(f"Retrieved {len(formatted)} relevant memories")
         return formatted
 
-    def get_memory_context_string(self, query: str, max_memories: int = 5) -> str:
+    def get_memory_context_string(self, query: str, max_memories: int = 8) -> str:
         """
         Get formatted string of relevant memories for LLM prompt.
 
@@ -141,7 +175,12 @@ class MemoryManager:
         if memories:
             lines.append("# Previous memories relevant to your question:\n")
             for mem in memories:
-                lines.append(f"- ({mem.type.value}) {mem.content[:80]}")
+                mention_count = mem.metadata.get("mention_count", 1) if mem.metadata else 1
+                mention_note = f" (mentioned {mention_count}x)" if mention_count > 1 else ""
+                # 300 chars, not the old 80 -- "Billion must have access to her
+                # whole memory" means what's actually surfaced needs to be
+                # substantive, not a single truncated clause.
+                lines.append(f"- ({mem.type.value}{mention_note}) {mem.content[:300]}")
 
         # Additive holographic-memory merge (memory/holographic_store.py) --
         # a symbolic fact store distinct from this embedding-similarity
@@ -219,7 +258,7 @@ class MemoryManager:
         """
         # Extract facts from assistant response
         if any(x in assistant_response.lower() for x in ["remember", "noted", "learned"]):
-            self.graph.add_memory(
+            self.graph.add_or_merge_memory(
                 f"Nancy learned: {assistant_response[:100]}",
                 MemoryType.INSIGHT,
                 {"source": "learning", "from_query": user_query[:50]},

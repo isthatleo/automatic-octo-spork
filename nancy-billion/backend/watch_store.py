@@ -22,7 +22,7 @@ STORE_PATH = Path(__file__).parent / "data" / "watches.json"
 
 _PRICE_RE = re.compile(r"[$£€]\s?([\d,]+\.?\d{0,2})")
 
-VALID_KINDS = {"text", "price", "github_release"}
+VALID_KINDS = {"text", "price", "github_release", "topic"}
 
 
 @dataclass
@@ -154,6 +154,30 @@ async def check_watch(watch: Watch) -> Dict[str, Any]:
         }
 
     import web_tool  # local import -- avoids a hard circular import with main_new's tool wiring
+
+    if watch.kind == "topic":
+        # watch.url holds the search QUERY for this kind, not a URL -- an
+        # open-ended "watch for news about X" rather than one fixed page.
+        # Alerts when the top result set actually changes (a real new
+        # top-ranked article/page appeared), not on every identical re-search.
+        search_result = await web_tool.web_search(watch.url, max_results=5)
+        if not search_result.get("success"):
+            return {"success": False, "error": search_result.get("error")}
+        results = search_result.get("results", [])
+        if not results:
+            return {"success": False, "error": "No search results for that topic."}
+        digest = hashlib.sha256(
+            "|".join(r.get("url", "") for r in results).encode("utf-8")
+        ).hexdigest()
+        changed = watch.last_value is not None and digest != watch.last_value
+        top = results[0]
+        return {
+            "success": True, "new_value": digest, "changed": changed,
+            "alert": (
+                f"New activity on '{watch.url}', Sir: {top.get('title', 'untitled')} -- {top.get('url', '')}"
+            ) if changed else None,
+        }
+
     result = await web_tool.fetch_url(watch.url)
     if not result.get("success"):
         return {"success": False, "error": result.get("error")}

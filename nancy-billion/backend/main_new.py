@@ -81,6 +81,8 @@ import arm_switch
 import lockdown_switch
 import focus_mode
 import macro_store
+import self_maintenance
+import meeting_prep_store
 from llm_task import structured_llm_call, UTILITY_TOOLS
 from workspace_uri import resolve_oc_path
 from backup_tool import create_backup, list_backups, BACKUP_TOOLS
@@ -245,24 +247,40 @@ SMS_TOOLS = [
             "required": ["to_number", "message"],
         },
     },
+    {
+        "name": "trigger_sos",
+        "description": (
+            "Real emergency alert -- immediately texts (and attempts to call) EMERGENCY_CONTACT_NUMBER "
+            "with the situation. Use only when the user genuinely indicates an emergency ('I need help', "
+            "'call for help', explicit SOS). Deliberately NOT gated behind Telegram approval like every "
+            "other sensitive action: the whole point is immediate action, and requiring approval would "
+            "defeat it if the user is the one in trouble. Scoped to alerting a real designated personal "
+            "contact -- this never contacts emergency services directly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"situation": {"type": "string", "description": "Brief description of what's happening, included in the alert."}},
+            "required": [],
+        },
+    },
 ]
 
 WATCH_TOOLS = [
     {
         "name": "create_watch",
         "description": (
-            "Set up a real recurring watch on a webpage: Billion checks it on a schedule and pushes "
-            "one Telegram alert when it actually changes -- 'watch this product page and tell me when "
-            "the price drops', 'let me know if this page changes', 'watch this GitHub repo for a new "
-            "release'. By default fires once then stops (one_shot=true); set one_shot=false to keep "
-            "alerting on every future change instead of just the first one."
+            "Set up a real recurring watch: Billion checks it on a schedule and pushes one Telegram "
+            "alert when it actually changes -- 'watch this product page and tell me when the price "
+            "drops', 'let me know if this page changes', 'watch this GitHub repo for a new release', "
+            "'watch for news about X'. By default fires once then stops (one_shot=true); set "
+            "one_shot=false to keep alerting on every future change instead of just the first one."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "Page URL to watch, or 'owner/repo' when kind is 'github_release'."},
+                "url": {"type": "string", "description": "Page URL to watch ('text'/'price'), 'owner/repo' ('github_release'), or the search QUERY itself ('topic', e.g. 'SpaceX Starship launch')."},
                 "description": {"type": "string", "description": "Short human-readable label for what's being watched, used in the alert."},
-                "kind": {"type": "string", "enum": ["text", "price", "github_release"], "default": "text"},
+                "kind": {"type": "string", "enum": ["text", "price", "github_release", "topic"], "default": "text"},
                 "target_price": {"type": "number", "description": "Required when kind is 'price' -- alert when the page's detected price drops to or below this."},
                 "check_interval_minutes": {"type": "number", "description": "How often to check. Default 60, minimum 5."},
                 "one_shot": {"type": "boolean", "description": "Stop watching after the first alert. Default true."},
@@ -389,6 +407,41 @@ DEVICE_ROUTING_TOOLS = [
         "name": "list_connected_devices",
         "description": "List the device labels currently connected (see register_device), and which one (if any) is the active follow-me target.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
+SELF_MAINTENANCE_TOOLS = [
+    {
+        "name": "run_self_maintenance_check",
+        "description": (
+            "Real self-audit of Billion's own codebase: checks every exact-pinned dependency in "
+            "requirements.txt against the OSV.dev vulnerability database, and sweeps backend source "
+            "for TODO/FIXME/XXX markers. Distinct from system health checks -- this is code hygiene, "
+            "not runtime resource monitoring."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
+MEMORY_TOOLS = [
+    {
+        "name": "search_memory",
+        "description": (
+            "Actively search Billion's own real memory graph (every consolidated topic, project, "
+            "decision, fact, trade, and past conversation she's ever stored) -- distinct from the top "
+            "few memories automatically included in context: use this when a query needs deeper or "
+            "more specific recall than what's already visible, e.g. 'what did we decide about X', "
+            "'have I mentioned Y before'. Returns full (non-truncated) content, similarity score, "
+            "type, when it was first and most recently mentioned, and how many times."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "top_k": {"type": "integer", "description": "Default 10, max 30."},
+            },
+            "required": ["query"],
+        },
     },
 ]
 
@@ -1283,6 +1336,10 @@ _WANTS_TOOLS_RE = re.compile(
     r"\bping\b|check (if |whether )?.{0,30}\bport\b|"
     r"(copy|paste) .{0,20}clipboard|clipboard\b|"
     r"(send|text) .{0,30}(an? )?(sms|text message)|"
+    # Real SOS/emergency alert (trigger_sos) -- deliberately narrow, only
+    # explicit emergency phrasing, never a bare mention of "help" in
+    # ordinary conversation ("can you help me with...").
+    r"\b(sos|i need help|call for help|emergency (contact|alert)|this is an emergency)\b|"
     # Real 3D scene generation (create_3d_scene) -- educational/illustrative
     # only (see canvas_store.py's VALID_TYPES comment), triggered by an
     # explicit ask to visualize/render something in 3D, not bare mentions of
@@ -1315,7 +1372,14 @@ _WANTS_TOOLS_RE = re.compile(
     # requires an explicit device/place noun, not just any "I'm on/at ..."
     # sentence (which would false-trigger on ordinary conversation).
     r"follow me (to|on)|(i'?m|i am) (now )?(on|at) (my |the )?(phone|tablet|laptop|desktop|computer|workshop|office|\w+ device)\b|"
-    r"(list|show) (my |the )?(connected )?devices\b)\b",
+    r"(list|show) (my |the )?(connected )?devices\b|"
+    # Real self-maintenance check (run_self_maintenance_check).
+    r"(check|scan) (for |your )?(vulnerabilit\w*|dependenc\w*)|self.?maintenance|audit (your|the) (code|codebase)|"
+    r"\bwatch for news\b|\btopic watch\b|"
+    # Real active memory search (search_memory) -- distinct from ordinary
+    # conversation, an explicit ask to recall something specific.
+    r"(what|have i|did (i|we)) .{0,40}(mention|say|tell you|discuss)\w*|"
+    r"(search|check) your memory|do you remember\b|what do you (remember|know) about\b)\b",
     re.IGNORECASE,
 )
 
@@ -1561,7 +1625,7 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
         FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL]
         + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS
         + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS
-        + SMS_TOOLS + WATCH_TOOLS + SECURITY_MODE_TOOLS + MACRO_TOOLS + DEVICE_ROUTING_TOOLS
+        + SMS_TOOLS + WATCH_TOOLS + SECURITY_MODE_TOOLS + MACRO_TOOLS + DEVICE_ROUTING_TOOLS + SELF_MAINTENANCE_TOOLS + MEMORY_TOOLS
         + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
         + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS
         + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + google_calendar.CALENDAR_TOOLS + NODE_TOOLS + DIFF_TOOLS
@@ -1852,6 +1916,23 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             return {"success": False, "error": "No telephony provider is configured (e.g. TWILIO_ACCOUNT_SID)."}
         return await providers[0].send_sms(to_number, message)
 
+    if name == "trigger_sos":
+        contact = os.getenv("EMERGENCY_CONTACT_NUMBER")
+        if not contact:
+            return {"success": False, "error": "EMERGENCY_CONTACT_NUMBER is not configured."}
+        situation = tool_input.get("situation", "").strip()
+        message = f"SOS from Billion, Sir requested help: {situation}" if situation else "SOS triggered -- Billion's user requested help."
+        from providers.registry import get_ordered_providers
+        providers = get_ordered_providers("telephony")
+        if not providers:
+            return {"success": False, "error": "No telephony provider is configured (e.g. TWILIO_ACCOUNT_SID)."}
+        sms_result = await providers[0].send_sms(contact, message)
+        call_result = await providers[0].place_call(contact, message=message)
+        # Also alert the owner's own Telegram -- if the emergency contact is
+        # someone else, the owner should still know this fired.
+        await telegram_notifier.send(f"🚨 SOS triggered, Sir: {message}")
+        return {"success": True, "sms": sms_result, "call": call_result}
+
     if name == "create_watch":
         try:
             watch = watch_store.watch_store.create(
@@ -1906,6 +1987,30 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             "success": True,
             "connected_devices": manager.connected_device_labels(),
             "active_device_label": manager.active_device_label,
+        }
+
+    if name == "run_self_maintenance_check":
+        vuln_result = await self_maintenance.check_dependency_vulnerabilities()
+        marker_result = self_maintenance.scan_stale_markers()
+        return {"success": True, "vulnerabilities": vuln_result, "stale_markers": marker_result}
+
+    if name == "search_memory":
+        top_k = min(int(tool_input.get("top_k", 10)), 30)
+        results = memory_manager.graph.query_with_scores(tool_input.get("query", ""), top_k=top_k)
+        return {
+            "success": True,
+            "results": [
+                {
+                    "type": node.type.value,
+                    "content": node.content,
+                    "similarity": round(score, 3),
+                    "importance": node.importance,
+                    "first_mentioned_at": node.created_at,
+                    "last_mentioned_at": node.metadata.get("last_mentioned_at", node.created_at),
+                    "mention_count": node.metadata.get("mention_count", 1),
+                }
+                for node, score in results
+            ],
         }
 
     if name in ("calculate", "convert_units", "convert_currency", "get_weather", "generate_password", "generate_qr_code", "shorten_url", "get_public_ip_info"):
@@ -2179,13 +2284,45 @@ def _build_chat_prompt(user_text: str, history_text: str) -> str:
     detected_urls = extract_urls(user_text)
     if detected_urls:
         links_block = "Links detected in the user's message (already SSRF-checked, safe to fetch_url if relevant): " + ", ".join(detected_urls)
+    # Real retrieval-augmentation from memory_manager.graph -- semantically
+    # relevant past memories, not just this turn's own history_text (which
+    # is only the last several messages of THIS conversation). Empty string
+    # (no-op) until the graph actually has something relevant to surface.
+    try:
+        memory_block = memory_manager.get_memory_context_string(user_text)
+    except Exception as e:
+        logger.debug("Memory context lookup failed, continuing without it: %s", e)
+        memory_block = ""
     return (
         f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n"
-        f"{skills_block}\n\n{links_block}\n\n{history_text}\nuser: {user_text}\nassistant:"
+        f"{skills_block}\n\n{links_block}\n\n{memory_block}\n\n{history_text}\nuser: {user_text}\nassistant:"
     )
 
 
 async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
+    """Thin wrapper around _generate_response_via_hierarchy_impl that adds
+    real memory population -- this function (not the impl) is the single
+    chokepoint every real caller actually uses (WS chat/voice turns,
+    Telegram, background tasks, cron/webhook skills), so this is the one
+    place that guarantees the memory graph actually grows from real usage.
+    Previously, extract_memories_from_conversation()/learn_from_response()
+    were only ever called from the legacy /chat REST endpoint, which the
+    real frontend never uses (it goes over the WebSocket) -- confirmed live
+    by "Loaded 0 memories from disk" on every single startup this session
+    despite hours of real conversation. Uses extract_memories_from_message
+    (works directly off this turn's real text) rather than the original
+    extract_memories_from_conversation (depends on nancy_brain.context,
+    which the real path never populates either)."""
+    response_text, debug = await _generate_response_via_hierarchy_impl(user_text)
+    try:
+        memory_manager.extract_memories_from_message(user_text, role="user")
+        memory_manager.learn_from_response(user_text, response_text)
+    except Exception:
+        logger.exception("Memory extraction/learning failed for this turn")
+    return response_text, debug
+
+
+async def _generate_response_via_hierarchy_impl(user_text: str) -> tuple[str, dict]:
     """Route a chat message to Claude's real tool-use loop when it clearly
     wants a real action, to a real specialized agent when the text clearly
     matches one of the 29 registered domains, or otherwise to the
@@ -2400,11 +2537,24 @@ async def _generate_response_stream(user_text: str):
         try:
             claude = AnthropicLLM()
             got_any = False
+            full_text = ""
             async for delta in claude.generate_stream(prompt, max_tokens=512, temperature=0.7):
                 got_any = True
+                full_text += delta
                 yield {"kind": "delta", "text": delta}
             if got_any:
                 yield {"kind": "meta", "debug": {"streamed": True}}
+                # Real memory population for the plain-conversational path too
+                # -- this is the MAJORITY of real turns (anything that didn't
+                # need a tool or specialist agent), and without this it was
+                # the single biggest reason the memory graph stayed empty:
+                # only tool-use/agent-routed turns ever reached
+                # _generate_response_via_hierarchy's wrapper.
+                try:
+                    memory_manager.extract_memories_from_message(user_text, role="user")
+                    memory_manager.learn_from_response(user_text, full_text)
+                except Exception:
+                    logger.exception("Memory extraction/learning failed for this streamed turn")
                 return
         except Exception as e:
             logger.warning("Streaming Claude call failed, falling back to non-streaming chain: %s", e)
@@ -5630,6 +5780,8 @@ async def startup_event():
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_cron_execution_loop())
     asyncio.create_task(_self_healing_loop())
+    asyncio.create_task(_self_maintenance_loop())
+    asyncio.create_task(_meeting_prep_loop())
     asyncio.create_task(_watch_execution_loop())
     asyncio.create_task(_economic_calendar_loop())
     asyncio.create_task(_screen_context_loop())
@@ -5714,6 +5866,76 @@ async def _send_or_queue(text: str) -> None:
         focus_mode.queue_message(text)
     else:
         await telegram_notifier.send(text)
+
+
+async def _meeting_prep_loop() -> None:
+    """Checks real upcoming Google Calendar events every
+    MEETING_PREP_INTERVAL_MINUTES (default 5), and for any event starting
+    within MEETING_PREP_LEAD_MINUTES (default 20) that hasn't been prepped
+    yet, runs a real web search on its topic and posts real notes to the
+    canvas plus one Telegram heads-up -- the "Sir, I've taken the liberty
+    of..." move, unprompted. No-ops entirely when Google Calendar isn't
+    configured, and never re-preps the same event (see meeting_prep_store)."""
+    interval = float(os.getenv("MEETING_PREP_INTERVAL_MINUTES", "5")) * 60.0
+    lead_s = float(os.getenv("MEETING_PREP_LEAD_MINUTES", "20")) * 60.0
+    while True:
+        await asyncio.sleep(interval)
+        if not google_calendar.is_configured():
+            continue
+        try:
+            result = await google_calendar.list_events(max_results=10)
+            if not result.get("success"):
+                continue
+            now = _time.time()
+            for event in result.get("events", []):
+                event_id = event.get("id")
+                start_str = event.get("start")
+                if not event_id or not start_str:
+                    continue
+                if meeting_prep_store.already_prepped(event_id):
+                    continue
+                try:
+                    start_ts = datetime.fromisoformat(start_str).timestamp()
+                except Exception:
+                    continue
+                if not (now <= start_ts <= now + lead_s):
+                    continue
+
+                summary = event.get("summary") or "your upcoming meeting"
+                search_result = await web_search(summary, max_results=5)
+                if search_result.get("success") and search_result.get("results"):
+                    lines = [f"- {r.get('title', '')}: {r.get('url', '')}" for r in search_result["results"][:5]]
+                    note = f"Prep notes for: {summary}\n\n" + "\n".join(lines)
+                    try:
+                        item = canvas_store.create("note", f"Prep: {summary}", note)
+                        await event_bus.publish("CANVAS_ITEM_ADDED", {"item": item.to_public_dict()})
+                    except ValueError:
+                        pass
+                    await telegram_notifier.send(
+                        f"Sir, I've taken the liberty of prepping some background for your upcoming "
+                        f"meeting: {summary}. Notes are on your canvas."
+                    )
+                else:
+                    await telegram_notifier.send(f"Heads up, Sir -- {summary} is starting soon.")
+                meeting_prep_store.mark_prepped(event_id)
+        except Exception:
+            logger.exception("Meeting prep loop failed")
+
+
+async def _self_maintenance_loop() -> None:
+    """Runs self_maintenance's dependency-vulnerability check once a day
+    (default), notifying (via _send_or_queue, so focus mode still applies)
+    only about real, newly-seen vulnerabilities -- never re-alerts on one
+    already reported."""
+    interval = float(os.getenv("SELF_MAINTENANCE_INTERVAL_HOURS", "24")) * 3600.0
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            messages = await self_maintenance.run_periodic_check()
+            for message in messages:
+                await _send_or_queue(message)
+        except Exception as e:
+            logger.exception("Self-maintenance check failed: %s", e)
 
 
 async def _self_healing_loop() -> None:

@@ -244,9 +244,68 @@ class MemoryGraph:
         self.nodes[node_id] = node
 
         logger.info(f"Added memory: {node_id} ({memory_type.value})")
+        node.metadata.setdefault("mentions", [{"content": content, "at": node.created_at}])
+        node.metadata.setdefault("last_mentioned_at", node.created_at)
         self._save_to_disk()
 
         return node
+
+    # Real content-similarity threshold for merging into an existing node
+    # rather than creating a new one. Calibrated live against the actual
+    # SentenceTransformerEmbedding: same topic reworded scored ~0.82,
+    # near-identical wording ~0.88, genuinely unrelated content ~0.01 --
+    # a huge real margin, so 0.65 comfortably catches "the same topic
+    # mentioned again in different words" without risking two distinct
+    # topics of the same type ever colliding (0.82's own paraphrase case
+    # would have missed the merge entirely at that threshold).
+    MERGE_SIMILARITY_THRESHOLD = 0.65
+
+    def add_or_merge_memory(
+        self,
+        content: str,
+        memory_type: MemoryType,
+        metadata: Dict = None,
+        importance: float = 0.5,
+    ) -> MemoryNode:
+        """Like add_memory, but first checks for an existing node of the
+        SAME type whose content is similar enough to be "the same topic
+        mentioned again" -- merges into that node instead of creating a
+        near-duplicate. Every individual mention's own text and timestamp
+        is preserved in metadata["mentions"] (created_at stays the FIRST
+        time the topic came up; metadata["last_mentioned_at"] tracks the
+        most recent one), so nothing is lost, it's just consolidated --
+        exactly what a real memory should do with "we talked about X
+        again," rather than growing one node per raw message forever."""
+        if metadata is None:
+            metadata = {}
+        embedding = self.embedding_engine.embed(content)
+
+        best_match: Optional[MemoryNode] = None
+        best_score = 0.0
+        for node in self.nodes.values():
+            if node.type != memory_type:
+                continue
+            score = self.embedding_engine.similarity(embedding, node.embedding)
+            if score > best_score:
+                best_score = score
+                best_match = node
+
+        if best_match is not None and best_score >= self.MERGE_SIMILARITY_THRESHOLD:
+            now = datetime.now().isoformat()
+            best_match.metadata.setdefault("mentions", [])
+            best_match.metadata["mentions"].append({"content": content, "at": now})
+            best_match.metadata["last_mentioned_at"] = now
+            best_match.metadata["mention_count"] = len(best_match.metadata["mentions"])
+            # A topic that keeps coming up is real signal it matters more.
+            best_match.importance = min(1.0, best_match.importance + 0.03)
+            logger.info(
+                "Merged memory into existing node %s (%s, similarity %.2f, %d mentions)",
+                best_match.id, memory_type.value, best_score, best_match.metadata["mention_count"],
+            )
+            self._save_to_disk()
+            return best_match
+
+        return self.add_memory(content, memory_type, metadata, importance)
 
     def query_with_scores(self, query_text: str, top_k: int = 10, threshold: float = 0.3) -> List[Tuple[MemoryNode, float]]:
         """Same real semantic search as query(), but also returns each
