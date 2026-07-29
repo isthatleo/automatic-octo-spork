@@ -35,7 +35,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     espeak-ng \
     libportaudio2 \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # NeuTTS's phonemizer step looks for the classic `espeak` binary name
+    # specifically (confirmed live: "espeak not installed on your system",
+    # even with espeak-ng actually present and working at
+    # /usr/bin/espeak-ng) -- Debian's espeak-ng package doesn't provide a
+    # compatibility symlink, and espeak-ng is command-line compatible enough
+    # for phonemization, so this is a real, safe fix rather than pulling in
+    # the separate (larger, and in trixie/bookworm sometimes conflicting)
+    # classic espeak package.
+    && ln -s /usr/bin/espeak-ng /usr/bin/espeak
 
 COPY fury-main ./fury-main
 RUN pip install --no-cache-dir ./fury-main

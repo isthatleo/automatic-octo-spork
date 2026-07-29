@@ -69,9 +69,26 @@ class ClapWakeWord(WakeWordDetector):
     def start(self, callback):
         self.callback = callback
         self.running = True
-        # Find default input device
+        # Real check, not an assumption: a container has no physical audio
+        # hardware at all, so query_devices() returns empty and
+        # sd.default.device[0] is a sentinel (-1) with nothing real to index
+        # -- previously this raised an uncaught IndexError straight out of
+        # the startup thread on every single boot in that environment.
+        # Native/host deployments (a real machine with a real mic) still
+        # work exactly as before; this only short-circuits the case where
+        # there's genuinely nothing to listen on.
         devices = sd.query_devices()
         default_input = sd.default.device[0]
+        if not devices or default_input < 0 or default_input >= len(devices):
+            logger.warning(
+                "Clap wake word detector: no real audio input device available "
+                "(default_input=%s, %d device(s) found) -- likely running in a "
+                "container with no microphone hardware. Skipping; voice input via "
+                "the browser's own mic (Web Speech API) is unaffected.",
+                default_input, len(devices),
+            )
+            self.running = False
+            return
         logger.info(f"Using audio input device: {default_input} ({devices[default_input]['name']})")
         self.stream = sd.InputStream(
             samplerate=self.sample_rate,
@@ -269,8 +286,17 @@ def get_wake_word_detector():
                     logger.warning("Realtime wake-word backend unavailable: %s", e)
 
         def start(self, callback):
+            # Real isolation -- previously one detector raising (e.g.
+            # ClapWakeWord with no real audio device in a container) stopped
+            # this loop outright, silently skipping every detector after it
+            # in the list (VoiceWakeWord, the actual Whisper-based one, was
+            # never even attempted). Each is now independent: one failing
+            # doesn't cost the others a chance to start.
             for d in self.detectors:
-                d.start(callback)
+                try:
+                    d.start(callback)
+                except Exception:
+                    logger.exception("%s failed to start; continuing with the rest", d.__class__.__name__)
 
         def stop(self):
             for d in self.detectors:

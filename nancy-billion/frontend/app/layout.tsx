@@ -1,4 +1,3 @@
-import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import { Geist, Geist_Mono, Instrument_Serif } from 'next/font/google'
 import './globals.css'
@@ -50,9 +49,12 @@ export default function RootLayout({
       lang="en"
       className={`dark ${geist.variable} ${geistMono.variable} ${instrumentSerif.variable}`}
     >
+      {/* @vercel/analytics's <Analytics /> deliberately removed: it tries to
+          load /_vercel/insights/script.js, which only exists on real Vercel
+          hosting -- on this self-hosted Docker deployment it just 404s in
+          the console on every page load with zero actual analytics value. */}
       <body className="bg-background font-sans antialiased">
         {children}
-        {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>
   )
