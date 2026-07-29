@@ -49,7 +49,7 @@ STORE_PATH = Path(__file__).parent / "data" / "cron_jobs.json"
 # commitment_checkin: {} (no payload needed) -- sends a real Telegram
 # reminder listing unresolved commitments (memory/commitments.py), or stays
 # silent if there's nothing open.
-ActionType = Literal["telegram_message", "agent_task", "run_skill", "terminal_command", "run_script", "channel_message", "memory_consolidate", "commitment_checkin"]
+ActionType = Literal["telegram_message", "agent_task", "run_skill", "terminal_command", "run_script", "channel_message", "memory_consolidate", "commitment_checkin", "run_macro"]
 
 
 @dataclass

@@ -83,6 +83,7 @@ import focus_mode
 import macro_store
 import self_maintenance
 import meeting_prep_store
+import pattern_suggestions
 from llm_task import structured_llm_call, UTILITY_TOOLS
 from workspace_uri import resolve_oc_path
 from backup_tool import create_backup, list_backups, BACKUP_TOOLS
@@ -198,6 +199,17 @@ APP_LAUNCHER_TOOLS = [
             "setup instructions or a tutorial. Only ever a single snapshot, never continuous/ambient -- "
             "there is no 'start watching' mode. Requires the user's explicit approval first, same as "
             "screen/mouse control."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "check_security_camera",
+        "description": (
+            "Fetch exactly ONE real snapshot from the configured security/doorbell camera "
+            "(SECURITY_CAMERA_SNAPSHOT_URL) -- same on-demand-only, single-frame, no-ambient-watching "
+            "model as look_at_camera, just pointed at an external camera feed instead of the local "
+            "webcam. Use when the user explicitly asks to check the door/entrance/security feed. "
+            "Requires the user's explicit approval first."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
@@ -389,6 +401,24 @@ MACRO_TOOLS = [
         "description": "Delete a saved scene macro.",
         "input_schema": {"type": "object", "properties": {"macro_id": {"type": "string"}}, "required": ["macro_id"]},
     },
+    {
+        "name": "schedule_macro",
+        "description": (
+            "Real time-based conditional trigger for a saved macro -- schedules it to run "
+            "automatically every day at a given time (e.g. 'run movie mode every day at 9pm'), by "
+            "creating a real cron job (action_type run_macro) rather than a new scheduling system. "
+            "The macro must already exist (see create_macro)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "macro_name": {"type": "string"},
+                "hour": {"type": "integer", "description": "0-23, local time."},
+                "minute": {"type": "integer", "description": "0-59. Default 0."},
+            },
+            "required": ["macro_name", "hour"],
+        },
+    },
 ]
 
 DEVICE_ROUTING_TOOLS = [
@@ -442,6 +472,16 @@ MEMORY_TOOLS = [
             },
             "required": ["query"],
         },
+    },
+    {
+        "name": "get_automation_suggestions",
+        "description": (
+            "Real recurring-topic scan of the memory graph -- surfaces topics mentioned several times "
+            "that haven't already been suggested, worth offering to automate ('you've mentioned X 4 "
+            "times, want a watch/macro for it?'). Reads the real mention_count every consolidated "
+            "memory node already tracks (see add_or_merge_memory), not fabricated pattern-matching."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]
 
@@ -1314,6 +1354,7 @@ _WANTS_TOOLS_RE = re.compile(
     r"(take|have) a look at (my|this|the)|"
     r"(look|point|turn on|use) (your |the )?camera|"
     r"(check out|show you) (my|this|the) (desk|device|setup|screen|room)|"
+    r"(check|look at) (the |my )?(security camera|doorbell|front door|entrance)\b|"
     # Real background-task delegation (run_background_task) -- "in the
     # background" is the clear, deliberate signal (matches the tool's own
     # framing); bare "while I'm away"/"let me know when" alone are too
@@ -1368,6 +1409,7 @@ _WANTS_TOOLS_RE = re.compile(
     # separately and dynamically, see _matches_macro_name.
     r"(run|start|trigger|execute) (the |my )?.{0,30}(macro|scene)\b|"
     r"(create|save|make) (a |the )?(new )?(macro|scene)\b|(list|show|delete|remove) (my |the )?macros?\b|"
+    r"(schedule|automate) .{0,30}(macro|scene)\b|(run|do) .{0,30}(macro|scene) (every day|daily|each day)\b|"
     # Real cross-device follow-me (set_active_device/list_connected_devices) --
     # requires an explicit device/place noun, not just any "I'm on/at ..."
     # sentence (which would false-trigger on ordinary conversation).
@@ -1379,7 +1421,8 @@ _WANTS_TOOLS_RE = re.compile(
     # Real active memory search (search_memory) -- distinct from ordinary
     # conversation, an explicit ask to recall something specific.
     r"(what|have i|did (i|we)) .{0,40}(mention|say|tell you|discuss)\w*|"
-    r"(search|check) your memory|do you remember\b|what do you (remember|know) about\b)\b",
+    r"(search|check) your memory|do you remember\b|what do you (remember|know) about\b|"
+    r"(suggest|any) automation|what (should|could) (i|we) automate\b)\b",
     re.IGNORECASE,
 )
 
@@ -1868,6 +1911,22 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             result["_image_base64"] = result.pop("image_base64")
         return result
 
+    if name == "check_security_camera":
+        url = os.getenv("SECURITY_CAMERA_SNAPSHOT_URL")
+        if not url:
+            return {"success": False, "error": "SECURITY_CAMERA_SNAPSHOT_URL is not configured."}
+        if not await _request_approval("Nancy wants to: check the security camera", timeout=120.0):
+            return {"success": False, "error": "User did not approve this camera check."}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            evidence_ledger.record_evidence("check_security_camera", "security_camera", True)
+            return {"success": True, "_image_base64": base64.b64encode(resp.content).decode()}
+        except Exception as e:
+            evidence_ledger.record_evidence("check_security_camera", "security_camera", False)
+            return {"success": False, "error": str(e)}
+
     if name == "run_background_task":
         # Ungated -- starting the task itself is harmless; whatever real
         # actions it performs along the way (file writes, commands, ...)
@@ -1979,6 +2038,19 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         deleted = macro_store.macro_store.delete(tool_input.get("macro_id", ""))
         return {"success": deleted} if deleted else {"success": False, "error": "No such macro."}
 
+    if name == "schedule_macro":
+        macro_name = tool_input.get("macro_name", "")
+        macro = macro_store.macro_store.find_by_name(macro_name)
+        if macro is None:
+            return {"success": False, "error": f"No macro named {macro_name!r}. Create it first with create_macro."}
+        hour = int(tool_input.get("hour", 0))
+        minute = int(tool_input.get("minute", 0))
+        job = cron_store.create(
+            name=f"Macro: {macro.name}", description=f"Auto-runs the '{macro.name}' scene macro daily.",
+            hour=hour, minute=minute, action_type="run_macro", action_payload={"name": macro.name},
+        )
+        return {"success": True, "cron_job_id": job.id, "hour": hour, "minute": minute}
+
     if name == "set_active_device":
         manager.active_device_label = tool_input.get("device_label", "").strip() or None
         return {"success": True, "active_device_label": manager.active_device_label}
@@ -2012,6 +2084,10 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
                 for node, score in results
             ],
         }
+
+    if name == "get_automation_suggestions":
+        suggestions = pattern_suggestions.get_new_suggestions(memory_manager.graph)
+        return {"success": True, "suggestions": suggestions}
 
     if name in ("calculate", "convert_units", "convert_currency", "get_weather", "generate_password", "generate_qr_code", "shorten_url", "get_public_ip_info"):
         fn = getattr(everyday_tools, name)
@@ -3204,6 +3280,25 @@ async def get_memory_graph():
     }
 
 
+@app.post("/memory/graph/{node_id}/share", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def share_memory_node(node_id: str):
+    """Real Telegram share for one memory-graph node -- the Galaxy view's
+    'Share to Telegram' button. Sends the node's full content plus its
+    real metadata (type, first/last mentioned, mention count), not just a
+    bare content dump."""
+    node = memory_manager.graph.nodes.get(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="No such memory node")
+    mention_count = (node.metadata or {}).get("mention_count", 1)
+    last_mentioned = (node.metadata or {}).get("last_mentioned_at", node.created_at)
+    text = (
+        f"🧠 Memory ({node.type.value}), Sir:\n\n{node.content}\n\n"
+        f"First noted: {node.created_at}\nLast mentioned: {last_mentioned} ({mention_count}x)"
+    )
+    await telegram_notifier.send(text)
+    return {"success": True}
+
+
 # ---------------------------------------------------------------------------
 # Trading Intelligence API endpoints
 # ---------------------------------------------------------------------------
@@ -3545,6 +3640,38 @@ async def system_health():
     return {"success": True, **health}
 
 
+@app.get("/system/activity")
+async def system_activity():
+    """Real, live "what is Billion doing right now" aggregation -- every
+    in-flight background mission, every active watch (with its next check
+    time), lockdown/focus mode state, and the next few due cron jobs, all
+    in one call. Previously the only way to find any of this out was a
+    Telegram ping when something finished; this is the always-visible
+    dashboard version, not a new tracking mechanism -- everything here
+    already existed in its own store, just never aggregated into one view."""
+    now = _time.time()
+    active_missions = [m.to_public_dict() for m in mission_store.list() if m.stage != "archive"]
+    active_watches = [
+        {**w.to_public_dict(), "next_check_in_s": max(
+            0.0, (w.last_checked_at or now) + w.check_interval_minutes * 60 - now,
+        )}
+        for w in watch_store.watch_store.list() if w.active
+    ]
+    upcoming_cron = sorted(
+        [j.to_public_dict() for j in cron_store.list() if j.enabled],
+        key=lambda j: (j.get("hour", 0), j.get("minute", 0)),
+    )[:5]
+    return {
+        "success": True,
+        "active_missions": active_missions,
+        "active_watches": active_watches,
+        "upcoming_cron_jobs": upcoming_cron,
+        "macro_count": len(macro_store.macro_store.list()),
+        "lockdown": lockdown_switch.status(),
+        "focus_mode": focus_mode.status(),
+    }
+
+
 @app.get("/clap/status")
 async def clap_status():
     """Whether the clap-detection model (satellite repo ../../clap-detection-main)
@@ -3631,7 +3758,7 @@ async def create_cron_job(req: CronJobCreateRequest):
             raise HTTPException(status_code=400, detail=f"Invalid cron_expression: {e}")
     elif not (0 <= req.hour <= 23 and 0 <= req.minute <= 59):
         raise HTTPException(status_code=400, detail="hour must be 0-23 and minute 0-59 (or set cron_expression)")
-    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script", "channel_message", "memory_consolidate", "commitment_checkin"):
+    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script", "channel_message", "memory_consolidate", "commitment_checkin", "run_macro"):
         raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, terminal_command, run_script, or channel_message")
     if req.action_type == "telegram_message" and not req.action_payload.get("text"):
         raise HTTPException(status_code=400, detail="telegram_message jobs need action_payload.text")
@@ -3645,6 +3772,8 @@ async def create_cron_job(req: CronJobCreateRequest):
         raise HTTPException(status_code=400, detail="run_script jobs need action_payload.script")
     if req.action_type == "channel_message" and not (req.action_payload.get("channel") and req.action_payload.get("message")):
         raise HTTPException(status_code=400, detail="channel_message jobs need action_payload.channel and action_payload.message")
+    if req.action_type == "run_macro" and not req.action_payload.get("name"):
+        raise HTTPException(status_code=400, detail="run_macro jobs need action_payload.name")
     job = cron_store.create(
         req.name, req.description, req.hour, req.minute, req.action_type, req.action_payload,
         cron_expression=req.cron_expression,
@@ -3705,7 +3834,7 @@ async def list_inbound_webhooks():
 
 @app.post("/webhooks/inbound", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def create_inbound_webhook(req: InboundWebhookCreateRequest):
-    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script", "channel_message", "memory_consolidate", "commitment_checkin"):
+    if req.action_type not in ("telegram_message", "agent_task", "run_skill", "terminal_command", "run_script", "channel_message", "memory_consolidate", "commitment_checkin", "run_macro"):
         raise HTTPException(status_code=400, detail="action_type must be telegram_message, agent_task, run_skill, terminal_command, run_script, or channel_message")
     if req.action_type == "telegram_message" and not req.action_payload.get("text"):
         raise HTTPException(status_code=400, detail="telegram_message hooks need action_payload.text")
@@ -5781,6 +5910,7 @@ async def startup_event():
     asyncio.create_task(_cron_execution_loop())
     asyncio.create_task(_self_healing_loop())
     asyncio.create_task(_self_maintenance_loop())
+    asyncio.create_task(_pattern_suggestions_loop())
     asyncio.create_task(_meeting_prep_loop())
     asyncio.create_task(_watch_execution_loop())
     asyncio.create_task(_economic_calendar_loop())
@@ -5922,6 +6052,22 @@ async def _meeting_prep_loop() -> None:
             logger.exception("Meeting prep loop failed")
 
 
+async def _pattern_suggestions_loop() -> None:
+    """Weekly (default) scan for real recurring topics in the memory graph
+    worth suggesting automation for -- see pattern_suggestions.py. Only ever
+    surfaces topics it hasn't already suggested, so this can't nag about the
+    same recurring thing every week forever."""
+    interval = float(os.getenv("PATTERN_SUGGESTIONS_INTERVAL_HOURS", "168")) * 3600.0  # 168h = 1 week
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            suggestions = pattern_suggestions.get_new_suggestions(memory_manager.graph)
+            for suggestion in suggestions:
+                await _send_or_queue(pattern_suggestions.format_suggestion(suggestion))
+        except Exception:
+            logger.exception("Pattern suggestions loop failed")
+
+
 async def _self_maintenance_loop() -> None:
     """Runs self_maintenance's dependency-vulnerability check once a day
     (default), notifying (via _send_or_queue, so focus mode still applies)
@@ -6048,6 +6194,15 @@ async def _cron_execution_loop() -> None:
                         await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
                     elif job.action_type == "commitment_checkin":
                         summary = await _run_cron_commitment_checkin(job.action_payload, f"scheduled job \"{job.name}\"")
+                        cron_store.mark_run(job.id, summary)
+                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
+                    elif job.action_type == "run_macro":
+                        macro = macro_store.macro_store.find_by_name(job.action_payload.get("name", ""))
+                        if macro is None:
+                            summary = f"error: no macro named {job.action_payload.get('name')!r}"
+                        else:
+                            result = await _run_macro(macro)
+                            summary = f"ran macro {macro.name!r} ({'ok' if result.get('success') else 'had a failed step'})"
                         cron_store.mark_run(job.id, summary)
                         await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
                 except Exception as e:
