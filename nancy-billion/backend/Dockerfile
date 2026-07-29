@@ -33,6 +33,7 @@ WORKDIR /app
 # live this container can actually reach real LAN IPs (Docker's default
 # bridge networking NATs outbound LAN traffic same as internet traffic), it
 # just had no `ping` binary at all until now.
+# traceroute: real hop-by-hop routing diagnostics (network_tools.traceroute).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     ffmpeg \
@@ -40,6 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libportaudio2 \
     curl \
     iputils-ping \
+    traceroute \
     && rm -rf /var/lib/apt/lists/* \
     # Some tooling (pyttsx3's Linux driver among it) still looks for the
     # classic `espeak` binary name specifically -- espeak-ng is command-line
