@@ -36,13 +36,10 @@ services:
       # build/compose/restart) -- a deliberate, documented privilege grant:
       # anything that can use this socket can effectively control the host's
       # Docker daemon (container escape risk if this backend were ever
-      # compromised). Commented out by default; uncomment to let Billion
-      # actually run real docker commands against the host instead of just
-      # getting an honest "docker is not installed/available" from inside
-      # its own container. On Windows Docker Desktop the path below is
-      # correct as-is (Desktop exposes the same /var/run/docker.sock path
-      # inside its Linux VM to any Linux container).
-      # - /var/run/docker.sock:/var/run/docker.sock
+      # compromised). Enabled per explicit user decision. On Windows Docker
+      # Desktop the path below is correct as-is (Desktop exposes the same
+      # /var/run/docker.sock path inside its Linux VM to any Linux container).
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     # `docker compose watch` -- run alongside `docker compose up` to keep
     # this container in step with source edits automatically. main_new.py
