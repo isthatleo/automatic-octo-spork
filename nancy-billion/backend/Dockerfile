@@ -34,6 +34,11 @@ WORKDIR /app
 # bridge networking NATs outbound LAN traffic same as internet traffic), it
 # just had no `ping` binary at all until now.
 # traceroute: real hop-by-hop routing diagnostics (network_tools.traceroute).
+# git: real git_tool.py operations (git_status/diff/log/branch/commit/push/pull).
+# docker.io: real docker_tool.py operations -- the CLI only; talking to the
+# HOST's real Docker daemon additionally needs its socket bind-mounted in
+# (see docker-compose.yml's backend service volumes -- a deliberate,
+# documented privilege grant, not implied by installing this CLI alone).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     ffmpeg \
@@ -42,6 +47,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     iputils-ping \
     traceroute \
+    git \
+    docker.io \
     && rm -rf /var/lib/apt/lists/* \
     # Some tooling (pyttsx3's Linux driver among it) still looks for the
     # classic `espeak` binary name specifically -- espeak-ng is command-line

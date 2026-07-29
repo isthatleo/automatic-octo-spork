@@ -32,6 +32,17 @@ services:
       # the ephemeral container filesystem.
       - ./backend/data:/app/data
       - ./backend/voice_ref:/app/voice_ref
+      # Real host Docker-daemon access for docker_tool.py (docker_ps/logs/
+      # build/compose/restart) -- a deliberate, documented privilege grant:
+      # anything that can use this socket can effectively control the host's
+      # Docker daemon (container escape risk if this backend were ever
+      # compromised). Commented out by default; uncomment to let Billion
+      # actually run real docker commands against the host instead of just
+      # getting an honest "docker is not installed/available" from inside
+      # its own container. On Windows Docker Desktop the path below is
+      # correct as-is (Desktop exposes the same /var/run/docker.sock path
+      # inside its Linux VM to any Linux container).
+      # - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     # `docker compose watch` -- run alongside `docker compose up` to keep
     # this container in step with source edits automatically. main_new.py
@@ -108,4 +119,23 @@ services:
       - "11434:11434"
     volumes:
       - ./data/ollama:/root/.ollama
+    restart: unless-stopped
+
+  # Real Langflow (langflowai/langflow, the official image) as a genuine
+  # sibling service, not a pip dependency merged into backend's own Python
+  # environment -- Langflow pulls a large LangChain-adjacent dependency
+  # tree that risks the exact pathological pip-resolver backtracking this
+  # project already hit once with a much smaller addition. backend/
+  # langflow_client.py talks to it over its real REST API
+  # (LANGFLOW_BASE_URL, defaults to this service's compose DNS name).
+  # Opt-in only (`docker compose --profile langflow up`), same reasoning
+  # as ollama above -- a large image nobody should be forced to pull.
+  langflow:
+    image: langflowai/langflow:latest
+    container_name: nancy-langflow
+    profiles: ["langflow"]
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./data/langflow:/app/langflow
     restart: unless-stopped

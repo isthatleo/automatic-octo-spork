@@ -5,7 +5,7 @@ import type { ElementType, ReactNode } from 'react'
 import { HudPanel, RadialGauge, StatBar, AnimatedNumber } from './hud-bits'
 import type { AgentInfo, PanelKey } from '@/lib/nancy/types'
 import { listAgents, type AgentListResponse } from '@/lib/nancy/agent-client'
-import { useSystemHealth, useTradeHistory, useLlmStatus, useCronStatus, useTelegramStatus, captureScreenContextNow, useSystemActivity } from '@/hooks/useSystemData'
+import { useSystemHealth, useTradeHistory, useLlmStatus, useCronStatus, useTelegramStatus, captureScreenContextNow, useSystemActivity, useSystemAlerts } from '@/hooks/useSystemData'
 import {
   Area,
   AreaChart,
@@ -368,6 +368,59 @@ function ActivityWidget() {
   )
 }
 
+// Real green/yellow/red per category (backend/alert_center.py) -- every
+// color here traces back to an actual signal (system_monitor.py's psutil
+// thresholds, a live OSV.dev dependency-vulnerability query, or a real
+// rolling-window count of failed auth/webhook-signature attempts), not a
+// decorative status light. Polled + live-pushed via useSystemAlerts.
+const SEVERITY_DOT: Record<string, string> = {
+  green: 'bg-emerald-500',
+  yellow: 'bg-amber-500',
+  red: 'bg-rose-500',
+}
+const SEVERITY_TEXT: Record<string, string> = {
+  green: 'text-emerald-500',
+  yellow: 'text-amber-500',
+  red: 'text-rose-500',
+}
+const SEVERITY_BORDER: Record<string, string> = {
+  green: 'border-emerald-500/30 bg-emerald-500/5',
+  yellow: 'border-amber-500/30 bg-amber-500/5',
+  red: 'border-rose-500/30 bg-rose-500/5',
+}
+
+function AlertStatusWidget() {
+  const { statuses, overallSeverity, loading } = useSystemAlerts()
+
+  if (loading || statuses.length === 0) return null
+
+  return (
+    <div className={cn('flex flex-col gap-2 rounded-xl border px-4 py-2.5', SEVERITY_BORDER[overallSeverity])}>
+      <div className="flex items-center gap-2">
+        <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full animate-hud-pulse', SEVERITY_DOT[overallSeverity])} />
+        <span className="text-[0.58rem] font-medium text-foreground">
+          System alerts — {overallSeverity === 'green' ? 'all clear' : overallSeverity === 'yellow' ? 'needs attention' : 'action required'}
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {statuses.map((s) => (
+          <span
+            key={s.key}
+            title={s.detail}
+            className={cn(
+              'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[0.52rem]',
+              SEVERITY_BORDER[s.severity], SEVERITY_TEXT[s.severity],
+            )}
+          >
+            <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', SEVERITY_DOT[s.severity])} />
+            {s.title}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 /* ═══════════════════════════════════════════════════════════════
    OVERVIEW — Mission Control
    Big hero arc-reactor, live rings, world telemetry, comms feed.
@@ -435,6 +488,7 @@ export function OverviewPanel({ onNavigate }: { onNavigate?: (key: PanelKey) => 
       </div>
 
       <ActivityWidget />
+      <AlertStatusWidget />
 
       {/* ── KPI strip: the numbers actually worth checking day to day, one
           dense row in priority order, instead of scattered across several

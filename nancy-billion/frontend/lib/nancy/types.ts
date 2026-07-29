@@ -15,7 +15,7 @@ export type PanelKey =
   | 'overview' | 'map' | 'core' | 'agents' | 'system' | 'market' | 'news' | 'kanban'
   | 'sessions' | 'channels' | 'instances' | 'cron' | 'skills' | 'models' | 'keys' | 'config' | 'usage'
   | 'pairing' | 'profiles' | 'plugins' | 'webhooks' | 'docs' | 'canvas' | 'memory-insights'
-  | 'achievements' | 'theming'
+  | 'achievements' | 'theming' | 'flows'
 
 export interface AgentInfo {
   key: string

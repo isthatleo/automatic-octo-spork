@@ -57,11 +57,12 @@ import {
   Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, Newspaper, Kanban, X, Mic, MicOff,
   Keyboard, ChevronDown, MessageSquare, PanelLeftClose, PanelLeftOpen, Send, Server, Clock3,
   FileClock, Sparkles, Cpu, Key, Settings2, BarChart3, Link2, User, PlugZap, Webhook, BookOpen,
-  StickyNote, Award, Palette, CandlestickChart, PhoneCall, PhoneOff,
+  StickyNote, Award, Palette, CandlestickChart, PhoneCall, PhoneOff, Workflow,
 } from 'lucide-react'
 
 import { DocsHelpPanel } from '@/components/nancy/docs-panel'
 import { OnboardingToast } from '@/components/nancy/onboarding-toast'
+import { FlowBuilderPanel } from '@/components/nancy/flow-builder-panel'
 
 /** Grouped exactly like OpenClaw/Hermes's sidebar (Control/Agent/Settings/
  * Resources), mapped onto Nancy's real pages -- a top-level "Voice" entry
@@ -82,6 +83,7 @@ const NAV_GROUPS: { group: string; items: { key: PanelKey; label: string; icon: 
     { key: 'agents', label: 'Agents', icon: Bot },
     { key: 'kanban', label: 'Kanban', icon: Kanban },
     { key: 'canvas', label: 'Canvas', icon: StickyNote },
+    { key: 'flows', label: 'Flows', icon: Workflow },
     { key: 'skills', label: 'Skills', icon: Sparkles },
     { key: 'models', label: 'Models', icon: Cpu },
     { key: 'memory-insights', label: 'Memory Insights', icon: Brain },
@@ -1159,6 +1161,7 @@ function WorkspaceLayout({
               {panel === 'achievements' && <AchievementsPanel />}
               {panel === 'theming' && <ThemingPanel />}
               {panel === 'canvas' && <CanvasPanel />}
+              {panel === 'flows' && <FlowBuilderPanel />}
               {panel === 'docs' && <DocsHelpPanel />}
             </div>
           )}

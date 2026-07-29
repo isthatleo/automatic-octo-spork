@@ -81,6 +81,22 @@ export interface VoiceCheckResult {
   similarity?: number
 }
 
+/** A real green/yellow/red category status (see backend/alert_center.py) --
+ *  every field here reflects a signal some other real backend module
+ *  already computes (system_monitor.py thresholds, OSV.dev vulnerability
+ *  results, a rolling-window failed-auth counter), never a fabricated
+ *  severity. Pushed live whenever a category's color actually changes (see
+ *  main_new.py's _broadcast_alert_status). */
+export interface AlertStatusPayload {
+  key: string
+  category: string
+  title: string
+  severity: 'green' | 'yellow' | 'red'
+  detail: string
+  updated_at: number
+  since: number
+}
+
 let socket: WebSocket | null = null
 let connecting: Promise<WebSocket> | null = null
 let activeTurn: ActiveTurn | null = null
@@ -97,6 +113,12 @@ const chatImageListeners = new Set<(payload: ChatImagePayload) => void>()
  *  (see main_new.py's _conversation_idle_watchdog) -- a real safety net for
  *  a tab that crashed/lost network without sending conversation_end itself. */
 const conversationEndedListeners = new Set<(reason: string) => void>()
+/** Fires on every real category-status change pushed from alert_center.py. */
+const alertStatusListeners = new Set<(status: AlertStatusPayload) => void>()
+/** Fires on every real-time orb pulse (see main_new.py's _pulse_orb) --
+ *  'yellow' the instant a real check/process starts, 'green' on a clean
+ *  result, 'red' on an error or a genuine security/attack signal. */
+const orbPulseListeners = new Set<(color: 'green' | 'yellow' | 'red', reason: string) => void>()
 
 function connect(): Promise<WebSocket> {
   if (socket && socket.readyState === WebSocket.OPEN) return Promise.resolve(socket)
@@ -154,6 +176,19 @@ function connect(): Promise<WebSocket> {
       if (msg.type === 'conversation_ended') {
         const reason = (msg.reason as string) ?? 'unknown'
         for (const cb of conversationEndedListeners) cb(reason)
+        return
+      }
+
+      if (msg.type === 'alert_status') {
+        const status = msg.status as AlertStatusPayload
+        for (const cb of alertStatusListeners) cb(status)
+        return
+      }
+
+      if (msg.type === 'orb_pulse') {
+        const color = msg.color as 'green' | 'yellow' | 'red'
+        const reason = (msg.reason as string) ?? ''
+        for (const cb of orbPulseListeners) cb(color, reason)
         return
       }
 
@@ -216,7 +251,7 @@ function connect(): Promise<WebSocket> {
       // Auto-reconnect only while something actually needs the proactive
       // push channel (a trader watching for a live NFP/CPI alert shouldn't
       // lose the connection silently if it drops mid-session).
-      if ((economicAlertListeners.size > 0 || domainEventListeners.size > 0) && !reconnectTimer) {
+      if ((economicAlertListeners.size > 0 || domainEventListeners.size > 0 || alertStatusListeners.size > 0 || orbPulseListeners.size > 0) && !reconnectTimer) {
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null
           connect().catch(() => {
@@ -296,6 +331,34 @@ export function onConversationEnded(callback: (reason: string) => void): () => v
   connect().catch((err) => console.warn('[ws-client] conversation-ended subscription connect failed:', err))
   return () => {
     conversationEndedListeners.delete(callback)
+  }
+}
+
+/**
+ * Subscribe to real-time green/yellow/red category-status changes (see
+ * backend/alert_center.py). Eagerly opens the WS connection, same pattern as
+ * onEconomicAlert -- a status dashboard should update the instant something
+ * changes, not only on the next poll. Returns an unsubscribe function.
+ */
+export function onAlertStatus(callback: (status: AlertStatusPayload) => void): () => void {
+  alertStatusListeners.add(callback)
+  connect().catch((err) => console.warn('[ws-client] alert-status subscription connect failed:', err))
+  return () => {
+    alertStatusListeners.delete(callback)
+  }
+}
+
+/**
+ * Subscribe to real-time orb pulses (see backend/main_new.py's _pulse_orb) --
+ * yellow while a real check/process is running, green on a clean result,
+ * red on an error or attack signal. Eagerly opens the WS connection.
+ * Returns an unsubscribe function.
+ */
+export function onOrbPulse(callback: (color: 'green' | 'yellow' | 'red', reason: string) => void): () => void {
+  orbPulseListeners.add(callback)
+  connect().catch((err) => console.warn('[ws-client] orb-pulse subscription connect failed:', err))
+  return () => {
+    orbPulseListeners.delete(callback)
   }
 }
 

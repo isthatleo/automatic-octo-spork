@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { onAlertStatus, type AlertStatusPayload } from '@/lib/nancy/ws-client'
 
 // Real psutil-backed system health (CPU/memory/disk/network/temperature).
 // Replaces the old Math.random()-jittered gauges in the Overview/System panels.
@@ -507,6 +508,41 @@ export interface SystemActivity {
 // only finding any of it out via a Telegram ping when something finishes.
 export function useSystemActivity() {
   return useSimplePoll<SystemActivity>('/api/system/activity', 10000)
+}
+
+// Real green/yellow/red category status (see backend/alert_center.py) --
+// polled every 15s as a baseline (so a freshly-opened tab has data
+// immediately) and merged live with real-time WS pushes (onAlertStatus) so
+// a color change reflects the instant it happens, not just at next poll.
+export function useSystemAlerts() {
+  const { data, loading, error } = useSimplePoll<{
+    success: boolean
+    overall_severity: 'green' | 'yellow' | 'red'
+    statuses: AlertStatusPayload[]
+  }>('/api/system/alerts', 15000)
+
+  const [live, setLive] = useState<Record<string, AlertStatusPayload>>({})
+
+  useEffect(() => {
+    return onAlertStatus((status) => {
+      setLive((prev) => ({ ...prev, [status.key]: status }))
+    })
+  }, [])
+
+  const merged = new Map<string, AlertStatusPayload>()
+  for (const s of data?.statuses ?? []) merged.set(s.key, s)
+  for (const s of Object.values(live)) merged.set(s.key, s)
+  const statuses = Array.from(merged.values()).sort((a, b) => {
+    const order: Record<string, number> = { red: 2, yellow: 1, green: 0 }
+    return order[b.severity] - order[a.severity] || a.key.localeCompare(b.key)
+  })
+  const overallSeverity: 'green' | 'yellow' | 'red' = statuses.some((s) => s.severity === 'red')
+    ? 'red'
+    : statuses.some((s) => s.severity === 'yellow')
+      ? 'yellow'
+      : 'green'
+
+  return { statuses, overallSeverity, loading, error }
 }
 
 // Real non-secret backend configuration (see /config/public).

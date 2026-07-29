@@ -134,7 +134,10 @@ async def _describe_with_gemini(image_b64: str) -> tuple[Optional[str], Optional
             }],
             "generationConfig": {"maxOutputTokens": 200},
         }
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- see forex_engine.py/llm.py's identical
+        # fix; confirmed live this environment can fail to decode a
+        # brotli-compressed response from real APIs.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()

@@ -146,7 +146,14 @@ class ForexDataAggregator:
 
         symbol = self._METAL_YAHOO_SYMBOLS[base]
         try:
-            async with aiohttp.ClientSession() as session:
+            # Accept-Encoding: identity -- Frankfurter (behind some CDNs) can
+            # respond with brotli (Content-Encoding: br), which aiohttp
+            # advertises support for whenever a brotli decoder happens to be
+            # importable but then fails to actually decode ("Can not decode
+            # content-encoding: br") in this environment -- confirmed live,
+            # not theoretical. Requesting no compression sidesteps it
+            # entirely rather than adding a new pip dependency for it.
+            async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
                 async with session.get(
                     f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
                     headers={"User-Agent": "Mozilla/5.0"},
@@ -186,7 +193,14 @@ class ForexDataAggregator:
         import aiohttp
 
         try:
-            async with aiohttp.ClientSession() as session:
+            # Accept-Encoding: identity -- Frankfurter (behind some CDNs) can
+            # respond with brotli (Content-Encoding: br), which aiohttp
+            # advertises support for whenever a brotli decoder happens to be
+            # importable but then fails to actually decode ("Can not decode
+            # content-encoding: br") in this environment -- confirmed live,
+            # not theoretical. Requesting no compression sidesteps it
+            # entirely rather than adding a new pip dependency for it.
+            async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
                 async with session.get(
                     f"{self.BASE_URL}/latest", params={"from": base, "to": quote}, timeout=10
                 ) as resp:
@@ -260,7 +274,14 @@ class ForexDataAggregator:
         end = datetime.now().strftime("%Y-%m-%d")
 
         try:
-            async with aiohttp.ClientSession() as session:
+            # Accept-Encoding: identity -- Frankfurter (behind some CDNs) can
+            # respond with brotli (Content-Encoding: br), which aiohttp
+            # advertises support for whenever a brotli decoder happens to be
+            # importable but then fails to actually decode ("Can not decode
+            # content-encoding: br") in this environment -- confirmed live,
+            # not theoretical. Requesting no compression sidesteps it
+            # entirely rather than adding a new pip dependency for it.
+            async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
                 async with session.get(
                     f"{self.BASE_URL}/{start}..{end}",
                     params={"from": base, "to": quote},
@@ -543,6 +564,24 @@ class RiskMonitor:
             RiskLevel.EXTREME: ["STOP TRADING", "Reduce all positions", "Reassess strategy"],
         }
         return recommendations.get(risk_level, [])
+
+
+async def run_forex_backtest(pair: str, strategy: str, days: int = 90, params: Optional[Dict] = None) -> Dict:
+    """Real end-to-end forex strategy backtest: fetches real historical
+    daily rates (ForexDataAggregator, the same real Frankfurter/Yahoo data
+    the rest of this module uses), then runs the requested strategy through
+    backtest_engine's real event-driven simulation, Monte Carlo permutation
+    test, and walk-forward validation -- not a synthetic backtest, real
+    historical prices and real math throughout."""
+    from trading.backtest_engine import run_full_validation
+
+    aggregator = ForexDataAggregator()
+    candles = await aggregator.get_historical(pair, days=days)
+    if len(candles) < 10:
+        return {"success": False, "error": f"Not enough historical data for {pair} ({len(candles)} candles fetched)."}
+    result = run_full_validation(candles, strategy, params)
+    result["pair"] = pair
+    return result
 
 
 # Example usage

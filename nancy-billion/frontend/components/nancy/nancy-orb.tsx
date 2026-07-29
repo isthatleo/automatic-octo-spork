@@ -3,6 +3,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
+import { onOrbPulse } from '@/lib/nancy/ws-client'
 
 export type OrbState =
   | 'idle'
@@ -31,6 +32,19 @@ const BLUE = '#4B8DFF'
 const GOLD = '#DAB249'
 const PLUM = '#978CAD'
 const ALERT_C = '#E54C4A'
+const PULSE_GREEN = '#2ECC71'
+
+// Real-time transient pulse colors (see backend/main_new.py's _pulse_orb) --
+// yellow the instant a real check/process starts, green on a clean result,
+// red on an error or a genuine security/attack signal. Reuses the existing
+// GOLD/ALERT_C hues for yellow/red so a pulse doesn't clash with what those
+// colors already mean elsewhere in this HUD.
+const PULSE_COLORS: Record<'green' | 'yellow' | 'red', string> = {
+  green: PULSE_GREEN,
+  yellow: GOLD,
+  red: ALERT_C,
+}
+const PULSE_DURATION_MS = 3000
 
 function alphaHex(hex: string, a: number): string {
   const r = parseInt(hex.slice(1, 3), 16)
@@ -241,7 +255,28 @@ export function NancyOrb({
   const coreRef = useRef<HTMLButtonElement>(null)
   const pulseRef = useRef<HTMLDivElement>(null)
 
+  // Real-time transient color override -- green/yellow/red on a real
+  // backend check/process event (see backend/main_new.py's _pulse_orb),
+  // auto-reverting to the orb's normal state color after ~3s. Subscribed
+  // here directly (not passed as a prop) so every mounted orb reflects
+  // real backend activity without page.tsx needing to wire it through.
+  const [pulseColor, setPulseColor] = useState<string | null>(null)
+  const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return onOrbPulse((color) => {
+      setPulseColor(PULSE_COLORS[color])
+      if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current)
+      pulseTimerRef.current = setTimeout(() => setPulseColor(null), PULSE_DURATION_MS)
+    })
+  }, [])
+  useEffect(() => {
+    return () => {
+      if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current)
+    }
+  }, [])
+
   const profile = PROFILES[state]
+  const displayColor = pulseColor ?? profile.color
 
   // Real haptic feedback (not just visual) on the moment Nancy actually
   // starts listening or speaking -- navigator.vibrate is a real browser
@@ -324,7 +359,7 @@ export function NancyOrb({
             real-amplitude boost layered on top (ref-driven). */}
         <motion.div
           className="absolute rounded-full"
-          style={{ width: '92%', height: '92%', background: `radial-gradient(circle, ${alphaHex(profile.color, 0.9)} 0%, transparent 70%)`, filter: `blur(${size * 0.11}px)` }}
+          style={{ width: '92%', height: '92%', background: `radial-gradient(circle, ${alphaHex(displayColor, 0.9)} 0%, transparent 70%)`, filter: `blur(${size * 0.11}px)` }}
           animate={{ opacity: profile.glowRange, scale: [1, 1.1, 1] }}
           transition={{ duration: 5, repeat: Infinity, ease: 'easeInOut' }}
           aria-hidden
@@ -332,7 +367,7 @@ export function NancyOrb({
         <div
           ref={ampGlowRef}
           className="pointer-events-none absolute rounded-full transition-colors duration-500"
-          style={{ width: '92%', height: '92%', background: `radial-gradient(circle, ${alphaHex(profile.color, 1)} 0%, transparent 65%)`, filter: `blur(${size * 0.11}px)`, opacity: 0 }}
+          style={{ width: '92%', height: '92%', background: `radial-gradient(circle, ${alphaHex(displayColor, 1)} 0%, transparent 65%)`, filter: `blur(${size * 0.11}px)`, opacity: 0 }}
           aria-hidden
         />
 
@@ -400,7 +435,7 @@ export function NancyOrb({
             fill="none"
             stroke="white"
             strokeWidth="0.85"
-            style={{ transformOrigin: '50px 50px', filter: `drop-shadow(0 0 ${size * 0.01}px ${alphaHex(profile.color, 0.8)})` }}
+            style={{ transformOrigin: '50px 50px', filter: `drop-shadow(0 0 ${size * 0.01}px ${alphaHex(displayColor, 0.8)})` }}
             animate={{
               scale: profile.ringPulseMs ? [1, 1.06, 1] : [1, 1.03, 1],
               opacity: profile.ringPulseMs ? [0.85, 1, 0.85] : [0.9, 1, 0.9],
@@ -409,7 +444,7 @@ export function NancyOrb({
           />
 
           {/* real-time: listening waveform ring, tracks actual mic level */}
-          <circle ref={waveformRef} cx="50" cy="50" r="32" fill="none" stroke={profile.color} strokeWidth="0.6" opacity={0} />
+          <circle ref={waveformRef} cx="50" cy="50" r="32" fill="none" stroke={displayColor} strokeWidth="0.6" opacity={0} />
 
           {/* real-time: speaking ripple bursts, one per detected utterance beat */}
           <AnimatePresence>
@@ -418,7 +453,7 @@ export function NancyOrb({
                 key={r.id}
                 cx="50" cy="50"
                 fill="none"
-                stroke={profile.color}
+                stroke={displayColor}
                 strokeWidth="0.5"
                 initial={{ r: 30, opacity: 0.55 }}
                 animate={{ r: 50, opacity: 0 }}
@@ -439,7 +474,7 @@ export function NancyOrb({
           style={{
             width: '48%',
             height: '48%',
-            background: `radial-gradient(circle at 35% 30%, ${alphaHex(profile.color, 0.85)} 0%, ${alphaHex(profile.color, 0.22)} 55%, #05070d 100%)`,
+            background: `radial-gradient(circle at 35% 30%, ${alphaHex(displayColor, 0.85)} 0%, ${alphaHex(displayColor, 0.22)} 55%, #05070d 100%)`,
             boxShadow: `0 ${size * 0.05}px ${size * 0.12}px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08)`,
             transition: 'background 0.6s ease',
           }}
@@ -512,7 +547,7 @@ export function NancyOrb({
         <div
           key={state}
           className="animate-[hud-fade-in_0.4s_ease] text-[0.7rem] transition-colors duration-500"
-          style={{ color: state === 'idle' ? 'var(--muted-foreground)' : profile.color }}
+          style={{ color: state === 'idle' && !pulseColor ? 'var(--muted-foreground)' : displayColor }}
         >
           {profile.label}
         </div>

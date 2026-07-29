@@ -87,6 +87,12 @@ import pattern_suggestions
 import presence_store
 import profiles_store
 import household_voice_id
+import alert_center
+import git_tool
+import docker_tool
+import process_control
+import flow_engine
+import langflow_client
 from llm_task import structured_llm_call, UTILITY_TOOLS
 from workspace_uri import resolve_oc_path
 from backup_tool import create_backup, list_backups, BACKUP_TOOLS
@@ -539,6 +545,146 @@ PROFILE_TOOLS = [
     },
 ]
 
+SWARM_TOOLS = [
+    {
+        "name": "run_agent_swarm",
+        "description": (
+            "Real AI agent swarm: an LLM orchestrator decomposes a goal across up to 8 of Billion's real, "
+            "currently-online specialized agents (research, coding, trading, science, etc.), runs them all "
+            "in genuine parallel with a tailored subtask each, then synthesizes their real results into one "
+            "answer. Use for goals that genuinely benefit from multiple specialist perspectives at once -- "
+            "not a simple single-domain question."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string"},
+                "max_agents": {"type": "integer", "description": "Default/cap 8."},
+            },
+            "required": ["goal"],
+        },
+    },
+]
+
+FLOW_TOOLS = [
+    {
+        "name": "create_flow",
+        "description": (
+            "Create a real, executable visual flow -- a directed graph of nodes (each a real tool call, an "
+            "LLM prompt, a flow input, or a flow output), wired together with {{node_id.field}} placeholders "
+            "so one node's real output feeds another's input. Billion's own native equivalent of a Langflow-"
+            "style pipeline, built on the same real tools/LLM this chat uses."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "nodes": {
+                    "type": "array",
+                    "description": 'Each: {"id": str, "kind": "tool"|"llm"|"input"|"output", "config": {...}, "label": str}.',
+                    "items": {"type": "object"},
+                },
+                "edges": {
+                    "type": "array",
+                    "description": 'Each: {"source": node_id, "target": node_id}.',
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["name", "nodes", "edges"],
+        },
+    },
+    {"name": "list_flows", "description": "List every saved flow.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_flow", "description": "Get one saved flow's full node/edge definition.", "input_schema": {"type": "object", "properties": {"flow_id": {"type": "string"}}, "required": ["flow_id"]}},
+    {
+        "name": "update_flow",
+        "description": "Update a saved flow's name/nodes/edges.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"flow_id": {"type": "string"}, "name": {"type": "string"}, "nodes": {"type": "array", "items": {"type": "object"}}, "edges": {"type": "array", "items": {"type": "object"}}},
+            "required": ["flow_id"],
+        },
+    },
+    {"name": "delete_flow", "description": "Delete a saved flow.", "input_schema": {"type": "object", "properties": {"flow_id": {"type": "string"}}, "required": ["flow_id"]}},
+    {
+        "name": "run_flow",
+        "description": "Real execution of a saved flow: runs every node in real topological order through Billion's actual tool dispatcher/LLM, returns the real output plus a per-node execution trace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"flow_id": {"type": "string"}, "inputs": {"type": "object", "description": "Values for the flow's input nodes."}},
+            "required": ["flow_id"],
+        },
+    },
+]
+
+LANGFLOW_TOOLS = [
+    {
+        "name": "list_langflow_flows",
+        "description": (
+            "List real flows from an actual connected Langflow instance (langflowai/langflow -- see "
+            "docker-compose.yml's opt-in `langflow` profile). Requires that service to actually be running; "
+            "fails with a real connection error otherwise, not a fake empty list."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "run_langflow_flow",
+        "description": "Real execution of a flow inside an actual connected Langflow instance, by flow id or name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "flow_id_or_name": {"type": "string"},
+                "input_value": {"type": "string"},
+            },
+            "required": ["flow_id_or_name", "input_value"],
+        },
+    },
+]
+
+TRADING_BACKTEST_TOOLS = [
+    {
+        "name": "list_trading_strategies",
+        "description": "List every real trading strategy available to run_forex_backtest/run_crypto_backtest.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "run_forex_backtest",
+        "description": (
+            "Real forex strategy backtest -- fetches real historical daily rates (Frankfurter/ECB, or "
+            "Yahoo Finance for XAU/XAG) and runs the requested strategy through a real event-driven "
+            "backtest, a Monte Carlo permutation significance test, and walk-forward out-of-sample "
+            "validation. Use list_trading_strategies for available strategy names."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pair": {"type": "string", "description": "e.g. 'EUR/USD', 'GBP/JPY', 'XAU/USD'."},
+                "strategy": {"type": "string"},
+                "days": {"type": "integer", "description": "Days of history to backtest, default 90."},
+                "params": {"type": "object", "description": "Optional strategy-specific parameters."},
+            },
+            "required": ["pair", "strategy"],
+        },
+    },
+    {
+        "name": "run_crypto_backtest",
+        "description": (
+            "Real crypto strategy backtest -- fetches real historical daily prices (CoinGecko) and runs "
+            "the requested strategy through the same real event-driven backtest, Monte Carlo permutation "
+            "test, and walk-forward validation as run_forex_backtest."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "e.g. 'BTC', 'ETH', 'SOL'."},
+                "strategy": {"type": "string"},
+                "days": {"type": "integer", "description": "Days of history to backtest, default 90."},
+                "params": {"type": "object", "description": "Optional strategy-specific parameters."},
+            },
+            "required": ["symbol", "strategy"],
+        },
+    },
+]
+
 SELF_MAINTENANCE_TOOLS = [
     {
         "name": "run_self_maintenance_check",
@@ -547,6 +693,16 @@ SELF_MAINTENANCE_TOOLS = [
             "requirements.txt against the OSV.dev vulnerability database, and sweeps backend source "
             "for TODO/FIXME/XXX markers. Distinct from system health checks -- this is code hygiene, "
             "not runtime resource monitoring."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_system_alerts",
+        "description": (
+            "Real current green/yellow/red status for every monitored category -- system resource "
+            "health, primary LLM backend reliability, dependency vulnerabilities, and any active "
+            "security-failure burst (repeated failed auth/webhook-signature attempts). The honest "
+            "answer to 'is everything okay' / 'any warnings or alerts right now'."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
@@ -654,6 +810,10 @@ from trading import (
     StrategyAdvisor,
     RiskMonitor,
     TradingManager,
+    run_forex_backtest,
+    crypto_data,
+    list_strategies as list_trading_strategies_impl,
+    run_full_validation,
 )
 from system_monitor import SystemMonitor
 
@@ -709,6 +869,7 @@ async def require_auth(request: Request) -> None:
     header = request.headers.get("authorization", "")
     token = header[7:] if header.lower().startswith("bearer ") else ""
     if token != _BACKEND_AUTH_TOKEN:
+        _record_security_failure("rest_auth", "Invalid or missing Authorization bearer token on a REST request")
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization bearer token")
 
 
@@ -736,6 +897,33 @@ _rate_limiter = _RateLimiter(
     max_requests=int(os.getenv("BACKEND_RATE_LIMIT_MAX", "30")),
     window_seconds=float(os.getenv("BACKEND_RATE_LIMIT_WINDOW_S", "60")),
 )
+
+# Real rolling-window count of failed auth/webhook-signature attempts, keyed
+# by source (e.g. "webhook:<hook_id>", "ws_auth", "rest_auth"). Reuses
+# _RateLimiter's exact sliding-window shape as a threshold counter rather
+# than a request throttle: .check() returns False once N failures land
+# within the window, which is what _record_security_failure below treats as
+# a real attack signal (red) -- a single isolated failure (stale bookmark,
+# a typo) never trips it, only a genuine burst does.
+_security_failure_tracker = _RateLimiter(
+    max_requests=int(os.getenv("SECURITY_ALERT_FAILURE_THRESHOLD", "5")),
+    window_seconds=float(os.getenv("SECURITY_ALERT_WINDOW_S", "300")),
+)
+
+
+def _record_security_failure(source: str, detail: str) -> None:
+    if _security_failure_tracker.check(source):
+        return  # still under threshold -- not yet alert-worthy
+    full_detail = (
+        f"{detail} -- {_security_failure_tracker.max_requests}+ failures within "
+        f"{int(_security_failure_tracker.window_seconds)}s, possible attack, Sir."
+    )
+    _update_alert_status(
+        key=f"security_failures:{source}", category="security",
+        title=f"Repeated failed authentication ({source})", severity="red", detail=full_detail,
+    )
+    asyncio.create_task(_pulse_orb("red", full_detail))
+    asyncio.create_task(_send_or_queue(f"Security alert, Sir: {full_detail}"))
 
 
 async def rate_limit(request: Request) -> None:
@@ -1566,6 +1754,19 @@ _WANTS_TOOLS_RE = re.compile(
     r"(list|show) (my |the )?(connected )?devices\b|"
     # Real self-maintenance check (run_self_maintenance_check).
     r"(check|scan) (for |your )?(vulnerabilit\w*|dependenc\w*)|self.?maintenance|audit (your|the) (code|codebase)|"
+    # Real green/yellow/red status dashboard (get_system_alerts).
+    r"(any|current) (alerts?|warnings?)\b|is (everything|anything) (ok|okay|fine|wrong)\b|"
+    r"system status\b|health status\b|(under|any) attack\b|"
+    # Real strategy backtesting (list_trading_strategies, run_forex_backtest, run_crypto_backtest).
+    r"backtest\w*|trading strateg\w*|walk.?forward|monte carlo\b|"
+    # Real multi-agent swarm execution (run_agent_swarm).
+    r"agent swarm\b|swarm of agents\b|multiple agents? (on|for) (this|that|it)\b|"
+    # Dedicated git/docker/process-control tools.
+    r"git (status|diff|log|branch|commit|push|pull)\b|"
+    r"docker (ps|logs|images|build|compose|restart)\b|"
+    r"(deploy|restart|stop) .{0,20}(server|service|process)\b|background process\w*|"
+    # Real native flow builder (create/run/list_flows).
+    r"(create|build|run|list|delete) .{0,15}flow\w*|visual (flow|pipeline)\b|langflow\b|"
     r"\bwatch for news\b|\btopic watch\b|"
     # Real active memory search (search_memory) -- distinct from ordinary
     # conversation, an explicit ask to recall something specific.
@@ -1824,7 +2025,8 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
         FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL]
         + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS
         + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS
-        + SMS_TOOLS + WATCH_TOOLS + SECURITY_MODE_TOOLS + MACRO_TOOLS + DEVICE_ROUTING_TOOLS + PRESENCE_TOOLS + PROFILE_TOOLS + SELF_MAINTENANCE_TOOLS + MEMORY_TOOLS
+        + SMS_TOOLS + WATCH_TOOLS + SECURITY_MODE_TOOLS + MACRO_TOOLS + DEVICE_ROUTING_TOOLS + PRESENCE_TOOLS + PROFILE_TOOLS + SELF_MAINTENANCE_TOOLS + MEMORY_TOOLS + TRADING_BACKTEST_TOOLS + SWARM_TOOLS
+        + git_tool.GIT_TOOLS + docker_tool.DOCKER_TOOLS + process_control.PROCESS_CONTROL_TOOLS + FLOW_TOOLS + LANGFLOW_TOOLS
         + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
         + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS
         + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + google_calendar.CALENDAR_TOOLS + NODE_TOOLS + DIFF_TOOLS
@@ -2269,6 +2471,84 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         vuln_result = await self_maintenance.check_dependency_vulnerabilities()
         marker_result = self_maintenance.scan_stale_markers()
         return {"success": True, "vulnerabilities": vuln_result, "stale_markers": marker_result}
+    if name == "get_system_alerts":
+        return {
+            "success": True,
+            "overall_severity": alert_center.alert_center.overall_severity(),
+            "statuses": [s.to_public_dict() for s in alert_center.alert_center.list()],
+        }
+
+    if name == "run_agent_swarm":
+        max_agents = int(tool_input.get("max_agents", 8))
+        return await agent_service.run(
+            "swarm_coordinator", {"type": "swarm_execute", "goal": tool_input.get("goal", ""), "max_agents": max_agents},
+            timeout=120.0,
+        )
+
+    if name == "list_langflow_flows":
+        return await langflow_client.list_flows()
+    if name == "run_langflow_flow":
+        return await langflow_client.run_flow(tool_input.get("flow_id_or_name", ""), tool_input.get("input_value", ""))
+
+    if name == "create_flow":
+        try:
+            flow = flow_engine.flow_store.create(tool_input.get("name", ""), tool_input.get("nodes", []), tool_input.get("edges", []))
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, "flow_id": flow.id}
+    if name == "list_flows":
+        return {"success": True, "flows": [f.to_public_dict() for f in flow_engine.flow_store.list()]}
+    if name == "get_flow":
+        flow = flow_engine.flow_store.get(tool_input.get("flow_id", ""))
+        return {"success": True, "flow": flow.to_public_dict()} if flow else {"success": False, "error": "No such flow."}
+    if name == "update_flow":
+        try:
+            flow = flow_engine.flow_store.update(
+                tool_input.get("flow_id", ""), tool_input.get("name"), tool_input.get("nodes"), tool_input.get("edges"),
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, "flow": flow.to_public_dict()} if flow else {"success": False, "error": "No such flow."}
+    if name == "delete_flow":
+        deleted = flow_engine.flow_store.delete(tool_input.get("flow_id", ""))
+        return {"success": deleted} if deleted else {"success": False, "error": "No such flow."}
+    if name == "run_flow":
+        flow = flow_engine.flow_store.get(tool_input.get("flow_id", ""))
+        if flow is None:
+            return {"success": False, "error": "No such flow."}
+        # Every node's real tool call still goes through THIS SAME
+        # dispatcher recursively, so each step's own approval/voice-match
+        # gating applies exactly as if called directly -- same principle
+        # as _run_macro's macro replay.
+        return await flow_engine.execute_flow(
+            flow, tool_input.get("inputs", {}) or {},
+            tool_executor=lambda n, a: _execute_file_tool(n, a, user_hint=user_hint),
+            llm_generate=lambda p: llm_backend.generate(p, max_tokens=800, temperature=0.5),
+        )
+
+    if name == "list_trading_strategies":
+        return {"success": True, "strategies": list_trading_strategies_impl()}
+    if name == "run_forex_backtest":
+        try:
+            return await run_forex_backtest(
+                tool_input.get("pair", ""), tool_input.get("strategy", ""),
+                days=int(tool_input.get("days", 90)), params=tool_input.get("params"),
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+    if name == "run_crypto_backtest":
+        symbol = tool_input.get("symbol", "")
+        strategy = tool_input.get("strategy", "")
+        days = int(tool_input.get("days", 90))
+        candles = await crypto_data.get_historical(symbol, days=days)
+        if len(candles) < 10:
+            return {"success": False, "error": f"Not enough historical data for {symbol} ({len(candles)} candles fetched)."}
+        try:
+            result = run_full_validation(candles, strategy, tool_input.get("params"))
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        result["symbol"] = symbol
+        return result
 
     if name == "search_memory":
         top_k = min(int(tool_input.get("top_k", 10)), 30)
@@ -2378,6 +2658,80 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         return await terminal_tool.execute_command(
             command, cwd=tool_input.get("cwd"), use_egress_proxy=tool_input.get("use_egress_proxy", False), sandbox=tool_input.get("sandbox"),
         )
+
+    if name in ("git_status", "git_diff", "git_log", "git_branch", "git_commit", "git_push", "git_pull"):
+        # git_branch is only mutating when it's actually creating/switching
+        # branches (create/checkout set) -- a bare listing is read-only.
+        is_mutating = name in ("git_commit", "git_push", "git_pull") or (
+            name == "git_branch" and (tool_input.get("create") or tool_input.get("checkout"))
+        )
+        if is_mutating and (not arm_switch.is_armed() or _voice_mismatch()):
+            description = {
+                "git_commit": f"git commit: {str(tool_input.get('message', ''))[:200]!r} in {tool_input.get('cwd') or 'current dir'}",
+                "git_push": f"git push to {tool_input.get('remote', 'origin')} in {tool_input.get('cwd') or 'current dir'}",
+                "git_pull": f"git pull from {tool_input.get('remote', 'origin')} in {tool_input.get('cwd') or 'current dir'}",
+                "git_branch": f"git branch {'create ' + str(tool_input.get('create')) if tool_input.get('create') else 'checkout ' + str(tool_input.get('checkout'))} in {tool_input.get('cwd') or 'current dir'}",
+            }[name]
+            if not await _request_approval(f"Nancy wants to: {description}", timeout=120.0):
+                return {"success": False, "error": "User did not approve this git operation."}
+        if name == "git_status":
+            return await git_tool.git_status(tool_input.get("cwd"))
+        if name == "git_diff":
+            return await git_tool.git_diff(tool_input.get("cwd"), bool(tool_input.get("staged", False)), tool_input.get("path"))
+        if name == "git_log":
+            return await git_tool.git_log(tool_input.get("cwd"), int(tool_input.get("count", 15)))
+        if name == "git_branch":
+            return await git_tool.git_branch(tool_input.get("cwd"), tool_input.get("create"), tool_input.get("checkout"))
+        if name == "git_commit":
+            return await git_tool.git_commit(str(tool_input.get("message", "")), tool_input.get("cwd"), tool_input.get("paths"))
+        if name == "git_push":
+            return await git_tool.git_push(tool_input.get("cwd"), tool_input.get("remote", "origin"), tool_input.get("branch"))
+        if name == "git_pull":
+            return await git_tool.git_pull(tool_input.get("cwd"), tool_input.get("remote", "origin"), tool_input.get("branch"))
+
+    if name in ("docker_ps", "docker_logs", "docker_images", "docker_build", "docker_compose_up", "docker_compose_down", "docker_restart"):
+        is_mutating = name in ("docker_build", "docker_compose_up", "docker_compose_down", "docker_restart")
+        if is_mutating and (not arm_switch.is_armed() or _voice_mismatch()):
+            description = {
+                "docker_build": f"docker build {tool_input.get('context')} as {tool_input.get('tag')}",
+                "docker_compose_up": f"docker compose up in {tool_input.get('cwd')}",
+                "docker_compose_down": f"docker compose down in {tool_input.get('cwd')}",
+                "docker_restart": f"docker restart {tool_input.get('container')}",
+            }[name]
+            if not await _request_approval(f"Nancy wants to: {description}", timeout=120.0):
+                return {"success": False, "error": "User did not approve this Docker operation."}
+        if name == "docker_ps":
+            return await docker_tool.docker_ps(bool(tool_input.get("all_containers", False)))
+        if name == "docker_logs":
+            return await docker_tool.docker_logs(tool_input.get("container", ""), int(tool_input.get("tail", 100)))
+        if name == "docker_images":
+            return await docker_tool.docker_images()
+        if name == "docker_build":
+            return await docker_tool.docker_build(tool_input.get("context", ""), tool_input.get("tag", ""), tool_input.get("dockerfile"))
+        if name == "docker_compose_up":
+            return await docker_tool.docker_compose_up(tool_input.get("cwd", ""), tool_input.get("service"))
+        if name == "docker_compose_down":
+            return await docker_tool.docker_compose_down(tool_input.get("cwd", ""))
+        if name == "docker_restart":
+            return await docker_tool.docker_restart(tool_input.get("container", ""))
+
+    if name in ("deploy_server", "restart_background_process", "stop_background_process", "list_background_processes"):
+        if name != "list_background_processes" and (not arm_switch.is_armed() or _voice_mismatch()):
+            description = {
+                "deploy_server": f"start a background process {tool_input.get('name')!r}: {tool_input.get('command')}",
+                "restart_background_process": f"restart background process {tool_input.get('name')!r}",
+                "stop_background_process": f"stop background process {tool_input.get('name')!r}",
+            }[name]
+            if not await _request_approval(f"Nancy wants to: {description}", timeout=120.0):
+                return {"success": False, "error": "User did not approve this process operation."}
+        if name == "deploy_server":
+            return await process_control.deploy_server(tool_input.get("name", ""), tool_input.get("command", ""), tool_input.get("cwd"))
+        if name == "restart_background_process":
+            return await process_control.restart_background_process(tool_input.get("name", ""))
+        if name == "stop_background_process":
+            return await process_control.stop_background_process(tool_input.get("name", ""))
+        if name == "list_background_processes":
+            return await process_control.list_background_processes()
 
     resolved_write_path: Optional[Path] = None
     if name == "write_file":
@@ -2889,6 +3243,41 @@ async def _push_reply_to_telegram(text: str, images: Optional[List[bytes]] = Non
             await telegram_notifier.send_document(image_bytes, filename="capture.png")
     except Exception as e:
         logger.warning("Failed to mirror reply to Telegram: %s", e)
+
+
+def _update_alert_status(key: str, category: str, title: str, severity: str, detail: str) -> None:
+    """The one place every real category-status update goes through --
+    upserts alert_center's stored status, then fires the live WS broadcast
+    as a background task so callers (loops, request handlers) never block
+    on it."""
+    status = alert_center.alert_center.set_status(
+        key=key, category=category, title=title, severity=severity, detail=detail,
+    )
+    asyncio.create_task(_broadcast_alert_status(status))
+
+
+async def _pulse_orb(color: str, reason: str = "") -> None:
+    """Real-time transient orb pulse: 'yellow' the instant a real check/
+    process starts running, 'green' when it completes cleanly, 'red' on an
+    error or a genuine security/attack signal. Purely a live event -- the
+    frontend (NancyOrb) owns the ~3s auto-revert timing itself, this just
+    fires it. Broadcast to every connected tab, same as _broadcast_alert_status."""
+    try:
+        await manager.broadcast(json.dumps({"type": "orb_pulse", "color": color, "reason": reason}))
+    except Exception as e:
+        logger.warning("Failed to broadcast orb pulse: %s", e)
+
+
+async def _broadcast_alert_status(status: "alert_center.CategoryStatus") -> None:
+    """Pushes a real green/yellow/red category-status change to every
+    connected web/voice UI session -- unlike _broadcast_reply_to_web's
+    proactive-text path, this always reaches every open tab (not just an
+    active continuous-conversation session), since a status dashboard should
+    reflect reality the instant it changes, not only during a live chat."""
+    try:
+        await manager.broadcast(json.dumps({"type": "alert_status", "status": status.to_public_dict()}))
+    except Exception as e:
+        logger.warning("Failed to broadcast alert status: %s", e)
 
 
 async def _broadcast_reply_to_web(text: str, images: Optional[List[bytes]] = None, *, source: str) -> None:
@@ -3859,6 +4248,92 @@ async def system_health():
     return {"success": True, **health}
 
 
+@app.get("/system/alerts")
+async def system_alerts():
+    """Real green/yellow/red status per monitored category (alert_center.py)
+    -- system resource health, primary LLM backend reliability, dependency
+    vulnerabilities, and any active security-failure burst. Populated by
+    _update_system_health_status/_update_dependency_vuln_status (self-healing
+    and self-maintenance loops) and _record_security_failure (real
+    auth/webhook-signature rejection points) -- this endpoint only reads
+    the current stored state, it computes nothing itself."""
+    return {
+        "success": True,
+        "overall_severity": alert_center.alert_center.overall_severity(),
+        "statuses": [s.to_public_dict() for s in alert_center.alert_center.list()],
+    }
+
+
+class FlowRequest(BaseModel):
+    name: str
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+
+
+class FlowUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    nodes: Optional[List[Dict[str, Any]]] = None
+    edges: Optional[List[Dict[str, Any]]] = None
+
+
+class FlowRunRequest(BaseModel):
+    inputs: Dict[str, Any] = {}
+
+
+@app.get("/flows", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def list_flows_endpoint():
+    """Real saved flows (flow_engine.py) -- Billion's native, dependency-
+    light equivalent of a Langflow project list."""
+    return {"success": True, "flows": [f.to_public_dict() for f in flow_engine.flow_store.list()]}
+
+
+@app.get("/flows/{flow_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def get_flow_endpoint(flow_id: str):
+    flow = flow_engine.flow_store.get(flow_id)
+    if flow is None:
+        raise HTTPException(status_code=404, detail="No such flow.")
+    return {"success": True, "flow": flow.to_public_dict()}
+
+
+@app.post("/flows", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def create_flow_endpoint(req: FlowRequest):
+    try:
+        flow = flow_engine.flow_store.create(req.name, req.nodes, req.edges)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "flow": flow.to_public_dict()}
+
+
+@app.put("/flows/{flow_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def update_flow_endpoint(flow_id: str, req: FlowUpdateRequest):
+    try:
+        flow = flow_engine.flow_store.update(flow_id, req.name, req.nodes, req.edges)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if flow is None:
+        raise HTTPException(status_code=404, detail="No such flow.")
+    return {"success": True, "flow": flow.to_public_dict()}
+
+
+@app.delete("/flows/{flow_id}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def delete_flow_endpoint(flow_id: str):
+    if not flow_engine.flow_store.delete(flow_id):
+        raise HTTPException(status_code=404, detail="No such flow.")
+    return {"success": True}
+
+
+@app.post("/flows/{flow_id}/run", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def run_flow_endpoint(flow_id: str, req: FlowRunRequest):
+    flow = flow_engine.flow_store.get(flow_id)
+    if flow is None:
+        raise HTTPException(status_code=404, detail="No such flow.")
+    return await flow_engine.execute_flow(
+        flow, req.inputs,
+        tool_executor=lambda n, a: _execute_file_tool(n, a),
+        llm_generate=lambda p: llm_backend.generate(p, max_tokens=800, temperature=0.5),
+    )
+
+
 @app.get("/system/activity")
 async def system_activity():
     """Real, live "what is Billion doing right now" aggregation -- every
@@ -4109,6 +4584,7 @@ async def receive_inbound_webhook(hook_id: str, request: Request):
         signature = request.headers.get("X-Nancy-Signature", "")
         expected = "sha256=" + hmac.new(hook.secret.encode(), raw_body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(signature, expected):
+            _record_security_failure(f"webhook:{hook_id}", f"Invalid signature on inbound webhook \"{hook.name}\"")
             raise HTTPException(status_code=401, detail="invalid or missing X-Nancy-Signature")
 
     try:
@@ -5826,6 +6302,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # so check the same shared-secret manually (no-op unless BACKEND_AUTH_TOKEN
     # is set). Pass ?token=... on the connection URL.
     if _BACKEND_AUTH_TOKEN and websocket.query_params.get("token") != _BACKEND_AUTH_TOKEN:
+        _record_security_failure("ws_auth", "Invalid or missing WebSocket auth token")
         await websocket.close(code=4401)
         return
     client_ip = websocket.client.host if websocket.client else "unknown"
@@ -6157,6 +6634,12 @@ async def startup_event():
     asyncio.create_task(_cron_execution_loop())
     asyncio.create_task(_self_healing_loop())
     asyncio.create_task(_self_maintenance_loop())
+    # Both loops above only run their first real check after a full sleep
+    # interval (5min / 24h by default) -- populate real initial statuses
+    # immediately so the alert dashboard reflects reality from boot instead
+    # of sitting empty for hours.
+    asyncio.create_task(_update_system_health_status())
+    asyncio.create_task(_update_dependency_vuln_status())
     asyncio.create_task(_pattern_suggestions_loop())
     asyncio.create_task(_presence_loop())
     asyncio.create_task(_meeting_prep_loop())
@@ -6366,6 +6849,66 @@ async def _presence_loop() -> None:
             logger.exception("Presence loop failed: %s", e)
 
 
+async def _update_dependency_vuln_status() -> str:
+    """Real current-state check against self_maintenance's live OSV.dev
+    query -- distinct from run_periodic_check's "new vulns only" Telegram
+    messaging above: this reflects the FULL current truth (auto-resolves to
+    green the moment a flagged package is upgraded), which is what a status
+    dashboard needs and a "don't re-notify" message log doesn't. Returns the
+    resulting severity so callers can drive a matching orb pulse."""
+    result = await self_maintenance.check_dependency_vulnerabilities()
+    if not result.get("success"):
+        return "red"
+    vulns = result.get("vulnerabilities", [])
+    if vulns:
+        detail = "; ".join(
+            f"{v['package']}=={v['version']} ({', '.join(v['vuln_ids'])})" for v in vulns[:5]
+        )
+        if len(vulns) > 5:
+            detail += f"; and {len(vulns) - 5} more"
+        _update_alert_status(
+            key="dependency_vulnerabilities", category="security",
+            title=f"{len(vulns)} dependency vulnerability(ies) found", severity="red", detail=detail,
+        )
+        return "red"
+    _update_alert_status(
+        key="dependency_vulnerabilities", category="security",
+        title="No known dependency vulnerabilities", severity="green",
+        detail=f"{result.get('packages_checked', 0)} pinned package(s) checked against OSV.dev.",
+    )
+    return "green"
+
+
+async def _update_system_health_status() -> str:
+    """Real psutil-backed check (system_monitor.py, the same instance
+    /system/health reports from) mapped straight onto the three real states
+    it already computes -- healthy/warning/error become green/yellow/red,
+    no new thresholds invented here. Also reflects the primary LLM backend's
+    real success/failure record (usage_analytics.json) as its own category,
+    since a paid-backend outage is a genuine operational concern distinct
+    from CPU/memory/disk. Returns the worse of the two resulting severities
+    so callers can drive a matching orb pulse."""
+    health = system_monitor.get_comprehensive_health()
+    overall = health.get("overall_status", "healthy")
+    severity = {"healthy": "green", "warning": "yellow", "error": "red"}.get(overall, "yellow")
+    alerts = system_monitor.should_trigger_alert(health)
+    detail = "; ".join(alerts) if alerts else "CPU, memory, disk, and network are all within normal range."
+    _update_alert_status(
+        key="system_health", category="system", title="System resource health", severity=severity, detail=detail,
+    )
+
+    backend_healthy, last_error = self_healing.check_primary_backend()
+    backend_severity = "green" if backend_healthy else "yellow"
+    _update_alert_status(
+        key="llm_backend", category="system",
+        title=f"Primary reasoning backend ({self_healing.PRIMARY_BACKEND_NAME})",
+        severity=backend_severity,
+        detail="Operating normally." if backend_healthy else f"Down, running on a fallback backend instead. {last_error or ''}".strip(),
+    )
+    rank = {"green": 0, "yellow": 1, "red": 2}
+    return severity if rank[severity] >= rank[backend_severity] else backend_severity
+
+
 async def _pattern_suggestions_loop() -> None:
     """Weekly (default) scan for real recurring topics in the memory graph
     worth suggesting automation for -- see pattern_suggestions.py. Only ever
@@ -6390,12 +6933,19 @@ async def _self_maintenance_loop() -> None:
     interval = float(os.getenv("SELF_MAINTENANCE_INTERVAL_HOURS", "24")) * 3600.0
     while True:
         await asyncio.sleep(interval)
+        await _pulse_orb("yellow", "Running self-maintenance check")
         try:
             messages = await self_maintenance.run_periodic_check()
             for message in messages:
                 await _send_or_queue(message)
         except Exception as e:
             logger.exception("Self-maintenance check failed: %s", e)
+        try:
+            severity = await _update_dependency_vuln_status()
+            await _pulse_orb("green" if severity == "green" else "red", "Self-maintenance check complete")
+        except Exception as e:
+            logger.exception("Dependency vulnerability status update failed: %s", e)
+            await _pulse_orb("red", "Self-maintenance check failed")
 
 
 async def _self_healing_loop() -> None:
@@ -6407,10 +6957,13 @@ async def _self_healing_loop() -> None:
     interval = float(os.getenv("SELF_HEALING_INTERVAL_SECONDS", "300"))
     while True:
         await asyncio.sleep(interval)
+        await _pulse_orb("yellow", "Running self-healing check")
         try:
             messages = await self_healing.run_check_cycle()
             for message in messages:
                 await _send_or_queue(message)
+            severity = await _update_system_health_status()
+            await _pulse_orb("green" if severity == "green" else "red", "Self-healing check complete")
             expired_queue = focus_mode.check_and_flush_if_expired()
             if expired_queue:
                 digest = "Focus mode ended, Sir -- here's what happened while you were heads-down:\n\n" + "\n".join(
@@ -6419,6 +6972,7 @@ async def _self_healing_loop() -> None:
                 await telegram_notifier.send(digest)
         except Exception as e:
             logger.exception("Self-healing check cycle failed: %s", e)
+            await _pulse_orb("red", "Self-healing check failed")
 
 
 async def _watch_execution_loop() -> None:

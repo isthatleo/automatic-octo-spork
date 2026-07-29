@@ -141,7 +141,14 @@ class OllamaLLM(LLMBackend):
             "temperature": temperature,
             "stream": False
         }
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- confirmed live that at least Groq's
+        # API can respond with brotli (Content-Encoding: br), which aiohttp
+        # advertises support for whenever a brotli decoder happens to be
+        # importable in this environment but then fails to actually decode
+        # ("Can not decode content-encoding: br"), silently taking that
+        # entire backend out of the fallback chain on every real call.
+        # Requesting no compression sidesteps it without a new dependency.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -180,7 +187,14 @@ class VLLMLLM(LLMBackend):
         import aiohttp
         url = f"{self.base_url}/v1/completions"
         payload = {"model": self.model, "prompt": prompt, "max_tokens": max_tokens, "temperature": temperature}
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- confirmed live that at least Groq's
+        # API can respond with brotli (Content-Encoding: br), which aiohttp
+        # advertises support for whenever a brotli decoder happens to be
+        # importable in this environment but then fails to actually decode
+        # ("Can not decode content-encoding: br"), silently taking that
+        # entire backend out of the fallback chain on every real call.
+        # Requesting no compression sidesteps it without a new dependency.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -441,7 +455,7 @@ async def generate_with_tools_openai_compat(
     ]
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
         for _ in range(max_rounds):
             payload = {
                 "model": model,
@@ -529,7 +543,14 @@ class OpenAILLM(LLMBackend):
             "max_tokens": max_tokens,
             "temperature": temperature
         }
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- confirmed live that at least Groq's
+        # API can respond with brotli (Content-Encoding: br), which aiohttp
+        # advertises support for whenever a brotli decoder happens to be
+        # importable in this environment but then fails to actually decode
+        # ("Can not decode content-encoding: br"), silently taking that
+        # entire backend out of the fallback chain on every real call.
+        # Requesting no compression sidesteps it without a new dependency.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -542,11 +563,20 @@ class OpenAILLM(LLMBackend):
                     raise Exception(f"OpenAI error: {resp.status} - {text}")
 
 class GeminiLLM(LLMBackend):
-    def __init__(self):
+    def __init__(self, model: str | None = None):
         self.api_key = os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             logger.warning("GEMINI_API_KEY not set; Gemini LLM will not function")
-        self.model = os.getenv("GEMINI_MODEL", "gemini-pro")
+        # `model` lets get_llm_backends() register a second, real
+        # free-tier-eligible instance (see GEMINI_FREE_MODEL below) alongside
+        # whatever GEMINI_MODEL is configured -- the configured model is
+        # commonly a Pro-tier model, which as of Google's April 2026 pricing
+        # change has a real, actual zero free-tier quota (Pro is paid-only;
+        # only Flash/Flash-Lite retain a working free tier). Falls back to
+        # the env var exactly as before when called with no argument, so
+        # every existing call site (select_llm_for_task's multimodal path,
+        # etc.) is unaffected.
+        self.model = model or os.getenv("GEMINI_MODEL", "gemini-pro")
         self._last_usage: dict | None = None
         logger.info(f"GeminiLLM initialized with model={self.model}")
 
@@ -567,7 +597,14 @@ class GeminiLLM(LLMBackend):
                 "temperature": temperature
             }
         }
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- confirmed live that at least Groq's
+        # API can respond with brotli (Content-Encoding: br), which aiohttp
+        # advertises support for whenever a brotli decoder happens to be
+        # importable in this environment but then fails to actually decode
+        # ("Can not decode content-encoding: br"), silently taking that
+        # entire backend out of the fallback chain on every real call.
+        # Requesting no compression sidesteps it without a new dependency.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -607,7 +644,14 @@ class OpenRouterLLM(LLMBackend):
             "max_tokens": max_tokens,
             "temperature": temperature
         }
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- confirmed live that at least Groq's
+        # API can respond with brotli (Content-Encoding: br), which aiohttp
+        # advertises support for whenever a brotli decoder happens to be
+        # importable in this environment but then fails to actually decode
+        # ("Can not decode content-encoding: br"), silently taking that
+        # entire backend out of the fallback chain on every real call.
+        # Requesting no compression sidesteps it without a new dependency.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -644,7 +688,14 @@ class GroqLLM(LLMBackend):
             "max_tokens": max_tokens,
             "temperature": temperature
         }
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- confirmed live that at least Groq's
+        # API can respond with brotli (Content-Encoding: br), which aiohttp
+        # advertises support for whenever a brotli decoder happens to be
+        # importable in this environment but then fails to actually decode
+        # ("Can not decode content-encoding: br"), silently taking that
+        # entire backend out of the fallback chain on every real call.
+        # Requesting no compression sidesteps it without a new dependency.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -698,7 +749,14 @@ class OpenCodeLLM(LLMBackend):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- confirmed live that at least Groq's
+        # API can respond with brotli (Content-Encoding: br), which aiohttp
+        # advertises support for whenever a brotli decoder happens to be
+        # importable in this environment but then fails to actually decode
+        # ("Can not decode content-encoding: br"), silently taking that
+        # entire backend out of the fallback chain on every real call.
+        # Requesting no compression sidesteps it without a new dependency.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status != 200:
                     text = await resp.text()
@@ -745,7 +803,14 @@ class ClawRouterLLM(LLMBackend):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- confirmed live that at least Groq's
+        # API can respond with brotli (Content-Encoding: br), which aiohttp
+        # advertises support for whenever a brotli decoder happens to be
+        # importable in this environment but then fails to actually decode
+        # ("Can not decode content-encoding: br"), silently taking that
+        # entire backend out of the fallback chain on every real call.
+        # Requesting no compression sidesteps it without a new dependency.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status != 200:
                     text = await resp.text()
@@ -781,7 +846,14 @@ async def _get_ollama_models(base_url: str) -> list[str]:
     """
     import aiohttp
     try:
-        async with aiohttp.ClientSession() as session:
+        # Accept-Encoding: identity -- confirmed live that at least Groq's
+        # API can respond with brotli (Content-Encoding: br), which aiohttp
+        # advertises support for whenever a brotli decoder happens to be
+        # importable in this environment but then fails to actually decode
+        # ("Can not decode content-encoding: br"), silently taking that
+        # entire backend out of the fallback chain on every real call.
+        # Requesting no compression sidesteps it without a new dependency.
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
             async with session.get(f"{base_url}/api/tags", timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 if resp.status != 200:
                     return []
@@ -1012,6 +1084,23 @@ def get_llm_backends():
         if os.getenv(env_var):
             logger.info(f"Adding {backend_cls.__name__} as {role}")
             backends.append(backend_cls())
+            # Real free-tier fallback for Gemini specifically: GEMINI_MODEL
+            # is very commonly a Pro-tier model (e.g. the "-latest" alias
+            # resolves to one), and Pro tiers have had a genuine zero free
+            # quota since Google's April 2026 pricing change -- confirmed
+            # live via this exact deployment's own logs ("Quota exceeded...
+            # limit: 0, model: gemini-3.1-pro"). GEMINI_FREE_MODEL defaults
+            # to the "-latest" Flash alias, which (unlike Pro) keeps a real
+            # working free-tier quota, so a 429/400 on the configured model
+            # above has an actual working fallback instead of just failing
+            # straight through to Ollama/local models. Only added when it's
+            # a genuinely different model (skips a pointless duplicate call
+            # if someone already points GEMINI_MODEL at a flash model).
+            if backend_cls is GeminiLLM:
+                free_model = os.getenv("GEMINI_FREE_MODEL", "gemini-flash-latest")
+                if free_model != backends[-1].model:
+                    logger.info(f"Adding GeminiLLM as free-tier fallback (model={free_model})")
+                    backends.append(GeminiLLM(model=free_model))
 
     # ---- PHASE 2: Local (free, offline fallback) ----
     disable_auto_ollama = os.getenv("DISABLE_AUTO_OLLAMA", "0").strip() == "1"

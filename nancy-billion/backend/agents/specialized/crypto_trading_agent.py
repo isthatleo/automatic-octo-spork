@@ -45,23 +45,61 @@ class CryptoTradingAgent(SpecializedAgent):
         task_type = task_data.get("type", "market-analysis")
 
         if task_type == "technical-analysis":
-            return self._perform_technical_analysis(task_data)
+            return await self._perform_technical_analysis(task_data)
         elif task_type == "portfolio-optimization":
             return self._optimize_crypto_portfolio(task_data)
         elif task_type == "arbitrage-detection":
             return self._detect_arbitrage_opportunities(task_data)
         elif task_type == "defi-analysis":
             return self._analyze_defi_protocols(task_data)
+        elif task_type == "backtest":
+            return await self._run_backtest(task_data)
         else:
             return await self._general_crypto_analysis(task_data)
 
-    def _perform_technical_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _run_backtest(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Real end-to-end crypto strategy backtest: fetches real historical
+        daily prices from CoinGecko (crypto_data.py), then runs the
+        requested strategy through backtest_engine's real event-driven
+        simulation, Monte Carlo permutation test, and walk-forward
+        validation -- the crypto-side equivalent of forex_engine.py's
+        run_forex_backtest."""
+        from trading.crypto_data import crypto_data
+        from trading.backtest_engine import run_full_validation
+
+        symbol = params.get("symbol", "BTC")
+        strategy = params.get("strategy", "sma_crossover")
+        days = int(params.get("days", 90))
+        strategy_params = params.get("params")
+
+        candles = await crypto_data.get_historical(symbol, days=days)
+        if len(candles) < 10:
+            return {"success": False, "error": f"Not enough historical data for {symbol} ({len(candles)} candles fetched)."}
+        result = run_full_validation(candles, strategy, strategy_params)
+        result["symbol"] = symbol
+        return result
+
+    async def _perform_technical_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
         symbol = params.get("symbol", "BTC")
         timeframe = params.get("timeframe", "1d")
         price_data = params.get("price_data", [])
         high_data = params.get("high_data", price_data)
         low_data = params.get("low_data", price_data)
         volume_data = params.get("volume_data", [])
+
+        # Real live data fallback -- previously this task type only ever
+        # computed on whatever price_data the caller happened to pass in,
+        # with no live market data source of its own (forex_engine.py's
+        # ForexDataAggregator had one; this agent didn't). CoinGecko fills
+        # that real gap: if the caller didn't supply price history, fetch it.
+        if len(price_data) < 2:
+            from trading.crypto_data import crypto_data
+            candles = await crypto_data.get_historical(symbol, days=int(params.get("days", 90)))
+            if len(candles) >= 2:
+                price_data = [c["close"] for c in candles]
+                high_data = [c["high"] for c in candles]
+                low_data = [c["low"] for c in candles]
+                volume_data = [c["volume"] for c in candles]
 
         result = {
             "success": True,
@@ -73,7 +111,7 @@ class CryptoTradingAgent(SpecializedAgent):
 
         if len(price_data) < 2:
             result["indicators"] = {}
-            result["message"] = "Insufficient price data; provide at least 2 data points"
+            result["message"] = "Insufficient price data; provide at least 2 data points, or a live CoinGecko fetch for this symbol failed"
             result["recommendations"] = [
                 "Set stop-loss orders to manage risk",
                 "Consider position sizing based on account risk tolerance",

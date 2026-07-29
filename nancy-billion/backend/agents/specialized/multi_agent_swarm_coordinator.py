@@ -2,34 +2,91 @@
 Multi-Agent Swarm Coordinator for Nancy Billion Backend
 Coordinates distributed intelligence and agent collaboration
 
-Honesty note: despite the name, this agent does NOT delegate tasks to the
-other 28 real specialized agents in this system — `registered_agents` is
-purely internal simulated state (populated only when a caller explicitly
-calls `register-agent`, with arbitrary self-reported capabilities), and
-`_facilitate_consensus` generates opinions via `random.uniform`, not by
-querying real agents. It's a standalone simulation of swarm-coordination
-theory (task queues, consensus protocols, load balancing), useful for
-demonstrating/prototyping those algorithms, not a live dispatcher. Real
-routing to the other 28 agents happens via `agents/agent_service.py`
-(`auto_run`/`run`), which `main_new.py`'s `/chat` and `/agents/*` endpoints
-actually use.
+Real swarm execution: `swarm_execute` (and its aliases `execute`/`swarm`)
+is the one task type here that does genuine work -- it asks an LLM to
+decompose a goal into per-agent subtasks, validates every pick against the
+REAL live roster (agents/agent_service.py's list_agents()), dispatches all
+of them in real parallel via asyncio.gather, and synthesizes the real
+results. It's the same proven mechanism dispatcher_agent.py uses, scaled up
+to a real swarm-sized agent ceiling (see MAX_SWARM_AGENTS) and exposed
+under this coordinator's own name/branding. `consensus-building` has a real
+mode too now (see _facilitate_consensus): pass `agent_results` from an
+actual swarm_execute call and it computes agreement from real per-agent
+outputs (via one LLM opinion-extraction pass) instead of fabricating them.
+
+Honesty note on everything else in this file: `registered_agents`,
+`task_queue`, and the collective-intelligence/emergent-behavior/swarm-
+topology metrics (`_estimate_collective_iq`, `_calculate_swarm_coherence`,
+`_calculate_clustering`, etc.) remain a self-contained internal simulation
+over self-reported/synthetic state -- there is no real underlying
+phenomenon a fixed set of ~46 hardcoded specialized-agent CLASSES could
+meaningfully expose as "collective IQ" or "emergent pattern formation," so
+inventing a different fake data source for them wouldn't be more honest,
+just differently fake. They're left as clearly-labeled swarm-theory
+prototyping tools, distinct from the real `swarm_execute`/real-mode
+`consensus-building` paths above.
 """
 from .base_specialized_agent import SpecializedAgent
 import asyncio
+import json
+import re
 import random
 import time
 from typing import Dict, Any, List
 import uuid
 
+MAX_SWARM_AGENTS = 8
+SWARM_ROUTE_TIMEOUT_S = 25.0
+SWARM_SUBAGENT_TIMEOUT_S = 60.0
+SWARM_SYNTHESIS_TIMEOUT_S = 30.0
+
+_SWARM_ROUTE_PROMPT = """You are the orchestrator of an AI agent swarm, deciding how to split a goal across specialist agents. Here is the real, currently online roster (key: domain -- specializations):
+{roster}
+
+Goal: {goal}
+
+Decide how many agents this goal genuinely needs (between 1 and {max_agents} -- do not use more than the goal actually calls for) and pick that many agent keys from the roster above. For each, write a specific free-text subtask tailored to that agent's specialization and to its slice of the overall goal -- not the raw goal restated verbatim, and not overlapping with what another chosen agent is already covering.
+
+Respond with ONLY a JSON array (no prose, no markdown fences) in exactly this shape:
+[{{"agent_key": "research", "query": "..."}}]
+
+Only use agent_key values that appear in the roster above -- do not invent new ones.
+"""
+
+_SWARM_SYNTHESIS_PROMPT = """A goal was split across an AI agent swarm. Combine their real results into one clear, coherent answer.
+
+Original goal: {goal}
+
+Sub-agent results:
+{results}
+
+Write a concise synthesis (a few sentences to a short paragraph) that actually integrates what each agent found/did -- do not just list them separately."""
+
+
+def _extract_json(text: str):
+    text = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+    else:
+        arr = re.search(r"\[.*\]", text, re.DOTALL)
+        if arr:
+            text = arr.group(0)
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 class MultiAgentSwarmCoordinator(SpecializedAgent):
     """Coordinates swarms of AI agents for collective intelligence"""
-    
+
     def __init__(self, settings):
         super().__init__(settings, "Multi-Agent Swarm Coordinator", "swarm-coordinator")
         self.capabilities.update({
-            "description": "Standalone simulation of swarm-coordination algorithms (task queues, consensus protocols, load balancing) over self-reported agent metadata. Does NOT dispatch to this system's real 28 other agents — see agents/agent_service.py for real routing.",
+            "description": "Real swarm task execution (swarm_execute: LLM-decomposes a goal across up to 8 real live agents, dispatches them in parallel, synthesizes results) plus swarm-coordination-theory prototyping tools (task queues, consensus protocols, emergent-behavior metrics) over self-reported/synthetic state -- see this module's docstring for exactly which is which.",
             "confidence": 0.85,
-            "mode": "internal_simulation",
+            "mode": "hybrid_real_and_simulation",
             "specializations": [
                 "swarm-intelligence",
                 "distributed-problem-solving",
@@ -66,9 +123,9 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
     async def process_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process swarm coordination tasks"""
         task_type = task_data.get("type", "swarm-overview")
-        
-        await asyncio.sleep(0.3)  # Simulate coordination delay
-        
+
+        if task_type in ("swarm_execute", "execute", "swarm", "query"):
+            return await self._swarm_execute(task_data)
         if task_type in ("register-agent", "status"):
             return await self._register_agent(task_data)
         elif task_type in ("submit-task", "submit_task"):
@@ -83,6 +140,92 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
             return await self._study_emergent_behavior(task_data)
         else:
             return await self._general_swarm_overview(task_data)
+
+    async def _swarm_execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """The real swarm: decomposes `goal` across up to max_agents real,
+        currently-online agents (LLM-picked and LLM-given a tailored
+        subtask each), runs them all in genuine parallel, and synthesizes
+        the real results -- same proven mechanism as dispatcher_agent.py's
+        _dispatch, with a higher agent ceiling and swarm-specific framing."""
+        goal = params.get("goal") or params.get("query") or ""
+        if not goal.strip():
+            return {"success": False, "error": "A 'goal' (or 'query') is required to run the swarm"}
+        max_agents = max(1, min(int(params.get("max_agents", MAX_SWARM_AGENTS)), MAX_SWARM_AGENTS))
+
+        from llm import llm_backend
+        from agents.agent_service import agent_service
+
+        if not agent_service.is_ready():
+            return {"success": False, "error": "Agent fleet is not ready yet"}
+
+        roster = [
+            a for a in agent_service.list_agents()
+            if a.get("key") != self.domain and a.get("status") != "offline"
+        ]
+        if not roster:
+            return {"success": False, "error": "No other online agents to swarm across"}
+        roster_text = "\n".join(
+            f"- {a['key']}: {a.get('domain', a['key'])} -- {', '.join(a.get('specializations', [])[:5]) or 'general'}"
+            for a in roster
+        )
+
+        route_prompt = _SWARM_ROUTE_PROMPT.format(roster=roster_text, goal=goal, max_agents=max_agents)
+        try:
+            raw_route = await asyncio.wait_for(
+                llm_backend.generate(route_prompt, max_tokens=600, temperature=0.2),
+                timeout=SWARM_ROUTE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            return {"success": False, "error": f"Swarm routing LLM call exceeded {SWARM_ROUTE_TIMEOUT_S:.0f}s"}
+        except Exception as e:
+            return {"success": False, "error": f"Swarm routing LLM call failed: {e}"}
+
+        route_plan = _extract_json(raw_route)
+        valid_keys = {a["key"] for a in roster}
+        if not isinstance(route_plan, list) or not route_plan:
+            return {"success": False, "error": "Swarm routing did not return a usable agent list", "raw_routing_response": raw_route}
+        route_plan = [r for r in route_plan if isinstance(r, dict) and r.get("agent_key") in valid_keys][:max_agents]
+        if not route_plan:
+            return {"success": False, "error": "Swarm routing picked no valid agents from the real roster", "raw_routing_response": raw_route}
+
+        async def _run_one(route: Dict[str, Any]) -> Dict[str, Any]:
+            agent_key = route["agent_key"]
+            query = str(route.get("query") or goal)
+            result = await agent_service.run(agent_key, {"type": "query", "query": query}, timeout=SWARM_SUBAGENT_TIMEOUT_S)
+            return {"agent_key": agent_key, "query": query, "result": result}
+
+        sub_results = await asyncio.gather(*[_run_one(r) for r in route_plan], return_exceptions=True)
+        clean_results = []
+        for r in sub_results:
+            if isinstance(r, Exception):
+                clean_results.append({"agent_key": "unknown", "query": goal, "result": {"success": False, "error": str(r)}})
+            else:
+                clean_results.append(r)
+
+        succeeded = sum(1 for r in clean_results if r["result"].get("success"))
+        results_text = "\n\n".join(
+            f"[{r['agent_key']}] {json.dumps(r['result'], default=str)[:800]}" for r in clean_results
+        )
+        synthesis_prompt = _SWARM_SYNTHESIS_PROMPT.format(goal=goal, results=results_text)
+        try:
+            synthesis = await asyncio.wait_for(
+                llm_backend.generate(synthesis_prompt, max_tokens=600, temperature=0.5),
+                timeout=SWARM_SYNTHESIS_TIMEOUT_S,
+            )
+        except Exception as e:
+            synthesis = f"(Synthesis unavailable: {e}) See raw sub-agent results below."
+
+        return {
+            "success": True,
+            "task_type": "swarm_execute",
+            "mode": "real",
+            "goal": goal,
+            "agents_used": [r["agent_key"] for r in clean_results],
+            "agents_succeeded": succeeded,
+            "agents_failed": len(clean_results) - succeeded,
+            "synthesis": synthesis.strip(),
+            "sub_results": clean_results,
+        }
     
     async def _register_agent(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Register a new agent with the swarm"""
@@ -208,13 +351,24 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
         }
     
     async def _facilitate_consensus(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Facilitate consensus among agents on a decision"""
+        """Facilitate consensus among agents on a decision. Real mode: pass
+        `agent_results` (the `sub_results` list from a prior real
+        swarm_execute call) and this extracts each agent's actual stance via
+        one real LLM pass, then computes real agreement statistics from
+        those -- no random.uniform involved. Falls back to the simulated
+        mode (self-reported registered_agents, no real result to draw an
+        opinion from) only when agent_results isn't supplied, and says so
+        explicitly in the response's "mode" field."""
         topic = params.get("topic", "general_decision")
+        agent_results = params.get("agent_results")
+        if isinstance(agent_results, list) and agent_results:
+            return await self._facilitate_real_consensus(topic, agent_results, params.get("threshold", 0.6))
+
         participating_agents = params.get("agents", list(self.registered_agents.keys()))
         consensus_method = params.get("method", "weighted_voting")
         threshold = params.get("threshold", 0.6)  # 60% agreement needed
-        
-        # Simulate agent opinions
+
+        # Simulated agent opinions (no real agent_results supplied -- see docstring)
         agent_opinions = {}
         for agent_id in participating_agents:
             if agent_id in self.registered_agents:
@@ -250,13 +404,23 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
         else:  # unanimity-ish
             consensus_value = sum([data["opinion"] for data in agent_opinions.values()]) / len(agent_opinions)
         
-        # Check if consensus reached
-        agreement_level = 1.0 - (np.std([data["opinion"] for data in agent_opinions.values()]) if len(agent_opinions) > 1 else 0.0)
+        # Check if consensus reached -- plain-Python stdev, no numpy import
+        # in this file (a bare `np.std(...)` here was a real pre-existing
+        # NameError bug that would crash any real 2+-agent call; fixed
+        # while touching this function).
+        opinion_values = [data["opinion"] for data in agent_opinions.values()]
+        if len(opinion_values) > 1:
+            mean_op = sum(opinion_values) / len(opinion_values)
+            stdev = (sum((v - mean_op) ** 2 for v in opinion_values) / len(opinion_values)) ** 0.5
+        else:
+            stdev = 0.0
+        agreement_level = 1.0 - stdev
         consensus_reached = agreement_level >= threshold
-        
+
         return {
             "success": True,
             "task_type": "consensus-building",
+            "mode": "simulated",
             "topic": topic,
             "consensus_method": consensus_method,
             "participating_agents": len(participating_agents),
@@ -270,7 +434,69 @@ class MultiAgentSwarmCoordinator(SpecializedAgent):
             "time_to_consensus": random.uniform(1.0, 5.0),  # Simulated
             "recommendation": self._get_consensus_recommendation(consensus_value, consensus_reached)
         }
-    
+
+    async def _facilitate_real_consensus(self, topic: str, agent_results: List[Dict[str, Any]], threshold: float) -> Dict[str, Any]:
+        """Real consensus from real agent output: one LLM pass extracts each
+        agent's actual stance (0.0-1.0) and confidence from its real result
+        text, then agreement is computed from those real numbers -- the
+        genuine alternative to _facilitate_consensus's simulated random
+        opinions above."""
+        from llm import llm_backend
+
+        results_text = "\n\n".join(
+            f"[{r.get('agent_key', 'unknown')}] {json.dumps(r.get('result', {}), default=str)[:600]}"
+            for r in agent_results
+        )
+        extraction_prompt = (
+            f"Topic: {topic}\n\nReal agent results:\n{results_text}\n\n"
+            "For EACH agent above, extract its real stance as a number from 0.0 (strongly negative/against) "
+            "to 1.0 (strongly positive/for), and a confidence 0.0-1.0 in how clearly it took a stance. "
+            "Respond with ONLY a JSON array (no prose, no markdown fences):\n"
+            '[{"agent_key": "...", "opinion": 0.0, "confidence": 0.0, "reasoning": "..."}]'
+        )
+        try:
+            raw = await asyncio.wait_for(llm_backend.generate(extraction_prompt, max_tokens=500, temperature=0.1), timeout=25.0)
+        except Exception as e:
+            return {"success": False, "error": f"Real consensus extraction failed: {e}"}
+
+        extracted = _extract_json(raw)
+        if not isinstance(extracted, list) or not extracted:
+            return {"success": False, "error": "Could not extract real opinions from agent results", "raw_response": raw}
+
+        agent_opinions = {
+            e["agent_key"]: {
+                "opinion": max(0.0, min(1.0, float(e.get("opinion", 0.5)))),
+                "confidence": max(0.0, min(1.0, float(e.get("confidence", 0.5)))),
+                "reasoning": e.get("reasoning", ""),
+                "timestamp": time.time(),
+            }
+            for e in extracted if isinstance(e, dict) and "agent_key" in e
+        }
+        if not agent_opinions:
+            return {"success": False, "error": "Extracted opinions had no valid agent_key entries", "raw_response": raw}
+
+        values = [d["opinion"] for d in agent_opinions.values()]
+        consensus_value = sum(values) / len(values)
+        mean_op = consensus_value
+        stdev = (sum((v - mean_op) ** 2 for v in values) / len(values)) ** 0.5 if len(values) > 1 else 0.0
+        agreement_level = 1.0 - stdev
+        consensus_reached = agreement_level >= threshold
+
+        return {
+            "success": True,
+            "task_type": "consensus-building",
+            "mode": "real",
+            "topic": topic,
+            "participating_agents": len(agent_opinions),
+            "agent_opinions": agent_opinions,
+            "consensus_value": round(consensus_value, 3),
+            "agreement_level": round(agreement_level, 3),
+            "consensus_reached": consensus_reached,
+            "threshold": threshold,
+            "dissenting_voices": len([a for a, d in agent_opinions.items() if abs(d["opinion"] - consensus_value) > 0.2]),
+            "recommendation": self._get_consensus_recommendation(consensus_value, consensus_reached),
+        }
+
     async def _optimize_swarm_performance(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Optimize overall swarm performance"""
         optimization_focus = params.get("focus", "efficiency")  # efficiency, speed, accuracy, robustness
