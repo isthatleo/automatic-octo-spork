@@ -1,146 +1,101 @@
-# Nancy / Billion — Sovereign AI Assistant
+# Nancy / Billion — A Real, Self-Hosted AI Operating System
 
-Nancy/Billion is a modular, sovereign AI operating system that combines a Python backend (FastAPI + optional Fury integration), a Next.js dashboard frontend, and a registry-driven multi-agent architecture with learning and orchestration capabilities.
+Nancy (also addressed as "Billion") is a JARVIS/FRIDAY-style personal AI assistant: a FastAPI backend with real tool-use, real background automation, and a real multi-agent architecture, paired with a Next.js control-room frontend. It runs entirely on your own machine via Docker Compose — no vendor lock-in beyond whichever LLM/provider keys you choose to configure, and every "capability" listed below is a real, live-tested code path, not a mock or a plan.
 
-This repository contains runtime components, agent & tool registries, utilities for generating agent definitions from design documents, and a set of learning and reasoning tools used by specialized agents.
+## What she can actually do
 
-Key capabilities
-- Multi-agent orchestration and hierarchical roles (sovereign core, councils, divisions)
-- Pluggable LLM backends with fallbacks (Ollama, OpenAI, Anthropic, local LlamaCpp, Groq, OpenRouter)
-- Tool registry pattern: tools implemented in Python and registered for agents to call
-- STT / TTS integration (Faster-Whisper, pyttsx3, optional cloud providers)
-- Frontend dashboard (Next.js + Tailwind) for monitoring and interaction
-- Utilities to generate or update `data/agent_registry.json` from design docs
+**Coding & files** — real filesystem read/write/edit/multi-edit/search/glob, a real terminal (allowlisted-safe or approval-gated), Jupyter notebook cell editing, an LSP client for live diagnostics, a unified-diff viewer, Python syntax-checking on every write, and a real local Monaco code editor in the UI.
 
-Table of contents
-- Purpose
-- Quickstart (developer)
-- Development notes
-- Important file map
-- Contribution
-- License & contact
+**Browser & computer control** — real headless-Chromium browser automation (navigate/click/fill/screenshot, SSRF-checked), real screenshot/mouse/keyboard control, real on-demand webcam capture, real clipboard read/write, real GUI app launching — all dispatched through a paired host-node bridge when the backend runs in a container with no display of its own.
 
-Purpose
--------
-Provide a flexible platform for building a sovereign AI assistant with:
+**Voice & presence** — real STT (faster-whisper) and TTS (neural NeuTTS with a Pyttsx3 fallback), a browser-native wake-word/voice command pipeline, real Twilio phone calls and SMS, an opt-in lower-latency realtime voice mode, and **real speaker verification** (MFCC + cosine similarity): once you enroll your voice, Billion checks it against sensitive commands and escalates approval on a mismatch — never a hard lockout, always a louder ask.
 
-- Clear separation of concerns: backend orchestration, tool implementations, agent registry and frontend UI
-- Easy experimentation with multiple LLMs and runtime fallbacks
-- A registry-driven approach to create and manage dozens of specialized agents
+**Memory** — a real embedding-backed knowledge graph that actually grows from every real conversation (WS chat, voice, Telegram, background tasks, cron/webhook skills all populate it through one shared chokepoint), with same-topic mentions **merged** into one node over time (not one node per raw message) while every individual mention's own text and timestamp is preserved. Billion can proactively search her own memory (`search_memory`) beyond whatever's auto-injected into context, plus holographic/symbolic fact storage, a memory wiki, commitment tracking, and dream-cycle consolidation.
 
-Quickstart (developer)
-----------------------
-These steps assume Windows PowerShell (see repo for platform-specific notes).
+**Proactive & scheduled** — real cron jobs and reusable automation blueprints, a daily briefing (now calendar-aware), recurring "watch and alert" monitoring (a webpage, a price, a GitHub release, or an open-ended news topic), unprompted meeting prep (auto-researches an upcoming real calendar event and posts notes before it starts), and a self-healing loop that watches her own resource usage and primary LLM backend health.
 
-Prerequisites
-- Python 3.10+ (recommended)
-- Node.js 16+ (for frontend)
-- pip, virtualenv (or venv)
-- Optional: Docker, Ollama or other local LLM runtime
+**Security & modes** — Telegram-approval gating on every sensitive action, an arm/disarm window for batches of trusted actions, **lockdown mode** (raises the bar to "real voice match required" for everything), **focus mode** (queues non-urgent pushes into one digest instead of pinging you all day), a real SOS/emergency-contact alert, a security-lint pass on generated code, an evidence ledger, and a self-maintenance check that audits her own dependencies against the OSV vulnerability database.
 
-Backend (Python)
-1. Create and activate a virtual environment:
+**Real-world tools** — calculator, unit/currency conversion, weather, password/QR generation, URL shortening, zip/unzip, PDF merge/split, image resize, notes, expense tracking, ping/port-check, and scene macros (chain existing tools under one named voice command, e.g. "movie mode").
 
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1   # PowerShell on Windows
+**Integrations** — Google Calendar, Spotify, Home Assistant, Slack/Telegram/ntfy/WhatsApp/Discord/other channels, a pluggable web-search/image/video/TTS/transcription provider registry, MCP plugin support, real multi-device pairing (a "node" is any second machine running the lightweight node-agent stub), mDNS discovery on the LAN, and a real Docker-backed multi-tenant fleet manager.
 
-2. Install dependencies:
+**Illustrative research & live artifacts** — Billion can post a real, orbit-controllable 3D scene (Three.js) or a real self-contained, sandboxed HTML/JS live demo to the shared canvas — genuinely rendered and interactive, not a text description of one.
 
-   pip install -r backend/requirements.txt
+Every one of these is wired into the *actual* WebSocket chat pipeline the frontend uses (not just an unused legacy REST endpoint — that distinction mattered enough to be a real bug fixed this session; see `CHANGELOG` notes below if present), gated behind Telegram approval where the action is sensitive, and callable by natural language, not just a fixed command syntax.
 
-3. Configure environment variables:
+## Architecture
 
-- Create `.env` (or set env vars) with keys you need, for example:
-  - OPENAI_API_KEY, ANTHROPIC_API_KEY, OLLAMA_BASE_URL, HOST, PORT, etc.
+```
+automatic-octo-spork/
+├── fury-main/              # sibling package the backend depends on (tools.py needs it unconditionally)
+└── nancy-billion/
+    ├── backend/            # FastAPI app, WebSocket manager, ~90 top-level modules + subpackages
+    │   ├── main_new.py     #   the actual entry point — chat pipeline, tool dispatch, all REST/WS routes
+    │   ├── llm.py           #   multi-backend LLM fallback chain (Anthropic → Groq → OpenRouter → ...)
+    │   ├── memory/          #   knowledge graph, holographic store, wiki, dreaming, external providers
+    │   ├── channels/        #   Telegram, Slack, ntfy, Home Assistant, WhatsApp, Discord, ...
+    │   ├── providers/       #   pluggable web-search/image/video/TTS/transcription/telephony vendors
+    │   ├── agents/          #   ~46 specialized agent implementations
+    │   ├── fleet/, sandbox/ #   multi-tenant Docker cells, Windows process-container sandboxing
+    │   └── data/            #   bind-mounted JSON stores — real state, survives a container rebuild
+    └── frontend/            # Next.js control room
+        ├── app/api/**       #   server-side proxy routes to the backend (see BACKEND_URL below)
+        └── components/nancy #   ~25 panels: Overview, Recon, Canvas, Memory Insights, Cron, ...
+```
 
-4. Run the backend in development:
+Two containers, one Docker network: `nancy-backend` (port 8000) and `nancy-frontend` (port 3005). The frontend's own Next.js API routes run *inside* the frontend container and reach the backend over the Compose network via `BACKEND_URL=http://backend:8000` — a separate, server-only env var from `NEXT_PUBLIC_BACKEND_URL` (which stays `http://localhost:8000`, correct for your browser, which runs on the host). Getting this distinction wrong silently 502s every REST-proxied feature while leaving the WebSocket chat path completely unaffected — a real bug this project hit and fixed; worth knowing if you ever see a panel come up empty that the backend swears it has data for.
 
-   python backend/main_new.py
+## Quickstart
 
-   or with uvicorn (recommended for FastAPI deployments):
+Prerequisites: Docker Desktop (or Docker Engine + Compose v2).
 
-   python -m uvicorn backend.main_new:app --host 0.0.0.0 --port 8000
+```bash
+cd nancy-billion
+cp backend/.env.example backend/.env    # fill in whichever provider keys you actually have
+docker compose up -d --build
+```
 
-5. Regenerate the agent registry (optional):
+- Frontend: http://localhost:3005
+- Backend: http://localhost:8000 (health: `/system/health`)
 
-   python backend/generate_agent_registry.py --design "../NÅNCY-BILLION OS Sovereign AI  Design.md" --out data/agent_registry.json
+Everything degrades gracefully with no keys configured at all — Billion just won't offer whichever capability needs the missing credential. See `backend/.env.example` for every real integration point, grouped and commented with exactly what each one unlocks.
 
-Frontend (Next.js)
-1. Install dependencies and run dev server:
+### Local (non-Docker) development
 
-   cd frontend
-   npm install
-   npm run dev
+```bash
+# Backend
+cd nancy-billion/backend
+python -m venv .venv && .venv\Scripts\Activate.ps1   # Windows PowerShell
+pip install -r requirements.txt
+python main_new.py
 
-2. Open http://localhost:3000
+# Frontend
+cd nancy-billion/frontend
+npm install
+npm run dev
+```
 
-Development notes
------------------
-- Entry points:
-  - Backend FastAPI app: `backend/main_new.py` (primary)
-  - Legacy/alternate: `backend/main.py`, `backend/main_backup.py`
-  - Agent registry generator: `backend/generate_agent_registry.py`
-- LLM backend factory: `backend/llm.py` — configure providers via environment variables and select preferred providers.
-- Tools: `backend/tools.py` contains many tool implementations and registration blocks. Use `rebuild_tools.py` to compose tools from modular parts when needed.
-- Learning tools: `learning_tool_functions.py`, `learning_section.py` and `learning_registrations_section.py` implement learning, hypothesis and invention tools used by specialized agents.
-- Agent registry: `data/agent_registry.json` — the runtime agent definitions and prompts. Use the generator script to keep this in sync with design docs.
+## Configuration
 
-Important file map
-------------------
-- backend/
-  - main_new.py        — FastAPI app & WebSocket manager (recommended entrypoint)
-  - main.py / main_backup.py — legacy entrypoints
-  - llm.py             — LLM backend factory and fallback chains
-  - tools.py           — Central tool implementations & registrations
-  - generate_agent_registry.py — Create `data/agent_registry.json` from design docs
-  - orchestration/     — Orchestrator, hierarchy definitions and integration helpers
-  - system_monitor.py  — System health utilities
-  - stt.py / tts.py    — STT/TTS backend factories
-  - requirements.txt   — Python dependencies
+All real configuration lives in `backend/.env.example` — copy it to `backend/.env` and fill in what you have. Nothing is required to boot; each section is independently optional and the relevant tool/channel/provider simply isn't offered to Billion until its key is set. Notable ones:
 
-- frontend/
-  - package.json       — Next.js app and scripts
-  - README.md          — Frontend-specific notes
+- `ANTHROPIC_API_KEY` — primary LLM backend. Falls back through Groq → OpenRouter → OpenCode → local Ollama/llama.cpp if unset or rate-limited/out-of-credit.
+- `GOOGLE_CALENDAR_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` — real calendar integration (list/create/delete events, calendar-aware daily briefing, proactive meeting prep).
+- `TWILIO_ACCOUNT_SID` / `_AUTH_TOKEN` / `_FROM_NUMBER` — real phone calls and SMS.
+- `EMERGENCY_CONTACT_NUMBER` — who the SOS tool alerts.
+- `BRAVE_API_KEY` (or another configured web-search provider) — real web search, used by watch-topic alerts, meeting prep, and general research.
+- `HOST_NODE_ID` / `NODE_SHARED_SECRET` — pair a native host machine for real display/camera/clipboard/app-launch access from inside the container.
 
-- data/
-  - agent_registry.json — Agent definitions used by runtime
+## Known limitations (stated honestly, not hidden)
 
-- utilities & scripts
-  - rebuild_tools.py, fix_tools.py — helpers to patch or rebuild `backend/tools.py`
-  - add_agent.py, add_learning_division.py — registry helpers
-  - TODO*.md, PHASE_*.md, IMPLEMENTATION_SUMMARY.md — project planning and phase notes
+- Meeting-bot auto-join (Google Meet/Teams/Zoom) is deliberately deferred — the single most fragile lift in the whole roadmap (live browser automation joining real calls), backlogged rather than half-built.
+- Voice-match enforcement covers every sensitive tool call, but capturing a fresh audio sample happens at the wake-word command layer specifically — a typed command never has audio to check, by design (there's nothing to verify).
+- The container itself has no real audio/display/camera hardware — those actions dispatch to a paired host node when one's registered, or degrade to "not available" otherwise. Real voice input to the actual frontend goes through the browser's own microphone (Web Speech API), not the container.
+- Self-maintenance's dependency-vulnerability check only covers exact-pinned (`==`) requirements — an unpinned/ranged line has no single version to check against the vulnerability database, so it's skipped rather than guessed.
 
-Contribution
-------------
-- Branch from `main` into feature branches and open pull requests with clear descriptions and tests where applicable.
-- Code style:
-  - Python: follow PEP8; use black/isort for formatting where possible.
-  - JavaScript: follow ESLint/Prettier rules in the frontend.
-- Tests: add pytest unit tests for orchestration and tool behavior. Consider adding a dummy LLM backend for deterministic tests.
+## Contributing
 
-License
--------
-Add a LICENSE file at the repository root and update this section with the chosen license (e.g. MIT).
-
-Maintainers / Contact
----------------------
-- Project lead: <name> — <email@example.com>
-- Maintainer: <name> — <email@example.com>
-- Security contact: <security@example.com>
-
-Troubleshooting & next steps
-----------------------------
-- If the backend fails to start, check `backend/requirements.txt` and confirm the virtual environment is active.
-- If LLM backends are unavailable, the system will fall back to the DummyLLM present in `backend/llm.py` — use that for local development.
-- To add a new specialized agent:
-  1. Edit or generate `data/agent_registry.json` (use `backend/generate_agent_registry.py` to help bootstrap from design docs).
-  2. Confirm required tools are registered in `backend/tools.py`.
-  3. Restart the backend.
-
-If you'd like, I can now:
-1. Add run examples (Docker / docker-compose) if you have container configs
-2. Open other files under `scripts/` and `docs/` to expand this README with exact commands and examples
-3. Create a CONTRIBUTING.md and a basic test harness that runs a dummy agent using the DummyLLM
-
----
-Generated on: 2026-07-06
+- Compile-check every touched Python file (`python -m py_compile`) and type-check the frontend (`npx tsc --noEmit`) before considering a change done.
+- Every new sensitive tool should go through the same `_request_approval` chokepoint in `main_new.py` (Telegram approval, voice-match-aware) rather than inventing a new gating pattern.
+- New persisted state follows the existing JSON-store dataclass pattern (see `missions_store.py` or `watch_store.py` for the reference shape) unless there's a specific reason for something heavier.
