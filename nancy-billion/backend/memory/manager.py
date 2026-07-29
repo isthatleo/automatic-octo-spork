@@ -28,10 +28,16 @@ class MemoryManager:
     - Long-term knowledge building
     """
 
-    def __init__(self, user_id: str = "default"):
+    def __init__(self, user_id: str = "default", storage_path: Optional[str] = None):
         self.user_id = user_id
         from memory.lancedb_store import create_memory_backend
-        self.graph = create_memory_backend()
+        # storage_path stays None for the app's one default/global instance
+        # (main_new.py's `memory_manager = MemoryManager(user_id="user")`) so
+        # its behavior is byte-for-byte unchanged -- create_memory_backend()
+        # falls back to its own default path exactly as before. A household
+        # profile's manager (see main_new.py's _memory_manager_for_profile)
+        # passes an explicit path instead, to get a genuinely isolated graph.
+        self.graph = create_memory_backend(storage_path) if storage_path else create_memory_backend()
         self.context: Optional[ContextManager] = None
         self.last_extracted_ids = []
 

@@ -55,9 +55,20 @@ export interface VoiceState {
   supported: boolean
   listening: boolean
   awake: boolean
+  conversationMode: boolean
   interim: string
   lastHeard: string
 }
+
+// Real exit phrases for continuous conversation mode -- checked before the
+// wake-word/awake dispatch logic, so these are never sent to onCommand as
+// an ordinary command while the mode is active.
+const CONVERSATION_EXIT_RE = /\b(stop listening|end conversation|that'?s all( for now)?|goodbye (billion|nancy|jarvis))\b/i
+// Real trigger phrases for entering continuous conversation mode -- checked
+// ahead of the ordinary wake-word dispatch so "Nancy, let's talk" (or the
+// phrase alone, once already awake) starts the mode instead of being sent to
+// onCommand as a literal command.
+const CONVERSATION_START_RE = /\b(let'?s talk|stay awake|keep listening|conversation mode|stay with me)\b/i
 
 interface UseVoiceArgs {
   /** audioBase64 is a real raw-audio capture of exactly this command's
@@ -68,13 +79,17 @@ interface UseVoiceArgs {
   onCommand: (command: string, audioBase64?: string) => void
   onWake?: () => void
   onTranscript?: (text: string, isFinal: boolean) => void
+  /** Fired when continuous conversation mode ends, whether by an explicit
+   *  exit phrase or a manual stopConversationMode() call. */
+  onConversationEnd?: () => void
 }
 
-export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
+export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }: UseVoiceArgs) {
   const [state, setState] = useState<VoiceState>({
     supported: false,
     listening: false,
     awake: false,
+    conversationMode: false,
     interim: '',
     lastHeard: '',
   })
@@ -82,10 +97,12 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
   const recRef = useRef<SpeechRecognitionLike | null>(null)
   const awakeRef = useRef(false)
   const awakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const conversationModeRef = useRef(false)
   const wantListening = useRef(false)
   const cmdRef = useRef(onCommand)
   const wakeRef = useRef(onWake)
   const transRef = useRef(onTranscript)
+  const conversationEndRef = useRef(onConversationEnd)
   // Real raw-audio capture for voice_id verification (see voice-capture.ts)
   // -- SpeechRecognition itself never exposes the underlying audio, so this
   // runs a second, parallel MediaRecorder specifically to get a real sample
@@ -96,6 +113,7 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
   cmdRef.current = onCommand
   wakeRef.current = onWake
   transRef.current = onTranscript
+  conversationEndRef.current = onConversationEnd
 
   useEffect(() => {
     setState((s) => ({ ...s, supported: !!getRecognitionCtor() }))
@@ -122,17 +140,35 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
       if (awakeTimer.current) clearTimeout(awakeTimer.current)
       if (val) {
         if (!liveRecordingRef.current) beginCapture()
-        awakeTimer.current = setTimeout(() => {
-          awakeRef.current = false
-          setState((s) => ({ ...s, awake: false }))
-          discardCapture()
-        }, 9000)
+        // Continuous conversation mode never times out on its own -- it's
+        // "like a phone call," ended only by an explicit exit phrase or
+        // stopConversationMode(), not a rolling 9s silence window.
+        if (!conversationModeRef.current) {
+          awakeTimer.current = setTimeout(() => {
+            awakeRef.current = false
+            setState((s) => ({ ...s, awake: false }))
+            discardCapture()
+          }, 9000)
+        }
       } else {
         discardCapture()
       }
     },
     [beginCapture, discardCapture],
   )
+
+  const startConversationMode = useCallback(() => {
+    conversationModeRef.current = true
+    setState((s) => ({ ...s, conversationMode: true }))
+    setAwake(true)
+  }, [setAwake])
+
+  const stopConversationMode = useCallback(() => {
+    conversationModeRef.current = false
+    setState((s) => ({ ...s, conversationMode: false }))
+    setAwake(false)
+    conversationEndRef.current?.()
+  }, [setAwake])
 
   // Stops the in-flight capture (the real audio spoken since the last
   // command, or since the wake word, whichever was most recent) and
@@ -169,6 +205,17 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
       const lower = text.toLowerCase()
       setState((s) => ({ ...s, lastHeard: text }))
 
+      if (conversationModeRef.current && CONVERSATION_EXIT_RE.test(lower)) {
+        stopConversationMode()
+        return
+      }
+
+      if (!conversationModeRef.current && CONVERSATION_START_RE.test(lower)) {
+        startConversationMode()
+        wakeRef.current?.()
+        return
+      }
+
       const match = lower.match(WAKE_RE)
       if (match) {
         const hitWake = match[1]
@@ -183,11 +230,11 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
       }
 
       if (awakeRef.current) {
-        setAwake(true) // refresh window
+        setAwake(true) // refresh window (a no-op timer-wise in conversation mode)
         captureAndDispatch(lower)
       }
     },
-    [setAwake, captureAndDispatch],
+    [setAwake, captureAndDispatch, stopConversationMode, startConversationMode],
   )
 
   const start = useCallback(() => {
@@ -237,9 +284,12 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
     }
   }, [handleText])
 
-  const stop = useCallback(() => {
+  // Stops recognition only -- leaves conversationMode/awake state untouched.
+  // Used internally (and by callers, e.g. page.tsx's echo-avoidance pause
+  // while Nancy is speaking) whenever the mic needs to go quiet WITHOUT
+  // ending an active continuous-conversation session.
+  const pause = useCallback(() => {
     wantListening.current = false
-    setAwake(false)
     const rec = recRef.current
     recRef.current = null
     if (rec) {
@@ -250,7 +300,14 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
       }
     }
     setState((s) => ({ ...s, listening: false, interim: '' }))
-  }, [setAwake])
+  }, [])
+
+  const stop = useCallback(() => {
+    conversationModeRef.current = false
+    setState((s) => ({ ...s, conversationMode: false }))
+    setAwake(false)
+    pause()
+  }, [setAwake, pause])
 
   useEffect(() => {
     return () => {
@@ -266,7 +323,7 @@ export function useVoice({ onCommand, onWake, onTranscript }: UseVoiceArgs) {
     }
   }, [])
 
-  return { state, start, stop, setAwake }
+  return { state, start, stop, pause, setAwake, startConversationMode, stopConversationMode }
 }
 
 let cachedVoice: SpeechSynthesisVoice | null = null

@@ -24,7 +24,10 @@ import {
 import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
 import { TradingViewDialog } from '@/components/nancy/tradingview'
-import { askNancyStreaming, onEconomicAlert, onExternalReply, onChatImage } from '@/lib/nancy/ws-client'
+import {
+  askNancyStreaming, onEconomicAlert, onExternalReply, onChatImage,
+  onConversationEnded, notifyConversationStart, notifyConversationEnd,
+} from '@/lib/nancy/ws-client'
 import { synthesizeSpeech } from '@/lib/nancy/tts-client'
 import { geocode } from '@/lib/nancy/geocode'
 import type { KnowledgeCategory, LogEntry, PanelKey, Place } from '@/lib/nancy/types'
@@ -54,7 +57,7 @@ import {
   Brain, Bot, Globe2, LayoutDashboard, TerminalSquare, Newspaper, Kanban, X, Mic, MicOff,
   Keyboard, ChevronDown, MessageSquare, PanelLeftClose, PanelLeftOpen, Send, Server, Clock3,
   FileClock, Sparkles, Cpu, Key, Settings2, BarChart3, Link2, User, PlugZap, Webhook, BookOpen,
-  StickyNote, Award, Palette, CandlestickChart,
+  StickyNote, Award, Palette, CandlestickChart, PhoneCall, PhoneOff,
 } from 'lucide-react'
 
 import { DocsHelpPanel } from '@/components/nancy/docs-panel'
@@ -381,10 +384,19 @@ export default function Page() {
   // conversation instead of two that merely share memory.
   useEffect(() => {
     const unsubscribe = onExternalReply((payload) => {
+      if (payload.source === 'proactive') {
+        // A proactive push (watch alert, self-healing status, etc.) mirrored
+        // live into an active continuous-conversation session -- unlike a
+        // Telegram-originated reply, you're actually on a live "call" right
+        // now, so this genuinely should be spoken, not just logged.
+        log('nancy', payload.text)
+        nancySay(payload.text)
+        return
+      }
       log('nancy', `[via Telegram] ${payload.text}`)
     })
     return unsubscribe
-  }, [log])
+  }, [log, nancySay])
 
   // Real images pushed from another channel or produced by a tool call
   // (map snapshots, screenshots, canvas renders) -- previously never shown
@@ -529,7 +541,7 @@ export default function Page() {
     [log, runCommand, nancySay],
   )
 
-  const { state, start, stop } = useVoice({
+  const { state, start, stop, pause, startConversationMode, stopConversationMode } = useVoice({
     onCommand: (text, audioBase64) => {
       if (/^\s*(close|exit|dismiss|hide)\b/i.test(text)) {
         sfx.whooshOut()
@@ -540,6 +552,7 @@ export default function Page() {
       runCommand(text, audioBase64)
     },
     onWake: () => { sfx.wake(); log('info', 'Wake word detected — awaiting command') },
+    onConversationEnd: () => { log('info', 'Conversation mode ended'); notifyConversationEnd() },
   })
 
   // Pause the mic while Nancy is actively speaking and resume it the instant
@@ -554,13 +567,13 @@ export default function Page() {
     if (speaking) {
       if (state.listening) {
         micWasOnRef.current = true
-        stop()
+        pause()
       }
     } else if (micWasOnRef.current) {
       micWasOnRef.current = false
       start()
     }
-  }, [speaking, state.listening, start, stop])
+  }, [speaking, state.listening, start, pause])
 
   useEffect(() => {
     const t = setInterval(
@@ -605,6 +618,40 @@ export default function Page() {
       log('info', 'Microphone armed — listening for wake word')
     }
   }, [state.listening, start, stop, log])
+
+  // Continuous conversation mode -- "like a phone call," no wake word needed
+  // per turn until you say an exit phrase or hit this again.
+  const toggleConversationMode = useCallback(() => {
+    unlockSfx()
+    if (state.conversationMode) {
+      stopConversationMode()
+      sfx.blip()
+      log('info', 'Conversation mode disabled')
+    } else {
+      if (!state.listening) start()
+      startConversationMode()
+      sfx.confirm()
+      log('info', 'Conversation mode active — no wake word needed, say "stop listening" to end')
+    }
+  }, [state.conversationMode, state.listening, start, startConversationMode, stopConversationMode, log])
+
+  // Tells the backend whenever conversation mode actually turns on, however
+  // it was triggered (this button, or the voice phrase handled inside
+  // use-voice.ts itself) -- a single source of truth instead of duplicating
+  // the notify call at every trigger site.
+  useEffect(() => {
+    if (state.conversationMode) notifyConversationStart()
+  }, [state.conversationMode])
+
+  // Server-side conversation-mode idle timeout (see main_new.py's
+  // _conversation_idle_watchdog) -- resyncs local state if the backend ends
+  // a session we thought was still active (tab lost focus/network briefly).
+  useEffect(() => {
+    const unsubscribe = onConversationEnded(() => {
+      if (state.conversationMode) stopConversationMode()
+    })
+    return unsubscribe
+  }, [state.conversationMode, stopConversationMode])
 
   // Debounce rapid nav clicks so animations + audio don't stack.
   const lastTransition = useRef(0)
@@ -827,6 +874,21 @@ export default function Page() {
               )}
             >
               {state.listening ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
+            </button>
+            <button
+              type="button"
+              onClick={toggleConversationMode}
+              disabled={!state.supported}
+              title={state.conversationMode ? 'End continuous conversation mode' : 'Start continuous conversation mode (no wake word per turn)'}
+              className={cn(
+                'flex h-12 w-12 items-center justify-center rounded-full border transition-colors',
+                !state.supported && 'cursor-not-allowed opacity-40',
+                state.conversationMode
+                  ? 'border-emerald-500 bg-emerald-500 text-white'
+                  : 'border-border bg-card text-foreground hover:border-emerald-500/50',
+              )}
+            >
+              {state.conversationMode ? <PhoneOff className="h-5 w-5" /> : <PhoneCall className="h-5 w-5" />}
             </button>
             <button
               type="button"

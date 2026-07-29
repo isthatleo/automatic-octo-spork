@@ -29,12 +29,17 @@ WORKDIR /app
 # espeak-ng: real backend for pyttsx3's Linux voice output (see TTS_BACKEND below).
 # libportaudio2: sounddevice's runtime dependency.
 # curl: container healthcheck.
+# iputils-ping: real ICMP presence detection (presence_store.py) -- confirmed
+# live this container can actually reach real LAN IPs (Docker's default
+# bridge networking NATs outbound LAN traffic same as internet traffic), it
+# just had no `ping` binary at all until now.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     ffmpeg \
     espeak-ng \
     libportaudio2 \
     curl \
+    iputils-ping \
     && rm -rf /var/lib/apt/lists/* \
     # Some tooling (pyttsx3's Linux driver among it) still looks for the
     # classic `espeak` binary name specifically -- espeak-ng is command-line

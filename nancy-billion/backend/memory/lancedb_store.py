@@ -187,7 +187,15 @@ def create_memory_backend(storage_path: str = "data/memory_graph.json"):
     import os
     if os.getenv("MEMORY_BACKEND", "graph").lower() == "lancedb":
         try:
-            return LanceDBMemoryGraph()
+            # A non-default storage_path (see memory/manager.py's household
+            # profile support) maps to its own LanceDB directory too, so a
+            # profile's memory is actually isolated under either backend --
+            # not just the default MemoryGraph/JSON path.
+            if storage_path == "data/memory_graph.json":
+                lancedb_path = str(DB_PATH)
+            else:
+                lancedb_path = str(DB_PATH.parent / f"lancedb_{Path(storage_path).stem}")
+            return LanceDBMemoryGraph(lancedb_path)
         except Exception as e:
             logger.warning("MEMORY_BACKEND=lancedb requested but unavailable (%s) -- falling back to MemoryGraph", e)
     from memory.graph import MemoryGraph

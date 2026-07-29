@@ -93,6 +93,10 @@ const economicAlertListeners = new Set<(payload: EconomicAlertPayload) => void>(
 const domainEventListeners = new Set<(event: DomainEvent) => void>()
 const externalReplyListeners = new Set<(payload: ExternalReplyPayload) => void>()
 const chatImageListeners = new Set<(payload: ChatImagePayload) => void>()
+/** Fires when the backend ends a continuous-conversation session server-side
+ *  (see main_new.py's _conversation_idle_watchdog) -- a real safety net for
+ *  a tab that crashed/lost network without sending conversation_end itself. */
+const conversationEndedListeners = new Set<(reason: string) => void>()
 
 function connect(): Promise<WebSocket> {
   if (socket && socket.readyState === WebSocket.OPEN) return Promise.resolve(socket)
@@ -138,9 +142,18 @@ function connect(): Promise<WebSocket> {
         for (const cb of chatImageListeners) cb(payload)
         return
       }
-      if (msg.type === 'agent_response' && msg.source === 'telegram') {
-        const payload: ExternalReplyPayload = { text: (msg.data as string) ?? '', source: 'telegram' }
+      // Telegram-originated replies, and real proactive pushes (self-healing
+      // status, watch alerts, etc. -- see main_new.py's _send_or_queue)
+      // mirrored live into an active continuous-conversation session --
+      // both share the same "not tied to a turn this tab started" shape.
+      if (msg.type === 'agent_response' && (msg.source === 'telegram' || msg.source === 'proactive')) {
+        const payload: ExternalReplyPayload = { text: (msg.data as string) ?? '', source: msg.source as string }
         for (const cb of externalReplyListeners) cb(payload)
+        return
+      }
+      if (msg.type === 'conversation_ended') {
+        const reason = (msg.reason as string) ?? 'unknown'
+        for (const cb of conversationEndedListeners) cb(reason)
         return
       }
 
@@ -270,6 +283,37 @@ export function onChatImage(callback: (payload: ChatImagePayload) => void): () =
   return () => {
     chatImageListeners.delete(callback)
   }
+}
+
+/**
+ * Subscribe to the backend ending a continuous-conversation session on its
+ * own (idle timeout) so a UI still displaying "conversation mode active" can
+ * resync -- see use-voice.ts's stopConversationMode, wired to this in
+ * page.tsx. Returns an unsubscribe function.
+ */
+export function onConversationEnded(callback: (reason: string) => void): () => void {
+  conversationEndedListeners.add(callback)
+  connect().catch((err) => console.warn('[ws-client] conversation-ended subscription connect failed:', err))
+  return () => {
+    conversationEndedListeners.delete(callback)
+  }
+}
+
+/** Tells the backend a continuous-conversation session just started/ended --
+ *  see main_new.py's ConnectionManager.start_conversation/end_conversation.
+ *  Best-effort: a send failure here just means the server-side idle
+ *  watchdog and live-push mirroring won't apply this session, nothing the
+ *  client itself depends on. */
+export function notifyConversationStart(): void {
+  connect()
+    .then((ws) => ws.send(JSON.stringify({ type: 'conversation_start' })))
+    .catch(() => { /* best-effort */ })
+}
+
+export function notifyConversationEnd(): void {
+  connect()
+    .then((ws) => ws.send(JSON.stringify({ type: 'conversation_end' })))
+    .catch(() => { /* best-effort */ })
 }
 
 /**

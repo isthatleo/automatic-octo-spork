@@ -132,17 +132,26 @@ class SentenceTransformerEmbedding:
     """
 
     MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+    # Shared across every SentenceTransformerEmbedding instance -- household
+    # profiles (see main_new.py's _memory_manager_for_profile) mean several
+    # MemoryGraph instances can now exist at once, and each used to lazy-load
+    # its own separate copy of this model. The model itself is stateless
+    # w.r.t. the text it embeds, so one shared instance is exactly as correct
+    # and avoids genuinely wasteful duplicate loads (~80MB + load time each).
+    _shared_model = None
 
     def __init__(self):
         self._model = None
 
     def _ensure_loaded(self):
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
+            if SentenceTransformerEmbedding._shared_model is None:
+                from sentence_transformers import SentenceTransformer
 
-            logger.info("Loading memory embedding model (%s)...", self.MODEL_NAME)
-            self._model = SentenceTransformer(self.MODEL_NAME)
-            logger.info("Memory embedding model loaded.")
+                logger.info("Loading memory embedding model (%s)...", self.MODEL_NAME)
+                SentenceTransformerEmbedding._shared_model = SentenceTransformer(self.MODEL_NAME)
+                logger.info("Memory embedding model loaded.")
+            self._model = SentenceTransformerEmbedding._shared_model
         return self._model
 
     def embed(self, text: str) -> List[float]:

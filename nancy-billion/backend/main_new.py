@@ -84,6 +84,9 @@ import macro_store
 import self_maintenance
 import meeting_prep_store
 import pattern_suggestions
+import presence_store
+import profiles_store
+import household_voice_id
 from llm_task import structured_llm_call, UTILITY_TOOLS
 from workspace_uri import resolve_oc_path
 from backup_tool import create_backup, list_backups, BACKUP_TOOLS
@@ -133,6 +136,19 @@ _current_turn_ctx: ContextVar[Optional[tuple]] = ContextVar("_current_turn_ctx",
 # for this turn; {"match": False, ...} is what _execute_file_tool's approval
 # gate escalates on (see _request_approval).
 _current_voice_match: ContextVar[Optional[Dict[str, Any]]] = ContextVar("_current_voice_match", default=None)
+
+# Set alongside _current_voice_match, same per-Task isolation. The household
+# profile id household_voice_id.identify_speaker() matched THIS turn's real
+# audio against, or None if nothing was enrolled/matched -- see
+# _active_memory_manager() below, the one place this actually changes
+# behavior (which MemoryGraph a turn's context/extraction uses).
+_current_speaker_profile_id: ContextVar[Optional[str]] = ContextVar("_current_speaker_profile_id", default=None)
+
+# This turn's real decoded raw audio (float32 PCM), if any was captured --
+# lets the enroll_profile_voice tool actually enroll the person speaking
+# RIGHT NOW without a separate out-of-band upload step. None for a typed
+# turn or one with no attached audio.
+_current_turn_audio: ContextVar[Optional[Any]] = ContextVar("_current_turn_audio", default=None)
 
 
 async def _broadcast_tool_progress(name: str, tool_input: Dict[str, Any]) -> None:
@@ -440,6 +456,89 @@ DEVICE_ROUTING_TOOLS = [
     },
 ]
 
+PRESENCE_TOOLS = [
+    {
+        "name": "register_presence_device",
+        "description": (
+            "Real LAN-based presence tracking -- register a household member's device (their phone's "
+            "LAN IP/hostname, a laptop, etc.) so Billion can tell when they're actually home/at their "
+            "desk via a real periodic ICMP ping, no companion app needed. Optionally names a saved "
+            "scene macro to run automatically when that person arrives or leaves -- the real 'if I'm "
+            "home, dim the lights' conditional trigger."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "person_name": {"type": "string"},
+                "host": {"type": "string", "description": "Hostname or LAN IP of their device."},
+                "on_arrive_macro": {"type": "string", "description": "Optional saved macro name to run when this person arrives."},
+                "on_leave_macro": {"type": "string", "description": "Optional saved macro name to run when this person leaves."},
+            },
+            "required": ["person_name", "host"],
+        },
+    },
+    {
+        "name": "list_presence_devices",
+        "description": "List every registered presence-tracked device and its real current reachability.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "remove_presence_device",
+        "description": "Stop tracking a presence device.",
+        "input_schema": {"type": "object", "properties": {"device_id": {"type": "string"}}, "required": ["device_id"]},
+    },
+    {
+        "name": "who_is_present",
+        "description": "Real answer to 'who's home right now' -- every person with at least one currently-reachable registered device.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
+# Household member profiles -- a few known people sharing this one
+# deployment, each with their own memory context and (optionally) their own
+# enrolled voice for real speaker identification (see profiles_store.py /
+# household_voice_id.py). Not a login/auth system -- see PRESENCE_TOOLS
+# above for the separate "who's home" LAN-presence concept.
+PROFILE_TOOLS = [
+    {
+        "name": "create_profile",
+        "description": "Create a new household member profile with its own memory context.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "list_profiles",
+        "description": "List every household member profile.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "delete_profile",
+        "description": "Delete a household member profile (does not delete their memory file on disk).",
+        "input_schema": {"type": "object", "properties": {"profile_id": {"type": "string"}}, "required": ["profile_id"]},
+    },
+    {
+        "name": "enroll_profile_voice",
+        "description": (
+            "Enroll THIS turn's speaker as the voice for a named household profile, so Billion can "
+            "recognize them in future conversations and route memory to their own profile. Only works "
+            "for a voice-originated turn (needs real captured audio, not typed text)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"profile_id": {"type": "string"}},
+            "required": ["profile_id"],
+        },
+    },
+    {
+        "name": "who_is_speaking",
+        "description": "Which household profile (if any) THIS turn's voice was identified as.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
 SELF_MAINTENANCE_TOOLS = [
     {
         "name": "run_self_maintenance_check",
@@ -660,6 +759,34 @@ nancy_brain = NancyContextualBrain(user_id="user")
 memory_manager = MemoryManager(user_id="user")
 memory_manager.set_context_manager(nancy_brain.context)
 
+# Household member memory managers (see profiles_store.py/household_voice_id.py)
+# -- one real, isolated MemoryGraph per identified profile, created lazily on
+# first use and cached here for the process lifetime. Never touches the
+# default memory_manager above, which stays the shared/fallback graph for
+# typed turns and anyone not (yet) enrolled.
+_profile_memory_managers: Dict[str, MemoryManager] = {}
+
+
+def _memory_manager_for_profile(profile_id: str) -> MemoryManager:
+    if profile_id not in _profile_memory_managers:
+        mgr = MemoryManager(user_id=profile_id, storage_path=f"data/memory_graph_{profile_id}.json")
+        _profile_memory_managers[profile_id] = mgr
+    return _profile_memory_managers[profile_id]
+
+
+def _active_memory_manager() -> MemoryManager:
+    """The real per-turn memory manager -- the household profile identified
+    for THIS turn's voice (see _current_speaker_profile_id, set in
+    _run_chat_turn) if there is one, else the shared default. Every real
+    memory read/write chokepoint (_build_chat_prompt's retrieval,
+    _generate_response_via_hierarchy's and the streaming path's
+    extract/learn calls) goes through this instead of the bare global so a
+    household member's conversation actually lands in their own memory."""
+    profile_id = _current_speaker_profile_id.get()
+    if profile_id is None:
+        return memory_manager
+    return _memory_manager_for_profile(profile_id)
+
 # Nancy's Trading Intelligence System
 forex_aggregator = ForexDataAggregator()
 analysis_engine = TechnicalAnalysisEngine()
@@ -748,6 +875,14 @@ class ConnectionManager:
         # anyway, so there's nothing meaningful to persist).
         self.device_labels: Dict[WebSocket, str] = {}
         self.active_device_label: Optional[str] = None
+        # Real continuous-conversation ("phone call") session tracking --
+        # populated by the client's explicit conversation_start/_end WS
+        # messages (see use-voice.ts's startConversationMode/
+        # stopConversationMode), keyed by last-activity time so
+        # _conversation_idle_watchdog can end a session server-side if the
+        # client ever disappears without saying so (tab crash, lost network)
+        # instead of leaving it marked active forever.
+        self.conversation_last_activity: Dict[WebSocket, float] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -762,7 +897,21 @@ class ConnectionManager:
             task.cancel()
         self._turn_counters.pop(websocket, None)
         self.device_labels.pop(websocket, None)
+        self.conversation_last_activity.pop(websocket, None)
         logger.info("WebSocket disconnected. Total: %d", len(self.active_connections))
+
+    def start_conversation(self, websocket: WebSocket) -> None:
+        self.conversation_last_activity[websocket] = _time.time()
+
+    def touch_conversation(self, websocket: WebSocket) -> None:
+        if websocket in self.conversation_last_activity:
+            self.conversation_last_activity[websocket] = _time.time()
+
+    def end_conversation(self, websocket: WebSocket) -> None:
+        self.conversation_last_activity.pop(websocket, None)
+
+    def has_active_conversation(self) -> bool:
+        return bool(self.conversation_last_activity)
 
     def register_device(self, websocket: WebSocket, label: str) -> None:
         self.device_labels[websocket] = label
@@ -1422,7 +1571,14 @@ _WANTS_TOOLS_RE = re.compile(
     # conversation, an explicit ask to recall something specific.
     r"(what|have i|did (i|we)) .{0,40}(mention|say|tell you|discuss)\w*|"
     r"(search|check) your memory|do you remember\b|what do you (remember|know) about\b|"
-    r"(suggest|any) automation|what (should|could) (i|we) automate\b)\b",
+    r"(suggest|any) automation|what (should|could) (i|we) automate\b|"
+    # Real LAN presence detection (register/list/remove_presence_device, who_is_present).
+    r"(track|register) .{0,30}(presence|when .{0,20}(home|arrives?|leaves?))|"
+    r"who(\'s|s| is) (home|present|here)\b|is (\w+ )?home\b|"
+    # Household member profiles (create/list/delete_profile, enroll_profile_voice, who_is_speaking).
+    r"(create|make|add|new|delete|remove) .{0,20}profile\w*|"
+    r"who(\'s|s| is) (speaking|talking)\b|"
+    r"(this is|enroll) .{0,20}voice\b|remember (my|this) voice\b)\b",
     re.IGNORECASE,
 )
 
@@ -1668,7 +1824,7 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
         FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL]
         + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS
         + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS
-        + SMS_TOOLS + WATCH_TOOLS + SECURITY_MODE_TOOLS + MACRO_TOOLS + DEVICE_ROUTING_TOOLS + SELF_MAINTENANCE_TOOLS + MEMORY_TOOLS
+        + SMS_TOOLS + WATCH_TOOLS + SECURITY_MODE_TOOLS + MACRO_TOOLS + DEVICE_ROUTING_TOOLS + PRESENCE_TOOLS + PROFILE_TOOLS + SELF_MAINTENANCE_TOOLS + MEMORY_TOOLS
         + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
         + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS
         + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + google_calendar.CALENDAR_TOOLS + NODE_TOOLS + DIFF_TOOLS
@@ -2061,6 +2217,54 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             "active_device_label": manager.active_device_label,
         }
 
+    if name == "register_presence_device":
+        try:
+            device = presence_store.presence_store.create(
+                tool_input.get("person_name", ""), tool_input.get("host", ""),
+                tool_input.get("on_arrive_macro"), tool_input.get("on_leave_macro"),
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, "device_id": device.id}
+    if name == "list_presence_devices":
+        return {"success": True, "devices": [d.to_public_dict() for d in presence_store.presence_store.list()]}
+    if name == "remove_presence_device":
+        deleted = presence_store.presence_store.delete(tool_input.get("device_id", ""))
+        return {"success": deleted} if deleted else {"success": False, "error": "No such device."}
+    if name == "who_is_present":
+        return {"success": True, "present": presence_store.presence_store.who_is_present()}
+
+    if name == "create_profile":
+        try:
+            profile = profiles_store.profile_store.create(tool_input.get("name", ""))
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, "profile_id": profile.id}
+    if name == "list_profiles":
+        return {"success": True, "profiles": [p.to_public_dict() for p in profiles_store.profile_store.list()]}
+    if name == "delete_profile":
+        deleted = profiles_store.profile_store.delete(tool_input.get("profile_id", ""))
+        return {"success": deleted} if deleted else {"success": False, "error": "No such profile."}
+    if name == "enroll_profile_voice":
+        profile_id = tool_input.get("profile_id", "")
+        profile = profiles_store.profile_store.get(profile_id)
+        if profile is None:
+            return {"success": False, "error": "No such profile."}
+        turn_audio = _current_turn_audio.get()
+        if turn_audio is None:
+            return {"success": False, "error": "No voice audio captured for this turn -- ask them to say something while enrolling."}
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, household_voice_id.enroll_member, profile_id, turn_audio)
+        if result.get("success"):
+            profiles_store.profile_store.mark_voice_enrolled(profile_id)
+        return result
+    if name == "who_is_speaking":
+        profile_id = _current_speaker_profile_id.get()
+        if profile_id is None:
+            return {"success": True, "speaking": None}
+        profile = profiles_store.profile_store.get(profile_id)
+        return {"success": True, "speaking": profile.to_public_dict() if profile else {"id": profile_id}}
+
     if name == "run_self_maintenance_check":
         vuln_result = await self_maintenance.check_dependency_vulnerabilities()
         marker_result = self_maintenance.scan_stale_markers()
@@ -2103,10 +2307,16 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, lambda: fn(**kwargs))
 
-    if name in ("ping_host", "check_port_open"):
+    if name in (
+        "ping_host", "check_port_open", "dns_lookup", "get_public_ip",
+        "lan_scan", "traceroute", "get_network_interfaces",
+    ):
         fn = getattr(network_tools, name)
         kwargs = {k: v for k, v in tool_input.items() if v is not None}
-        return await fn(**kwargs)
+        if asyncio.iscoroutinefunction(fn):
+            return await fn(**kwargs)
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: fn(**kwargs))
 
     if name in ("add_note", "list_notes", "search_notes", "track_expense", "list_expenses"):
         fn = getattr(personal_tools, name)
@@ -2365,7 +2575,7 @@ def _build_chat_prompt(user_text: str, history_text: str) -> str:
     # is only the last several messages of THIS conversation). Empty string
     # (no-op) until the graph actually has something relevant to surface.
     try:
-        memory_block = memory_manager.get_memory_context_string(user_text)
+        memory_block = _active_memory_manager().get_memory_context_string(user_text)
     except Exception as e:
         logger.debug("Memory context lookup failed, continuing without it: %s", e)
         memory_block = ""
@@ -2391,8 +2601,9 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
     which the real path never populates either)."""
     response_text, debug = await _generate_response_via_hierarchy_impl(user_text)
     try:
-        memory_manager.extract_memories_from_message(user_text, role="user")
-        memory_manager.learn_from_response(user_text, response_text)
+        active_manager = _active_memory_manager()
+        active_manager.extract_memories_from_message(user_text, role="user")
+        active_manager.learn_from_response(user_text, response_text)
     except Exception:
         logger.exception("Memory extraction/learning failed for this turn")
     return response_text, debug
@@ -2627,8 +2838,9 @@ async def _generate_response_stream(user_text: str):
                 # only tool-use/agent-routed turns ever reached
                 # _generate_response_via_hierarchy's wrapper.
                 try:
-                    memory_manager.extract_memories_from_message(user_text, role="user")
-                    memory_manager.learn_from_response(user_text, full_text)
+                    active_manager = _active_memory_manager()
+                    active_manager.extract_memories_from_message(user_text, role="user")
+                    active_manager.learn_from_response(user_text, full_text)
                 except Exception:
                     logger.exception("Memory extraction/learning failed for this streamed turn")
                 return
@@ -2714,6 +2926,7 @@ async def _broadcast_reply_to_web(text: str, images: Optional[List[bytes]] = Non
 
 async def _run_chat_turn(
     websocket: WebSocket, turn_id: int, user_text: str, voice_match: Optional[Dict[str, Any]] = None,
+    speaker_profile_id: Optional[str] = None, turn_audio: Optional[Any] = None,
 ) -> None:
     """The actual per-message work, run as its own cancellable asyncio.Task
     (see ConnectionManager.start_turn) so a new message can supersede a slow
@@ -2722,9 +2935,15 @@ async def _run_chat_turn(
     handler before this task started (None if the turn was typed, or no
     voice profile is enrolled) -- stashed in a ContextVar so the generic
     tool-dispatch callback (_execute_file_tool) can read it without its
-    signature needing to change."""
+    signature needing to change. speaker_profile_id is the household member
+    household_voice_id.identify_speaker() matched this turn's audio to (see
+    _active_memory_manager); turn_audio is that same real decoded audio
+    itself, so the enroll_profile_voice tool can use it directly -- same
+    ContextVar-stashing reasoning for both."""
     _current_turn_ctx.set((websocket, turn_id))
     _current_voice_match.set(voice_match)
+    _current_speaker_profile_id.set(speaker_profile_id)
+    _current_turn_audio.set(turn_audio)
     if history_manager:
         await history_manager.add({"role": "user", "content": user_text})
 
@@ -5477,6 +5696,8 @@ async def _execute_background_chat_task(mission_id: str, description: str) -> No
     actually done."""
     _current_turn_ctx.set(None)
     _current_voice_match.set(None)
+    _current_speaker_profile_id.set(None)
+    _current_turn_audio.set(None)
     try:
         response, debug = await _generate_response_via_hierarchy(description)
         success = True
@@ -5713,10 +5934,23 @@ async def websocket_endpoint(websocket: WebSocket):
                             )
 
             # ---- Final transcript / user text ----
+            # ---- Continuous conversation ("phone call") mode -- real
+            # session tracking so a proactive push (see _send_or_queue) can
+            # reach you live in the conversation, and so an idle session gets
+            # ended server-side even if the client never says so. ----
+            elif msg_type == "conversation_start":
+                manager.start_conversation(websocket)
+                logger.info("Continuous conversation mode started")
+
+            elif msg_type == "conversation_end":
+                manager.end_conversation(websocket)
+                logger.info("Continuous conversation mode ended")
+
             elif msg_type in ("final_transcript", "user_text"):
                 text = message.get("data", "")
                 client_turn_id = message.get("turn_id")
                 logger.info("Received %s: %s", msg_type, text[:80])
+                manager.touch_conversation(websocket)
 
                 # Real voice-match check for THIS turn -- only runs when the
                 # frontend actually attached the raw audio it just captured
@@ -5727,17 +5961,30 @@ async def websocket_endpoint(websocket: WebSocket):
                 # real result the instant a sensitive tool call needs it,
                 # rather than trying to fetch/verify audio mid-tool-call.
                 voice_match: Optional[Dict[str, Any]] = None
+                speaker_profile_id: Optional[str] = None
+                turn_audio: Optional[Any] = None
                 audio_b64_for_turn = message.get("audio_b64")
-                if audio_b64_for_turn and voice_id.is_enrolled():
+                if audio_b64_for_turn:
                     try:
                         decoded = decode_webm_opus_b64_to_pcm(audio_b64_for_turn, target_sample_rate=voice_id.TARGET_SAMPLE_RATE)
-                        audio_np = np.asarray(pcm_int16_to_float32(decoded.pcm_int16), dtype=np.float32)
+                        turn_audio = np.asarray(pcm_int16_to_float32(decoded.pcm_int16), dtype=np.float32)
                         loop = asyncio.get_event_loop()
-                        voice_match = await loop.run_in_executor(None, voice_id.verify, audio_np, voice_id.TARGET_SAMPLE_RATE)
-                        logger.info("Voice match for this turn: %s", voice_match)
+                        if voice_id.is_enrolled():
+                            voice_match = await loop.run_in_executor(None, voice_id.verify, turn_audio, voice_id.TARGET_SAMPLE_RATE)
+                            logger.info("Voice match for this turn: %s", voice_match)
+                        if household_voice_id.PROFILES_DIR.exists():
+                            # Real household-member identification -- this is
+                            # a personalization signal (see
+                            # _active_memory_manager), fully separate from
+                            # voice_match above's security-approval role.
+                            identified = await loop.run_in_executor(None, household_voice_id.identify_speaker, turn_audio, voice_id.TARGET_SAMPLE_RATE)
+                            if identified:
+                                speaker_profile_id = identified[0]
+                                logger.info("Household speaker identified for this turn: %s (similarity=%s)", *identified)
                     except Exception as e:
-                        logger.warning("Voice verification failed for this turn: %s", e)
-                        voice_match = {"success": False, "error": str(e), "match": None}
+                        logger.warning("Voice verification/identification failed for this turn: %s", e)
+                        if voice_id.is_enrolled():
+                            voice_match = {"success": False, "error": str(e), "match": None}
 
                 # Fire-and-forget: start_turn cancels any still-running previous
                 # turn and spawns this one as its own task, so the receive loop
@@ -5746,7 +5993,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # _run_chat_turn for the actual streaming generation + TTS work.
                 manager.start_turn(
                     websocket,
-                    lambda turn_id, _text=text, _vm=voice_match: _run_chat_turn(websocket, turn_id, _text, _vm),
+                    lambda turn_id, _text=text, _vm=voice_match, _sp=speaker_profile_id, _ta=turn_audio: _run_chat_turn(websocket, turn_id, _text, _vm, _sp, _ta),
                     turn_id=client_turn_id,
                 )
 
@@ -5911,7 +6158,9 @@ async def startup_event():
     asyncio.create_task(_self_healing_loop())
     asyncio.create_task(_self_maintenance_loop())
     asyncio.create_task(_pattern_suggestions_loop())
+    asyncio.create_task(_presence_loop())
     asyncio.create_task(_meeting_prep_loop())
+    asyncio.create_task(_conversation_idle_watchdog())
     asyncio.create_task(_watch_execution_loop())
     asyncio.create_task(_economic_calendar_loop())
     asyncio.create_task(_screen_context_loop())
@@ -5984,6 +6233,29 @@ async def _daily_briefing_loop() -> None:
         # Loop back around -- next iteration recomputes tomorrow's target.
 
 
+async def _conversation_idle_watchdog() -> None:
+    """Server-side safety net for continuous conversation mode -- the client
+    already ends a session on an exit phrase or explicit toggle, but a tab
+    crash or lost connection would otherwise leave it marked active forever
+    (has_active_conversation() would then wrongly keep routing proactive
+    pushes into a dead session below). Ends any session idle longer than
+    CONVERSATION_IDLE_TIMEOUT_SECONDS (default 120s) and tells the client so,
+    mirroring the client's own "like a phone call" framing -- silence long
+    enough eventually hangs up from either end."""
+    timeout = float(os.getenv("CONVERSATION_IDLE_TIMEOUT_SECONDS", "120"))
+    while True:
+        await asyncio.sleep(15)
+        now = _time.time()
+        for ws, last in list(manager.conversation_last_activity.items()):
+            if now - last <= timeout:
+                continue
+            manager.end_conversation(ws)
+            try:
+                await ws.send_text(json.dumps({"type": "conversation_ended", "reason": "idle_timeout"}))
+            except Exception:
+                pass
+
+
 async def _send_or_queue(text: str) -> None:
     """The one chokepoint every INFORMATIONAL proactive push (self-healing
     status, watch alerts, scheduled telegram_message cron jobs) routes
@@ -5991,11 +6263,19 @@ async def _send_or_queue(text: str) -> None:
     it queues instead and delivers as part of one consolidated digest when
     focus mode ends. Approval requests never go through this: they're
     genuinely blocking work, not ambient noise, so they always call
-    telegram_notifier.request_approval directly and arrive right away."""
+    telegram_notifier.request_approval directly and arrive right away.
+
+    Also mirrored live into any active continuous-conversation session (see
+    ConnectionManager.has_active_conversation) regardless of focus_mode --
+    being mid-conversation with Billion right now is a much stronger presence
+    signal than focus_mode's "away/busy" assumption, so a proactive update
+    should actually reach you there instead of silently queuing for later."""
     if focus_mode.is_active():
         focus_mode.queue_message(text)
     else:
         await telegram_notifier.send(text)
+    if manager.has_active_conversation():
+        await _broadcast_reply_to_web(text, source="proactive")
 
 
 async def _meeting_prep_loop() -> None:
@@ -6050,6 +6330,40 @@ async def _meeting_prep_loop() -> None:
                 meeting_prep_store.mark_prepped(event_id)
         except Exception:
             logger.exception("Meeting prep loop failed")
+
+
+async def _presence_loop() -> None:
+    """Real periodic LAN presence check (default every 3 min) for every
+    registered device -- pings it, detects real arrive/leave TRANSITIONS
+    (not every unchanged check), notifies once per transition, and runs
+    that device's own on_arrive_macro/on_leave_macro if one's set (the real
+    'if I'm home, dim the lights' conditional trigger)."""
+    interval = float(os.getenv("PRESENCE_CHECK_INTERVAL_MINUTES", "3")) * 60.0
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            for device in presence_store.presence_store.list():
+                try:
+                    result = await network_tools.ping_host(device.host, count=1)
+                    now_present = bool(result.get("success") and result.get("reachable"))
+                    was_present = device.present
+                    presence_store.presence_store.record_check(device.id, now_present)
+                    if now_present == was_present:
+                        continue
+                    if now_present:
+                        await _send_or_queue(f"{device.person_name} just got home, Sir.")
+                        macro_name = device.on_arrive_macro
+                    else:
+                        await _send_or_queue(f"{device.person_name} just left, Sir.")
+                        macro_name = device.on_leave_macro
+                    if macro_name:
+                        macro = macro_store.macro_store.find_by_name(macro_name)
+                        if macro:
+                            await _run_macro(macro)
+                except Exception:
+                    logger.exception("Presence check for device %s failed", device.id)
+        except Exception as e:
+            logger.exception("Presence loop failed: %s", e)
 
 
 async def _pattern_suggestions_loop() -> None:
