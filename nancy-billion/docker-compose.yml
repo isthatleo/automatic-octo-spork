@@ -133,6 +133,18 @@ services:
     profiles: ["langflow"]
     ports:
       - "7860:7860"
+    # Confirmed live: Langflow's real startup hard-requires a superuser
+    # password (raises "Username and password must be set" and exits if
+    # unset) -- same requirement as the official docker-compose.yml at
+    # github.com/langflow-ai/langflow/blob/main/docker_example/docker-compose.yml,
+    # which sets this from its own .env. Reusing backend/.env directly
+    # (real container env, not compose-file ${...} substitution -- that
+    # only reads a .env sitting next to this file, not backend/.env) means
+    # no separate secrets file to keep in sync. Set LANGFLOW_SUPERUSER_PASSWORD
+    # there before starting this profile, or the container fails with that
+    # same real error.
+    env_file:
+      - ./backend/.env
     volumes:
       - ./data/langflow:/app/langflow
     restart: unless-stopped
