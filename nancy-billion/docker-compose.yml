@@ -13,6 +13,18 @@ services:
       - "8000:8000"
     env_file:
       - ./backend/.env
+    environment:
+      # Overrides .env's PHONEMIZER_ESPEAK_LIBRARY, which is a Windows path
+      # (C:\Program Files\eSpeak NG\libespeak-ng.dll) -- correct for running
+      # main_new.py natively on Windows, meaningless inside this Linux
+      # container, where it made NeuTTS's phonemizer step fail with "espeak
+      # not installed on your system" (confirmed live: the real underlying
+      # error was PHONEMIZER_ESPEAK_LIBRARY pointing at a non-existent
+      # Windows path, not espeak actually being missing -- espeak-ng is
+      # installed and working at /usr/bin/espeak-ng). Compose's `environment`
+      # takes precedence over `env_file` for the same key, so this is
+      # container-only and leaves .env correct for native Windows runs.
+      - PHONEMIZER_ESPEAK_LIBRARY=/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1
     volumes:
       # Bind-mount so the real persisted stores (webhooks.json, cron_jobs.json,
       # skills.json, memory_graph.json, economic_calendar.json, memory.sqlite,

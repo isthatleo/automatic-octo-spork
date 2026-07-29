@@ -234,6 +234,23 @@ class VoiceWakeWord(WakeWordDetector):
 
         blocksize = int(self.chunk_seconds * self.sample_rate)
 
+        # Same real check as ClapWakeWord.start() -- a container has no
+        # physical audio hardware at all, and sd.InputStream(...).start()
+        # doesn't fail cleanly on an invalid default device (-1); it raises
+        # sounddevice.PortAudioError deep inside PortAudio instead. Checking
+        # first gives a clean, honest warning instead of that traceback.
+        devices = sd.query_devices()
+        default_input = sd.default.device[0]
+        if not devices or default_input < 0 or default_input >= len(devices):
+            logger.warning(
+                "Voice wake word detector: no real audio input device available "
+                "(default_input=%s, %d device(s) found) -- skipping. Voice input via "
+                "the browser's own mic (Web Speech API) is unaffected.",
+                default_input, len(devices),
+            )
+            self.running = False
+            return
+
         # Start mic stream
         self.stream = sd.InputStream(
             samplerate=self.sample_rate,

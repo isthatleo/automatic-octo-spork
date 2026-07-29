@@ -36,14 +36,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libportaudio2 \
     curl \
     && rm -rf /var/lib/apt/lists/* \
-    # NeuTTS's phonemizer step looks for the classic `espeak` binary name
-    # specifically (confirmed live: "espeak not installed on your system",
-    # even with espeak-ng actually present and working at
-    # /usr/bin/espeak-ng) -- Debian's espeak-ng package doesn't provide a
-    # compatibility symlink, and espeak-ng is command-line compatible enough
-    # for phonemization, so this is a real, safe fix rather than pulling in
-    # the separate (larger, and in trixie/bookworm sometimes conflicting)
-    # classic espeak package.
+    # Some tooling (pyttsx3's Linux driver among it) still looks for the
+    # classic `espeak` binary name specifically -- espeak-ng is command-line
+    # compatible enough for that use, so this symlink is a real, safe
+    # convenience rather than pulling in the separate (larger, and in
+    # trixie/bookworm sometimes conflicting) classic espeak package. Not the
+    # actual fix for NeuTTS's "espeak not installed on your system" error,
+    # though -- that turned out to be docker-compose.yml's
+    # PHONEMIZER_ESPEAK_LIBRARY override (see there): the real .env value is
+    # a Windows path, meaningless inside this Linux container regardless of
+    # what binaries/symlinks exist.
     && ln -s /usr/bin/espeak-ng /usr/bin/espeak
 
 COPY fury-main ./fury-main
