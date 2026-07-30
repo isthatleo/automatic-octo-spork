@@ -6,7 +6,10 @@
 
 import type { EconomicEvent } from './types'
 
-const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
+// Same-origin authenticated proxy -- see app/api/backend/[...path]/route.ts.
+// A direct NEXT_PUBLIC_BACKEND_URL call from client code here would bypass
+// BACKEND_AUTH_TOKEN entirely and fail on a phone (localhost is the phone).
+const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? '/api/backend'
 
 export interface EconomicCalendarResponse {
   success: boolean

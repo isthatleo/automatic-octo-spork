@@ -32,6 +32,15 @@ services:
       # the ephemeral container filesystem.
       - ./backend/data:/app/data
       - ./backend/voice_ref:/app/voice_ref
+      # Distilled skills (skill_loader.py writes real SKILL.md folders to
+      # /app/skills) and backup archives (backup_tool.py writes to
+      # /app/backups) were BOTH landing in the container's writable layer,
+      # which `docker compose down` and every image rebuild discard. Months of
+      # learned procedures and every backup the owner had taken would have
+      # vanished with no error -- list_backups() would just start returning an
+      # empty list. Mounted so they live on the host like every other store.
+      - ./backend/skills:/app/skills
+      - ./backend/backups:/app/backups
       # Real host Docker-daemon access for docker_tool.py (docker_ps/logs/
       # build/compose/restart) -- a deliberate, documented privilege grant:
       # anything that can use this socket can effectively control the host's
@@ -41,6 +50,14 @@ services:
       # /var/run/docker.sock path inside its Linux VM to any Linux container).
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
+    # Without this the default json-file driver keeps every line forever, and
+    # main_new.py logs at INFO -- on a box that runs for months that quietly
+    # fills the Docker Desktop VM's disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # `docker compose watch` -- run alongside `docker compose up` to keep
     # this container in step with source edits automatically. main_new.py
     # is a plain `python main_new.py` (no uvicorn --reload), so a normal
@@ -87,9 +104,26 @@ services:
       # involved) worked fine -- two different network paths, only one of
       # which was ever configured correctly.
       - BACKEND_URL=http://backend:8000
+      # The bearer token lives HERE, on the server side, and is never
+      # NEXT_PUBLIC_-prefixed -- browser code calls same-origin /api/backend/*
+      # and this container attaches the credential. Read from the same
+      # backend/.env both services already share, so there's one place to set it.
+      - BACKEND_AUTH_TOKEN=${BACKEND_AUTH_TOKEN:-}
+      # Passcode for the control room itself. Without it, locking the backend
+      # would be theatre: anything that can load :3005 could drive the API
+      # through the proxy without ever holding a credential.
+      - BILLION_PASSCODE=${BILLION_PASSCODE:-}
+      - BILLION_SESSION_SECRET=${BILLION_SESSION_SECRET:-}
+    env_file:
+      - ./backend/.env
     depends_on:
       - backend
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # This image runs a production build (`next build` then `next start`),
     # not a dev server, so there's no live process to sync source into --
     # every real change needs the image rebuilt and the container recreated
@@ -117,6 +151,11 @@ services:
     volumes:
       - ./data/ollama:/root/.ollama
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Real Langflow (langflowai/langflow, the official image) as a genuine
   # sibling service, not a pip dependency merged into backend's own Python
@@ -148,3 +187,8 @@ services:
     volumes:
       - ./data/langflow:/app/langflow
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

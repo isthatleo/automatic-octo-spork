@@ -1,11 +1,20 @@
 """Real file system access for Nancy's chat tool-use (see main_new.py's
 Claude tool-calling loop, FILE_TOOLS/_execute_file_tool).
 
-Per explicit user choice this session: unrestricted path access -- no folder
-sandbox -- but every write/delete/move is gated behind Telegram approval
-before it executes (see _execute_file_tool). These functions themselves are
-pure file I/O with no gating logic; the safety check happens one layer up so
-this module stays simple and directly testable.
+Writes, deletes and moves are gated behind Telegram approval one layer up
+(_execute_file_tool). READS are not, and never were -- which was fine while
+this module was only ever reached from a chat session the owner started
+himself, and stopped being fine the moment the API became reachable from the
+network. `GET /files/read?path=/proc/1/environ` returned the backend process's
+entire environment, i.e. every API key in .env, to anything that could open a
+socket to port 8000.
+
+So the "unrestricted path access" this module used to advertise is now an
+allowlist: every path is resolved (symlinks included) and must land under one
+of ALLOWED_ROOTS. Configure it with NANCY_ALLOWED_ROOTS (os.pathsep-separated);
+the default is the user's home directory plus this repo. Denied paths return
+the same {"success": False, "error": ...} shape as any other failure, so
+callers need no special handling.
 """
 
 from __future__ import annotations
@@ -38,6 +47,79 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_IMAGE_BYTES = 15_000_000  # generous -- vision models cap around here anyway
 
 
+def _default_roots() -> List[Path]:
+    """Home plus the repo this file lives in -- covers ordinary use without
+    reaching /proc, /etc, another user's home, or the Docker socket."""
+    roots = [Path.home(), Path(__file__).resolve().parent.parent]
+    # In the container the repo is /app and the mounted stores live under it,
+    # so that one entry covers everything; on Windows, home covers the rest.
+    return roots
+
+
+def _load_roots() -> List[Path]:
+    raw = os.getenv("NANCY_ALLOWED_ROOTS", "").strip()
+    if not raw:
+        roots = _default_roots()
+    else:
+        roots = [Path(p.strip()).expanduser() for p in raw.split(os.pathsep) if p.strip()]
+    resolved: List[Path] = []
+    for r in roots:
+        try:
+            resolved.append(r.resolve())
+        except OSError:
+            continue
+    return resolved
+
+
+ALLOWED_ROOTS: List[Path] = _load_roots()
+
+
+def reload_allowed_roots() -> List[str]:
+    """Re-read NANCY_ALLOWED_ROOTS at runtime (the Keys page can change env
+    live). Returns the roots now in force, for display."""
+    global ALLOWED_ROOTS
+    ALLOWED_ROOTS = _load_roots()
+    return [str(r) for r in ALLOWED_ROOTS]
+
+
+class PathNotAllowed(Exception):
+    """Raised for a path outside every allowed root."""
+
+
+def _resolved(path: str) -> Path:
+    """Resolve a caller-supplied path the way the filesystem will, so that
+    '..', symlinks and Windows short names can't be used to step outside a
+    root after the check."""
+    return Path(resolve_oc_path(path)).expanduser().resolve()
+
+
+def _check(p: Path) -> None:
+    if not ALLOWED_ROOTS:
+        return  # explicitly configured empty -> no restriction
+    for root in ALLOWED_ROOTS:
+        try:
+            p.relative_to(root)
+            return
+        except ValueError:
+            continue
+    raise PathNotAllowed(
+        f"Path is outside the allowed roots: {p}. "
+        f"Allowed: {', '.join(str(r) for r in ALLOWED_ROOTS)} "
+        f"(set NANCY_ALLOWED_ROOTS to change this)."
+    )
+
+
+def safe_path(path: str) -> Path:
+    """Resolve and authorise one caller-supplied path. Raises PathNotAllowed."""
+    p = _resolved(path)
+    _check(p)
+    return p
+
+
+def _denied(e: PathNotAllowed) -> Dict[str, Any]:
+    return {"success": False, "error": str(e), "denied": True}
+
+
 def read_file(path: str, offset: int = 0, limit: Optional[int] = None) -> Dict[str, Any]:
     """Read a file's text, optionally from a given 1-indexed line `offset`
     and capped at `limit` lines -- the same offset/limit idiom as Claude
@@ -51,7 +133,7 @@ def read_file(path: str, offset: int = 0, limit: Optional[int] = None) -> Dict[s
     file. main_new.py's read_file dispatch promotes this to the reserved
     `_image_base64` result key so the model actually SEES it, the same
     mechanism take_screenshot/browser_screenshot already use."""
-    p = Path(resolve_oc_path(path)).expanduser()
+    p = safe_path(path)
     if not p.exists():
         return {"success": False, "error": f"No such file: {path}"}
     if not p.is_file():
@@ -108,7 +190,7 @@ def read_file(path: str, offset: int = 0, limit: Optional[int] = None) -> Dict[s
 
 
 def list_directory(path: str) -> Dict[str, Any]:
-    p = Path(resolve_oc_path(path)).expanduser()
+    p = safe_path(path)
     if not p.exists():
         return {"success": False, "error": f"No such directory: {path}"}
     if not p.is_dir():
@@ -127,7 +209,7 @@ def list_directory(path: str) -> Dict[str, Any]:
 
 
 def write_file(path: str, content: str) -> Dict[str, Any]:
-    p = Path(resolve_oc_path(path)).expanduser()
+    p = safe_path(path)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -144,7 +226,7 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     of accidentally dropping unrelated content that a regenerated whole file
     would carry. old_string must appear exactly once unless replace_all is
     set, mirroring Edit's own uniqueness guarantee."""
-    p = Path(resolve_oc_path(path)).expanduser()
+    p = safe_path(path)
     if not p.exists():
         return {"success": False, "error": f"No such file: {path}"}
     if not p.is_file():
@@ -178,7 +260,7 @@ def multi_edit_file(path: str, edits: List[Dict[str, Any]]) -> Dict[str, Any]:
     is atomicity -- if any edit in the middle fails (old_string not found, or
     not unique without replace_all), nothing is written to disk at all,
     instead of leaving the file half-changed."""
-    p = Path(resolve_oc_path(path)).expanduser()
+    p = safe_path(path)
     if not p.exists():
         return {"success": False, "error": f"No such file: {path}"}
     if not p.is_file():
@@ -217,7 +299,7 @@ def search_files(pattern: str, path: str = ".", glob: str = "", case_sensitive: 
     own Grep tool does. Without this, understanding an existing codebase
     meant read_file-ing files one at a time on a guess; a real coding agent
     needs to actually find where something is defined/used first."""
-    root = Path(resolve_oc_path(path)).expanduser()
+    root = safe_path(path)
     if not root.exists():
         return {"success": False, "error": f"No such path: {path}"}
     try:
@@ -270,10 +352,14 @@ def check_python_syntax(path: str) -> Optional[str]:
     the model never found out unless the human noticed and said something.
     Returns an error string, or None if the file parses cleanly. Only wired
     up for .py -- see main_new.py's _execute_file_tool."""
+    # This one opened `path` directly, which made it the one way to read a
+    # file outside ALLOWED_ROOTS -- and to probe for a file's existence. Goes
+    # through the same authorisation as every other entry point now.
+    p = safe_path(path)
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(p, "r", encoding="utf-8") as f:
             source = f.read()
-        compile(source, path, "exec")
+        compile(source, str(p), "exec")
         return None
     except SyntaxError as e:
         return f"{e.msg} (line {e.lineno}, col {e.offset})"
@@ -287,7 +373,7 @@ def glob_files(pattern: str, path: str = ".") -> Dict[str, Any]:
     own Glob tool does. Complements search_files, which searches file
     CONTENT: this is for "what files are there" rather than "where does X
     appear."""
-    root = Path(resolve_oc_path(path)).expanduser()
+    root = safe_path(path)
     if not root.exists():
         return {"success": False, "error": f"No such path: {path}"}
     if not root.is_dir():
@@ -320,7 +406,7 @@ def create_directory(path: str) -> Dict[str, Any]:
     exists, parents created as needed), same as write_file's own directory
     creation but callable on its own for the editor panel's New Folder
     action, which has no file content to imply a path from."""
-    p = Path(resolve_oc_path(path)).expanduser()
+    p = safe_path(path)
     try:
         p.mkdir(parents=True, exist_ok=True)
         return {"success": True, "path": str(p)}
@@ -329,7 +415,7 @@ def create_directory(path: str) -> Dict[str, Any]:
 
 
 def delete_file(path: str) -> Dict[str, Any]:
-    p = Path(resolve_oc_path(path)).expanduser()
+    p = safe_path(path)
     if not p.exists():
         return {"success": False, "error": f"No such path: {path}"}
     try:
@@ -343,8 +429,8 @@ def delete_file(path: str) -> Dict[str, Any]:
 
 
 def move_file(src: str, dst: str) -> Dict[str, Any]:
-    src_p = Path(resolve_oc_path(src)).expanduser()
-    dst_p = Path(resolve_oc_path(dst)).expanduser()
+    src_p = safe_path(src)
+    dst_p = safe_path(dst)
     if not src_p.exists():
         return {"success": False, "error": f"No such path: {src}"}
     try:
@@ -353,3 +439,49 @@ def move_file(src: str, dst: str) -> Dict[str, Any]:
         return {"success": True, "from": str(src_p), "to": str(dst_p)}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# --- allowlist enforcement, applied uniformly -------------------------------
+# Each public entry point resolves its path through safe_path(), which raises
+# PathNotAllowed for anything outside ALLOWED_ROOTS. Rather than wrap every
+# function body in the same try/except, convert that one exception into the
+# ordinary {"success": False, ...} result shape here, so every caller --
+# the chat tool loop, the REST routes, the code editor -- sees a normal
+# failure it already knows how to render.
+def _enforce_roots(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except PathNotAllowed as e:
+            return _denied(e)
+
+    return wrapper
+
+
+for _name in (
+    "read_file", "list_directory", "write_file", "edit_file", "multi_edit_file",
+    "search_files", "glob_files", "create_directory", "delete_file", "move_file",
+):
+    globals()[_name] = _enforce_roots(globals()[_name])
+del _name
+
+
+def _enforce_roots_str(fn):
+    """Same idea for check_python_syntax, which returns an error *string* or
+    None rather than a result dict -- handing it a dict would break callers."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except PathNotAllowed as e:
+            return str(e)
+
+    return wrapper
+
+
+check_python_syntax = _enforce_roots_str(check_python_syntax)

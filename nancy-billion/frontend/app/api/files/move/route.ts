@@ -1,13 +1,13 @@
 import { NextResponse } from 'next/server'
+import { BACKEND_URL as BACKEND, backendHeaders } from '@/lib/nancy/backend-server'
 
-const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 export async function POST(req: Request) {
   try {
     const body = await req.json()
     const res = await fetch(`${BACKEND}/files/move`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: backendHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     })
     const json = await res.json().catch(() => ({}))

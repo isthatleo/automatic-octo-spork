@@ -3,7 +3,11 @@
 import { useEffect, useState } from 'react'
 import { ArcReactor } from './hud-bits'
 
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
+// Same-origin authenticated proxy -- see app/api/backend/[...path]/route.ts.
+// A direct NEXT_PUBLIC_BACKEND_URL default of localhost:8000 resolves to the
+// phone itself when opened from a phone, always reading "offline" even when
+// the real backend is reachable fine through the proxy.
+const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? '/api/backend'
 
 /**
  * A short, honest loading moment -- not a fake "kernel boot log" reciting
@@ -17,7 +21,7 @@ export function BootSequence({ onDone }: { onDone: () => void }) {
 
   useEffect(() => {
     let cancelled = false
-    const check = fetch(BACKEND, { signal: AbortSignal.timeout(2500) })
+    const check = fetch(`${BACKEND}/health`, { signal: AbortSignal.timeout(2500) })
       .then((r) => { if (!cancelled) setStatus(r.ok ? 'connected' : 'offline') })
       .catch(() => { if (!cancelled) setStatus('offline') })
 

@@ -9,7 +9,7 @@
 // (currently unused by the SpeechRecognition path, but real and tested)
 // audio_chunk WS message expects).
 
-function blobToBase64(blob: Blob): Promise<string> {
+export function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onloadend = () => {
@@ -25,7 +25,7 @@ function blobToBase64(blob: Blob): Promise<string> {
 
 const PREFERRED_MIME_TYPES = ['audio/webm;codecs=opus', 'audio/webm']
 
-function pickMimeType(): string | undefined {
+export function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === 'undefined') return undefined
   return PREFERRED_MIME_TYPES.find((t) => MediaRecorder.isTypeSupported(t))
 }

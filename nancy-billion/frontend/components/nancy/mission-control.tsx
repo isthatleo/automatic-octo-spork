@@ -33,6 +33,19 @@ const STATUS_TEXT: Record<string, string> = {
   online: 'ACTIVE', executing: 'RUNNING', idle: 'IDLE', training: 'LEARNING', offline: 'OFFLINE', error: 'OFFLINE',
 }
 
+/** Honesty badge, driven by the real mode/hardware_connected flags the
+ * backend reports per-agent (base_specialized_agent.get_info) -- so an
+ * agent running on simulated data or unattached hardware is visibly
+ * badged in the roster, not just in its per-agent detail view. */
+function agentModeBadge(agent: AgentInfo): string | null {
+  if (agent.hardware_connected === false) return 'SIM · NO HW'
+  if (agent.mode && agent.mode !== 'production' && agent.mode !== 'real') {
+    if (agent.mode.includes('hybrid')) return 'HYBRID'
+    return 'SIMULATED'
+  }
+  return null
+}
+
 export function MissionControlPanel() {
   const [data, setData] = useState<AgentListResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -243,7 +256,18 @@ function AgentGlassCard({ agent, onOpen }: { agent: AgentInfo; onOpen: () => voi
 
       <div className="flex items-start justify-between">
         <Icon className="h-[20px] w-[20px] text-white/80" strokeWidth={1.5} />
-        <StatusChip status={agent.status} />
+        <div className="flex items-center gap-1.5">
+          {agentModeBadge(agent) && (
+            <span
+              className="flex h-5 items-center rounded-full px-2 text-[9px] uppercase tracking-[1.5px]"
+              style={{ border: `1px solid color-mix(in oklch, ${ACCENT2} 55%, transparent)`, color: ACCENT2 }}
+              title="This agent reports it runs on simulated data or without real hardware attached -- see its detail view."
+            >
+              {agentModeBadge(agent)}
+            </span>
+          )}
+          <StatusChip status={agent.status} />
+        </div>
       </div>
 
       <h3 className="mt-3 truncate text-[18px] font-semibold uppercase tracking-wide text-white">{agent.name}</h3>

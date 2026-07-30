@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { startLiveRecording, type LiveRecording } from './voice-capture'
+import { blobToBase64, pickMimeType, startLiveRecording, type LiveRecording } from './voice-capture'
 
 // Minimal typings for the Web Speech API (not in standard lib DOM types).
 interface SpeechRecognitionResultLike {
@@ -46,6 +46,26 @@ function getRecognitionCtor(): RecognitionCtor | null {
   }
   return w.SpeechRecognition || w.webkitSpeechRecognition || null
 }
+
+// Server-STT fallback availability (Firefox/Safari have no Web Speech API,
+// but do have MediaRecorder + getUserMedia -- clips go to the backend's
+// faster-whisper via /api/voice/transcribe instead).
+function serverSttAvailable(): boolean {
+  return (
+    typeof navigator !== 'undefined' &&
+    !!navigator.mediaDevices?.getUserMedia &&
+    typeof MediaRecorder !== 'undefined'
+  )
+}
+
+// Segment length for the fallback loop. Long enough that "nancy, what's the
+// weather" fits in one segment most of the time; short enough that the
+// wake-to-response latency stays tolerable without a real VAD.
+const SERVER_STT_SEGMENT_MS = 5000
+// Peak |amplitude| (0..1 from an AnalyserNode) below which a segment is
+// treated as silence and never uploaded -- keeps an idle open mic from
+// hammering the backend with empty transcriptions all day.
+const SERVER_STT_SILENCE_PEAK = 0.04
 
 const WAKE_WORDS = ['nancy', 'nance', 'nansi', 'billion', 'bilion', 'jarvis', 'jervis']
 // Word-boundary matcher so "billionaire" or "cancy" don't false-trigger.
@@ -109,6 +129,14 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
   // of THIS command's utterance. null whenever nothing is currently being
   // captured (outside the wake window, or between commands within it).
   const liveRecordingRef = useRef<LiveRecording | null>(null)
+  // Server-STT fallback state (no Web Speech API): the loop records
+  // discrete WebM segments and transcribes them via /api/voice/transcribe.
+  const serverModeRef = useRef(false)
+  const serverStreamRef = useRef<MediaStream | null>(null)
+  const serverAudioCtxRef = useRef<AudioContext | null>(null)
+  // The segment that produced the current transcript -- doubles as the
+  // voice-ID sample for captureAndDispatch (it IS this command's audio).
+  const lastSegmentB64Ref = useRef<string | null>(null)
 
   cmdRef.current = onCommand
   wakeRef.current = onWake
@@ -116,7 +144,7 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
   conversationEndRef.current = onConversationEnd
 
   useEffect(() => {
-    setState((s) => ({ ...s, supported: !!getRecognitionCtor() }))
+    setState((s) => ({ ...s, supported: !!getRecognitionCtor() || serverSttAvailable() }))
   }, [])
 
   // Discards whatever's currently recording without dispatching it (window
@@ -129,6 +157,9 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
   }, [])
 
   const beginCapture = useCallback(() => {
+    // Server-STT mode records its own segments -- a second parallel
+    // recorder on the same mic would only fight over it.
+    if (serverModeRef.current) return
     discardCapture()
     liveRecordingRef.current = startLiveRecording()
   }, [discardCapture])
@@ -178,6 +209,13 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
   // is inherently async; the command still dispatches exactly once either way.
   const captureAndDispatch = useCallback(
     (text: string) => {
+      // Server-STT mode: the transcribed segment itself is this command's
+      // real audio -- pass it straight through for voice-ID, no second
+      // recorder involved.
+      if (serverModeRef.current) {
+        cmdRef.current(text, lastSegmentB64Ref.current ?? undefined)
+        return
+      }
       const rec = liveRecordingRef.current
       liveRecordingRef.current = null
       if (!rec) {
@@ -237,10 +275,108 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
     [setAwake, captureAndDispatch, stopConversationMode, startConversationMode],
   )
 
+  // ── Server-STT fallback loop (Firefox/Safari) ─────────────────────────
+  // Records back-to-back ~5s WebM segments from one shared mic stream; a
+  // parallel AnalyserNode tracks the segment's peak level so silent
+  // segments are dropped client-side. Non-silent segments go to the
+  // backend's faster-whisper via /api/voice/transcribe and the transcript
+  // feeds the exact same handleText pipeline (wake word, conversation
+  // mode, command dispatch) the native path uses. Transcription of one
+  // segment overlaps the recording of the next, so nothing said during a
+  // whisper round-trip is lost.
+  const startServerSttLoop = useCallback(async () => {
+    if (serverModeRef.current) return
+    serverModeRef.current = true
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (!serverModeRef.current) {
+        stream.getTracks().forEach((t) => t.stop())
+        return
+      }
+      serverStreamRef.current = stream
+      const audioCtx = new AudioContext()
+      serverAudioCtxRef.current = audioCtx
+      const analyser = audioCtx.createAnalyser()
+      analyser.fftSize = 2048
+      audioCtx.createMediaStreamSource(stream).connect(analyser)
+      const levelBuf = new Uint8Array(analyser.fftSize)
+      setState((s) => ({ ...s, listening: true }))
+
+      const mimeType = pickMimeType()
+      const recordSegment = () =>
+        new Promise<{ blob: Blob; peak: number } | null>((resolve) => {
+          if (!serverModeRef.current || !serverStreamRef.current) return resolve(null)
+          let peak = 0
+          const recorder = new MediaRecorder(serverStreamRef.current, mimeType ? { mimeType } : undefined)
+          const chunks: BlobPart[] = []
+          recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
+          recorder.onerror = () => resolve(null)
+          recorder.onstop = () => resolve({ blob: new Blob(chunks, { type: mimeType ?? 'audio/webm' }), peak })
+          recorder.start()
+          const meter = setInterval(() => {
+            analyser.getByteTimeDomainData(levelBuf)
+            for (let i = 0; i < levelBuf.length; i++) {
+              const v = Math.abs(levelBuf[i] - 128) / 128
+              if (v > peak) peak = v
+            }
+          }, 150)
+          setTimeout(() => {
+            clearInterval(meter)
+            if (recorder.state !== 'inactive') recorder.stop()
+          }, SERVER_STT_SEGMENT_MS)
+        })
+
+      const transcribeSegment = async (blob: Blob) => {
+        try {
+          const audio_b64 = await blobToBase64(blob)
+          const res = await fetch('/api/voice/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ audio_b64 }),
+          })
+          if (!res.ok) return
+          const json = await res.json()
+          const transcript = String(json?.transcript ?? '').trim()
+          if (transcript && serverModeRef.current) {
+            lastSegmentB64Ref.current = audio_b64
+            handleText(transcript, true)
+          }
+        } catch {
+          /* transient network/backend failure -- next segment tries again */
+        }
+      }
+
+      while (serverModeRef.current) {
+        const seg = await recordSegment()
+        if (!seg) break
+        // Fire-and-forget: transcription overlaps the next segment's recording.
+        if (seg.peak >= SERVER_STT_SILENCE_PEAK && seg.blob.size > 0) void transcribeSegment(seg.blob)
+      }
+    } catch {
+      // Mic denied/unavailable -- honest unsupported state, same as native path.
+      serverModeRef.current = false
+      setState((s) => ({ ...s, supported: false, listening: false }))
+    }
+  }, [handleText])
+
+  const stopServerSttLoop = useCallback(() => {
+    serverModeRef.current = false
+    serverStreamRef.current?.getTracks().forEach((t) => t.stop())
+    serverStreamRef.current = null
+    serverAudioCtxRef.current?.close().catch(() => {})
+    serverAudioCtxRef.current = null
+    lastSegmentB64Ref.current = null
+  }, [])
+
   const start = useCallback(() => {
     const Ctor = getRecognitionCtor()
     if (!Ctor) {
-      setState((s) => ({ ...s, supported: false }))
+      if (serverSttAvailable()) {
+        wantListening.current = true
+        void startServerSttLoop()
+      } else {
+        setState((s) => ({ ...s, supported: false }))
+      }
       return
     }
     if (recRef.current) return
@@ -282,7 +418,7 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
     } catch {
       /* already started */
     }
-  }, [handleText])
+  }, [handleText, startServerSttLoop])
 
   // Stops recognition only -- leaves conversationMode/awake state untouched.
   // Used internally (and by callers, e.g. page.tsx's echo-avoidance pause
@@ -290,6 +426,7 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
   // ending an active continuous-conversation session.
   const pause = useCallback(() => {
     wantListening.current = false
+    stopServerSttLoop()
     const rec = recRef.current
     recRef.current = null
     if (rec) {
@@ -300,7 +437,7 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
       }
     }
     setState((s) => ({ ...s, listening: false, interim: '' }))
-  }, [])
+  }, [stopServerSttLoop])
 
   const stop = useCallback(() => {
     conversationModeRef.current = false
@@ -312,6 +449,11 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
   useEffect(() => {
     return () => {
       wantListening.current = false
+      serverModeRef.current = false
+      serverStreamRef.current?.getTracks().forEach((t) => t.stop())
+      serverStreamRef.current = null
+      serverAudioCtxRef.current?.close().catch(() => {})
+      serverAudioCtxRef.current = null
       try {
         recRef.current?.abort()
       } catch {
@@ -326,87 +468,18 @@ export function useVoice({ onCommand, onWake, onTranscript, onConversationEnd }:
   return { state, start, stop, pause, setAwake, startConversationMode, stopConversationMode }
 }
 
-let cachedVoice: SpeechSynthesisVoice | null = null
+// Browser Web Speech API TTS used to back a "speak locally" fallback for
+// when NeuTTS (the real neural voice) was unreachable. Removed: the OS-level
+// synthetic voice it produced (a "hard rugged metallic male voice" on this
+// machine) has nothing to do with NeuTTS's British female voice, and there's
+// no way to make speechSynthesis actually use NeuTTS's voice model -- it's a
+// different synthesis engine entirely. nancySay() in page.tsx now degrades
+// silently (text only, no audio) if NeuTTS is unreachable, rather than ever
+// substituting a different-sounding voice.
 
-// Names known to be male — hard exclude so we never accidentally pick a male
-// voice (some browsers ship "Daniel" as the default en-GB voice).
-const MALE_NAME_RE =
-  /\b(male|man|boy|daniel|george|arthur|oliver|thomas|james|edward|nathan|david|mark|paul|alex|fred|guy|ralph|reed|rocko|aaron|tom|jorge|luca|matteo|diego|carlos)\b/i
-
-// Preferred female British voice tokens, in priority order.
-const FEMALE_GB_HINTS = [
-  /google uk english female/i,
-  /kate/i, /serena/i, /martha/i, /amy/i, /emma/i, /libby/i, /sonia/i,
-  /female/i, /woman/i, /girl/i,
-]
-
-function pickVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
-  const notMale = voices.filter((v) => !MALE_NAME_RE.test(v.name))
-  const enGB = notMale.filter((v) => v.lang?.toLowerCase().startsWith('en-gb'))
-  for (const hint of FEMALE_GB_HINTS) {
-    const v = enGB.find((x) => hint.test(x.name))
-    if (v) return v
-  }
-  // Any en-GB non-male voice.
-  if (enGB[0]) return enGB[0]
-  // Any en-* female voice.
-  const enFemale = notMale.find(
-    (v) => v.lang?.toLowerCase().startsWith('en') && /female|woman|girl|samantha|zira|ava/i.test(v.name),
-  )
-  if (enFemale) return enFemale
-  // Any en-* non-male voice.
-  return notMale.find((v) => v.lang?.toLowerCase().startsWith('en')) ?? null
-}
-
-// Initialize voice cache on load
-if (typeof window !== 'undefined' && window.speechSynthesis) {
-  const refresh = () => {
-    cachedVoice = pickVoice(window.speechSynthesis.getVoices())
-  }
-  refresh()
-  window.speechSynthesis.onvoiceschanged = refresh
-}
-
-export interface SpeakEvents {
-  onStart?: () => void
-  /** charIndex of the word about to be spoken. */
-  onBoundary?: (charIndex: number, wordLength: number) => void
-  onEnd?: () => void
-}
-
-export function speak(text: string, events: SpeakEvents = {}) {
-  if (typeof window === 'undefined' || !window.speechSynthesis) {
-    events.onStart?.()
-    // Approximate for environments without TTS: fire end after estimated time.
-    const ms = Math.min(14000, 900 + text.split(/\s+/).length * 320)
-    setTimeout(() => events.onEnd?.(), ms)
-    return
-  }
-
-  const synth = window.speechSynthesis
-  const utter = new SpeechSynthesisUtterance(text)
-
-  if (!cachedVoice) {
-    cachedVoice = pickVoice(synth.getVoices())
-  }
-  if (cachedVoice) utter.voice = cachedVoice
-  utter.lang = cachedVoice?.lang ?? 'en-GB'
-
-  utter.rate = 1.05
-  utter.pitch = 1.1
-  utter.volume = 1.0
-  utter.onstart = () => events.onStart?.()
-  utter.onboundary = (ev) => {
-    if (ev.name && ev.name !== 'word') return
-    events.onBoundary?.(ev.charIndex ?? 0, ev.charLength ?? 0)
-  }
-  utter.onend = () => events.onEnd?.()
-  utter.onerror = () => events.onEnd?.()
-  synth.cancel()
-  synth.speak(utter)
-}
-
-/** Cancel any in-flight speech immediately (used on interrupt). */
+/** Cancel any in-flight browser speech, if the API exists and something was
+ *  ever speaking through it. Safe no-op otherwise -- kept as a harmless
+ *  defensive call at every interrupt point in page.tsx. */
 export function cancelSpeech() {
   if (typeof window === 'undefined' || !window.speechSynthesis) return
   try { window.speechSynthesis.cancel() } catch { /* ignore */ }

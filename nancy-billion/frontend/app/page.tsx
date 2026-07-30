@@ -7,10 +7,11 @@ import { KnowledgePanel } from '@/components/nancy/knowledge-panel'
 import { TradingDeskPanel } from '@/components/nancy/trading-desk'
 import {
   CorePanel,
-  OverviewPanel,
   SystemPanel,
 } from '@/components/nancy/panels'
+import { OverviewV2Panel } from '@/components/nancy/overview-v2'
 import { MissionControlPanel } from '@/components/nancy/mission-control'
+import { PanelErrorBoundary } from '@/components/nancy/panel-error-boundary'
 import { ConsoleBar } from '@/components/nancy/console-bar'
 import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
 import { LyricsTranscript } from '@/components/nancy/lyrics-transcript'
@@ -21,7 +22,7 @@ import {
   KeysPanel, ConfigPanel, UsagePanel, PairingPanel, ProfilesPanel, PluginsPanel,
   WebhooksPanel, MemoryInsightsPanel, AchievementsPanel, ThemingPanel,
 } from '@/components/nancy/admin-panels'
-import { useVoice, speak, cancelSpeech } from '@/lib/nancy/use-voice'
+import { useVoice, cancelSpeech } from '@/lib/nancy/use-voice'
 import { parseCommand } from '@/lib/nancy/commands'
 import { TradingViewDialog } from '@/components/nancy/tradingview'
 import {
@@ -167,6 +168,34 @@ export default function Page() {
   const isPlayingQueueRef = useRef(false)
   const currentTurnIdRef = useRef<number | null>(null)
 
+  // ── Context bridge: report live UI state to /api/context so the backend
+  // can inject it into Nancy's system prompt (_live_context_bridge_context
+  // in main_new.py). Posts on real state changes (debounced) plus a 10s
+  // heartbeat -- the bridge's TTL store expires at 15s, so the heartbeat is
+  // what keeps bridge_status honest while the dashboard is simply open.
+  const contextStateRef = useRef({ panel: null as PanelKey | null, speaking: false, thinking: false })
+  contextStateRef.current = { panel, speaking, thinking }
+  useEffect(() => {
+    let cancelled = false
+    const post = () => {
+      if (cancelled) return
+      const s = contextStateRef.current
+      fetch('/api/context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source: 'dashboard',
+          active_panel: s.panel ?? 'voice-hero',
+          speaking: s.speaking,
+          thinking: s.thinking,
+        }),
+      }).catch(() => {}) // best-effort -- context is never worth surfacing an error for
+    }
+    const debounce = setTimeout(post, 400)
+    const heartbeat = setInterval(post, 10_000)
+    return () => { cancelled = true; clearTimeout(debounce); clearInterval(heartbeat) }
+  }, [panel, speaking, thinking])
+
   const log = useCallback((level: LogEntry['level'], text: string, imageBase64?: string) => {
     setLogs((prev) =>
       [...prev, { id: `l${logSeq++}`, ts: Date.now(), level, text, imageBase64 }].slice(-60),
@@ -234,6 +263,41 @@ export default function Page() {
     sfx.confirm()
   }, [])
 
+  /** Voice-first barge-in: hard-stop whatever Nancy is saying RIGHT NOW
+   *  (browser TTS, the current NeuTTS <audio>, and every queued chunk) and
+   *  drop back to listening. The existing speaking-state effect below
+   *  auto-resumes the mic the moment `speaking` flips false, so one call
+   *  here is the complete interrupt. Bound to the Escape key globally. */
+  const interruptSpeech = useCallback(() => {
+    cancelSpeech()
+    currentAudioRef.current?.pause()
+    currentAudioRef.current = null
+    audioQueueRef.current.forEach((a) => a.pause())
+    audioQueueRef.current = []
+    isPlayingQueueRef.current = false
+    setSpeakingAudioEl(null)
+    if (wordTimerRef.current) {
+      clearInterval(wordTimerRef.current)
+      wordTimerRef.current = null
+    }
+    // Invalidate the in-flight turn so any late streamed audio chunks from
+    // it are discarded instead of resurrecting the interrupted speech.
+    currentTurnIdRef.current = null
+    setSpeaking(false)
+    setThinking(false)
+    setWordIndex(-1)
+    setCurrentUtterance('')
+  }, [])
+
+  // Esc = "stop talking, I'm speaking now" -- works anywhere on the page.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') interruptSpeech()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [interruptSpeech])
+
   const nancySay = useCallback(
     (text: string) => {
       // Interrupt any current speech cleanly first — prevents overlap glitches.
@@ -289,27 +353,14 @@ export default function Page() {
         return next
       }, 0)
 
-      // Fallback: browser Web Speech API (used if the backend's real neural
-      // voice — neu_tts.py — is unreachable or synthesis fails).
-      const speakLocally = () => {
-        speak(text, {
-          onStart: () => {
-            beginUtterance()
-            setWordIndex(0)
-          },
-          onBoundary: (charIndex) => {
-            let idx = 0
-            for (let i = 0; i < starts.length; i++) {
-              if (starts[i] <= charIndex) idx = i
-              else break
-            }
-            setWordIndex(idx)
-          },
-          onEnd: () => {
-            setSpeaking(false)
-            setWordIndex(-1)
-          },
-        })
+      // Degrade silently if the backend's real neural voice — neu_tts.py —
+      // is unreachable or synthesis fails: show the text (already logged
+      // above) with no audio, rather than substituting a differently-voiced
+      // fallback the user never asked to hear. See use-voice.ts for why the
+      // old browser Web Speech API fallback was removed.
+      const degradeSilently = () => {
+        setSpeaking(false)
+        setWordIndex(-1)
       }
 
       synthesizeSpeech(text)
@@ -353,14 +404,14 @@ export default function Page() {
           audio.addEventListener('ended', cleanup)
           audio.addEventListener('error', () => {
             cleanup()
-            speakLocally()
+            degradeSilently()
           })
           audio.play().catch(() => {
             cleanup()
-            speakLocally()
+            degradeSilently()
           })
         })
-        .catch(() => speakLocally())
+        .catch(() => degradeSilently())
     },
     [log],
   )
@@ -1120,6 +1171,9 @@ function WorkspaceLayout({
         </div>
 
         <div className="relative flex-1 overflow-hidden">
+          {/* key={panel}: navigating to another panel resets the boundary,
+              so one bad panel never traps the user on its error card. */}
+          <PanelErrorBoundary key={panel} panelName={TITLE[panel] ?? String(panel)}>
           {isMap ? (
             <div className="absolute inset-0">
               <MapPanel place={place} loading={mapLoading} onLocate={onLocate} autoStartTracking={trackTrigger} />
@@ -1138,7 +1192,7 @@ function WorkspaceLayout({
             </div>
           ) : (
             <div className="absolute inset-0 overflow-y-auto px-4 py-4 pb-10 md:px-8 md:py-6">
-              {panel === 'overview' && <OverviewPanel onNavigate={onNav} />}
+              {panel === 'overview' && <OverviewV2Panel onNavigate={onNav} />}
               {panel === 'market' && <TradingDeskPanel />}
               {panel === 'core' && <CorePanel />}
               {panel === 'agents' && <MissionControlPanel />}
@@ -1165,6 +1219,7 @@ function WorkspaceLayout({
               {panel === 'docs' && <DocsHelpPanel />}
             </div>
           )}
+          </PanelErrorBoundary>
         </div>
       </div>
     </div>

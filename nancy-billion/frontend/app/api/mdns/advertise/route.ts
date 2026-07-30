@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server'
+import { BACKEND_URL as BACKEND, backendHeaders } from '@/lib/nancy/backend-server'
 
-const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 export async function POST() {
   try {
-    const res = await fetch(`${BACKEND}/mdns/advertise`, { method: 'POST' })
+    const res = await fetch(`${BACKEND}/mdns/advertise`, { headers: backendHeaders(), method: 'POST' })
     const json = await res.json().catch(() => ({}))
     return NextResponse.json(json, { status: res.status })
   } catch {

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#05080e">
+<title>Billion</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#05080e;color:#e2e8f0;
+       font-family:ui-monospace,SFMono-Regular,Consolas,monospace;-webkit-tap-highlight-color:transparent}
+  #app{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+       padding:32px 24px calc(32px + env(safe-area-inset-bottom));gap:4px;text-align:center}
+  .ring{width:104px;height:104px;border-radius:50%;border:2px solid rgba(64,224,255,.22);
+        border-top-color:#40e0ff;animation:spin 1.7s linear infinite;margin-bottom:22px;
+        box-shadow:0 0 42px rgba(64,224,255,.24), inset 0 0 30px rgba(64,224,255,.1)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  h1{font-size:15px;letter-spacing:5px;color:#40e0ff;margin:0 0 10px;font-weight:600}
+  p{font-size:12px;line-height:1.6;color:#64748b;margin:0 0 4px;max-width:340px}
+  .hint{color:#475569;font-size:11px}
+  form{margin-top:26px;width:100%;max-width:340px;display:flex;flex-direction:column;gap:10px}
+  input{width:100%;padding:13px 14px;border-radius:11px;font:inherit;font-size:14px;
+        background:rgba(15,23,42,.85);border:1px solid rgba(64,224,255,.28);color:#e2e8f0;outline:none}
+  input:focus{border-color:#40e0ff;box-shadow:0 0 0 3px rgba(64,224,255,.12)}
+  button{width:100%;padding:13px 14px;border-radius:11px;font:inherit;font-size:13px;font-weight:600;
+         letter-spacing:1.5px;border:none;cursor:pointer;color:#05080e;
+         background:linear-gradient(135deg,#40e0ff,#22d3ee)}
+  button:active{opacity:.82}
+  button.ghost{background:none;color:#64748b;border:1px solid rgba(100,116,139,.35);font-weight:400;letter-spacing:.5px}
+  .err{color:#f87171;font-size:11.5px;min-height:16px;margin-top:2px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="ring"></div>
+  <h1>B I L L I O N</h1>
+  <p id="msg">Looking for your control room…</p>
+  <p class="hint" id="hint"></p>
+</div>
+
+<script>
+// Billion mobile shell.
+//
+// The app itself is the Next.js control room, which runs on the user's own
+// machine -- so the only thing this shell has to solve is "which machine?".
+// It tries every host it already knows about, and only asks if none answer.
+// Once a host answers it is remembered, so this screen is a one-time thing.
+const KEY = 'billion.host'
+const PORT = 3005
+const app = document.getElementById('app')
+const msg = document.getElementById('msg')
+const hint = document.getElementById('hint')
+
+const normalise = (raw) => {
+  let h = String(raw || '').trim()
+  if (!h) return ''
+  if (!/^https?:\/\//i.test(h)) h = 'http://' + h
+  h = h.replace(/\/+$/, '')
+  // Bare host with no port -> assume the control room's default port.
+  if (!/:\d+$/.test(h.replace(/^https?:\/\//i, ''))) h += ':' + PORT
+  return h
+}
+
+const alive = async (host) => {
+  try {
+    const ctl = new AbortController()
+    const t = setTimeout(() => ctl.abort(), 2200)
+    // no-cors still resolves for a reachable origin, which is all we need.
+    await fetch(host + '/', { mode: 'no-cors', signal: ctl.signal, cache: 'no-store' })
+    clearTimeout(t)
+    return true
+  } catch { return false }
+}
+
+const go = (host) => {
+  localStorage.setItem(KEY, host)
+  location.replace(host)
+}
+
+// Candidate hosts, best guess first: the one that worked last time, anything
+// baked in at build time, then the usual emulator loopbacks.
+const candidates = () => {
+  const list = []
+  const saved = localStorage.getItem(KEY)
+  if (saved) list.push(saved)
+  const baked = (window.BILLION_HOST || '').trim()
+  if (baked) list.push(normalise(baked))
+  list.push('http://10.0.2.2:' + PORT)     // Android emulator -> host machine
+  list.push('http://localhost:' + PORT)    // iOS simulator -> host machine
+  return [...new Set(list.filter(Boolean))]
+}
+
+const ask = (prefill, error) => {
+  app.innerHTML = `
+    <div class="ring" style="animation-play-state:paused;opacity:.5"></div>
+    <h1>B I L L I O N</h1>
+    <p>Point this app at the machine running your control room.</p>
+    <form id="f">
+      <input id="h" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
+             placeholder="192.168.1.42" value="${(prefill || '').replace(/"/g, '&quot;')}">
+      <div class="err">${error || ''}</div>
+      <button type="submit">CONNECT</button>
+      <button type="button" class="ghost" id="retry">Scan known hosts again</button>
+    </form>
+    <p class="hint">Find it with <b>ipconfig</b> on Windows or <b>ifconfig</b> on macOS/Linux.
+       Port ${PORT} is assumed unless you type one.</p>`
+  const input = document.getElementById('h')
+  document.getElementById('retry').onclick = () => boot()
+  document.getElementById('f').onsubmit = async (e) => {
+    e.preventDefault()
+    const host = normalise(input.value)
+    if (!host) return
+    msg && (msg.textContent = '')
+    const btn = e.target.querySelector('button[type=submit]')
+    btn.textContent = 'CHECKING…'
+    btn.disabled = true
+    if (await alive(host)) return go(host)
+    ask(input.value, "Nothing answered there. Is the stack up? (docker compose up -d)")
+  }
+  setTimeout(() => input.focus(), 120)
+}
+
+const boot = async () => {
+  app.innerHTML = `<div class="ring"></div><h1>B I L L I O N</h1>
+    <p id="msg">Looking for your control room…</p><p class="hint" id="hint"></p>`
+  const m = document.getElementById('msg'), h = document.getElementById('hint')
+  const hosts = candidates()
+  for (const host of hosts) {
+    h.textContent = host.replace(/^https?:\/\//, '')
+    if (await alive(host)) return go(host)
+  }
+  const saved = localStorage.getItem(KEY) || ''
+  ask(saved.replace(/^https?:\/\//, ''), saved ? 'Last known host is offline.' : '')
+}
+
+boot()
+</script>
+</body>
+</html>

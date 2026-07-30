@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Billion terminal launcher for macOS and Linux.
+#
+#   ./billion                      interactive
+#   ./billion "how's my disk"      one-shot
+#
+# The CLI is a client -- it needs the stack running. If nothing is answering on
+# port 8000 this offers to start it rather than dropping you into a dead prompt.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+PY="$(command -v python3 || command -v python || true)"
+if [ -z "$PY" ]; then
+  echo "  Python was not found on PATH. Install it and reopen this shell." >&2
+  exit 1
+fi
+
+healthy() { curl -sf --max-time 2 http://localhost:8000/health >/dev/null 2>&1; }
+
+if ! healthy; then
+  echo
+  echo "  Billion's backend isn't answering on port 8000."
+  read -r -p "  Start the stack now with docker compose? [Y/n] " reply
+  if [[ ! "${reply:-Y}" =~ ^[Nn] ]]; then
+    docker compose up -d || { echo "  Could not start the stack. Is Docker running?" >&2; exit 1; }
+    printf '  Waiting for the backend'
+    for _ in $(seq 1 60); do
+      healthy && break
+      printf '.'
+      sleep 2
+    done
+    echo
+    healthy || echo "  Still no answer. Check: docker compose logs -f backend"
+  fi
+fi
+
+exec "$PY" cli/billion.py "$@"

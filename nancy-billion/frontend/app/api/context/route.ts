@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { backendHeaders } from '@/lib/nancy/backend-server'
 import {
   getContextMeta,
   getLatestContext,
@@ -6,8 +7,20 @@ import {
   validateContextPayload,
 } from '@/app/lib/context-bridge'
 
-const BACKEND_BASE_URL = process.env.NANCY_BACKEND_BASE_URL ?? 'http://localhost:8000'
+// BACKEND_URL first: that's the server-only env var docker-compose.yml
+// actually sets (http://backend:8000 on the Compose network). This route
+// runs INSIDE the frontend container, where localhost:8000 is the frontend
+// itself, not the backend -- the exact silent-502 failure mode documented
+// in the README. NANCY_BACKEND_BASE_URL is kept as an override for
+// non-Docker setups that already used it; NEXT_PUBLIC_BACKEND_URL and the
+// localhost default make native `next dev` on the host keep working.
+const BACKEND_BASE_URL =
+  process.env.BACKEND_URL ??
+  process.env.NANCY_BACKEND_BASE_URL ??
+  process.env.NEXT_PUBLIC_BACKEND_URL ??
+  'http://localhost:8000'
 const BACKEND_CONTEXT_PATH = process.env.NANCY_BACKEND_CONTEXT_PATH ?? '/context'
+const BACKEND_FORWARD_TIMEOUT_MS = 3_000
 
 const RATE_LIMIT = {
   windowMs: 10_000,
@@ -16,6 +29,14 @@ const RATE_LIMIT = {
 
 // In-memory per-process limiter. If you run multiple Next instances, replace with Redis.
 const limiter = new Map<string, { windowStart: number; count: number }>()
+
+// Prune limiter entries whose window has long expired so the Map doesn't
+// grow unboundedly across many distinct client IPs.
+function pruneLimiter(now: number) {
+  for (const [key, entry] of limiter) {
+    if (now - entry.windowStart > RATE_LIMIT.windowMs * 2) limiter.delete(key)
+  }
+}
 
 function getClientKey(request: Request): string {
   // Best-effort. In production you should trust X-Forwarded-For only from your reverse proxy.
@@ -26,6 +47,7 @@ function getClientKey(request: Request): string {
 function rateLimited(request: Request): boolean {
   const key = getClientKey(request)
   const now = Date.now()
+  pruneLimiter(now)
 
   const entry = limiter.get(key) ?? { windowStart: now, count: 0 }
   if (now - entry.windowStart > RATE_LIMIT.windowMs) {
@@ -72,12 +94,14 @@ export async function POST(request: Request) {
     const backendUrl = `${BACKEND_BASE_URL}${BACKEND_CONTEXT_PATH}`
     let backend: { ok: boolean; status?: number; error?: string } = { ok: false }
 
-    // Best-effort forward.
+    // Best-effort forward, with a hard timeout so a hung backend can never
+    // stall the UI's context POSTs (the local store above already succeeded).
     try {
       const res = await fetch(backendUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: backendHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ ...mergedPayload, receivedAt: new Date().toISOString() }),
+        signal: AbortSignal.timeout(BACKEND_FORWARD_TIMEOUT_MS),
       })
 
       if (!res.ok) {

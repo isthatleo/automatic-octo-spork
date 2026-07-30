@@ -13,9 +13,40 @@ const DOMAIN_EVENT_TYPES = new Set<DomainEventType>([
   'CANVAS_ITEM_ADDED', 'CANVAS_ITEM_UPDATED', 'CANVAS_ITEM_REMOVED',
 ])
 
-const WS_URL =
-  process.env.NEXT_PUBLIC_BACKEND_WS_URL ??
-  `${(process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000').replace(/^http/, 'ws')}/ws`
+// The socket is the one thing that can't go through the same-origin proxy the
+// REST calls use, so it still connects to the backend directly. Two changes
+// from the old hardcoded localhost:8000: the host now defaults to whatever
+// host served this page (so it works from a phone, where `localhost` is the
+// phone), and if the backend requires auth we fetch a short-lived single-use
+// ticket through the authenticated proxy rather than putting the real token
+// in a URL.
+const WS_URL = (() => {
+  const explicit = process.env.NEXT_PUBLIC_BACKEND_WS_URL
+  if (explicit) return explicit
+  const base = process.env.NEXT_PUBLIC_BACKEND_URL
+  if (base) return `${base.replace(/^http/, 'ws')}/ws`
+  if (typeof window === 'undefined') return 'ws://localhost:8000/ws'
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const port = process.env.NEXT_PUBLIC_BACKEND_PORT ?? '8000'
+  return `${proto}://${window.location.hostname}:${port}/ws`
+})()
+
+/** Ask the proxy for a WS ticket. Empty string means auth isn't enabled. */
+async function wsTicket(): Promise<string> {
+  try {
+    const res = await fetch('/api/backend/auth/ws-ticket', { method: 'POST', cache: 'no-store' })
+    if (!res.ok) return ''
+    const data = (await res.json()) as { auth_required?: boolean; ticket?: string }
+    return data.auth_required ? (data.ticket ?? '') : ''
+  } catch {
+    return ''
+  }
+}
+
+async function wsUrlWithAuth(): Promise<string> {
+  const ticket = await wsTicket()
+  return ticket ? `${WS_URL}?ticket=${encodeURIComponent(ticket)}` : WS_URL
+}
 
 /** Callbacks for one streaming chat turn -- see askNancyStreaming(). */
 export interface TurnHandlers {
@@ -125,7 +156,10 @@ function connect(): Promise<WebSocket> {
   if (connecting) return connecting
 
   connecting = new Promise((resolve, reject) => {
-    const ws = new WebSocket(WS_URL)
+    // Ticket first, then open. Tickets are single-use and expire in a minute,
+    // so this runs on every (re)connect rather than being cached.
+    wsUrlWithAuth().then((url) => {
+    const ws = new WebSocket(url)
 
     ws.onopen = () => {
       socket = ws
@@ -260,6 +294,12 @@ function connect(): Promise<WebSocket> {
         }, 5000)
       }
     }
+    }).catch((err) => {
+      // Couldn't even mint a ticket -- surface it as a connection failure
+      // rather than leaving the promise pending forever.
+      connecting = null
+      reject(err instanceof Error ? err : new Error('WebSocket setup failed'))
+    })
   })
 
   return connecting

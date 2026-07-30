@@ -1,0 +1,37 @@
+{
+  // F5 targets. The stack normally runs in Docker (Ctrl+Shift+B); these are
+  // for when you want a debugger attached to something specific.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Billion: terminal chat (CLI)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/cli/billion.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "BILLION_BACKEND_URL": "http://localhost:8000"
+      }
+    },
+    {
+      "name": "Billion: backend (no Docker)",
+      "detail": "Runs the API directly — needs backend deps installed locally",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["main_new:app", "--reload", "--host", "0.0.0.0", "--port", "8000"],
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "envFile": "${workspaceFolder}/backend/.env"
+    },
+    {
+      "name": "Billion: tool-routing tests",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/test_tool_backend_order.py",
+      "console": "integratedTerminal"
+    }
+  ]
+}

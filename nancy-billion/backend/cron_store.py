@@ -76,6 +76,17 @@ class CronJob:
     # any caller that only knows the old two-field shape still shows
     # something sane instead of breaking.
     cron_expression: Optional[str] = None
+    # Real job chaining: job IDs to run IMMEDIATELY (not on their own
+    # schedule) the moment THIS job completes successfully -- the real
+    # "job A feeds job B" pattern. When chain_input_key is set, this job's
+    # own real result text is injected into each chained job's
+    # action_payload under that key before it runs (e.g. a run_script job
+    # with chain_input_key="text" chained to a telegram_message job means
+    # the script's real output becomes that message's text). A chained job
+    # still runs its OWN action_type logic -- chaining only controls WHEN
+    # it fires and what real data it's handed, not what it does.
+    chain_to: list[str] = field(default_factory=list)
+    chain_input_key: Optional[str] = None
 
     def next_run(self) -> str:
         now = datetime.now()
@@ -135,9 +146,13 @@ class CronStore:
     def list(self) -> list[CronJob]:
         return sorted(self._jobs.values(), key=lambda j: (j.hour, j.minute))
 
+    def get(self, job_id: str) -> Optional[CronJob]:
+        return self._jobs.get(job_id)
+
     def create(self, name: str, description: str, hour: int, minute: int,
                action_type: ActionType, action_payload: dict,
-               cron_expression: Optional[str] = None) -> CronJob:
+               cron_expression: Optional[str] = None,
+               chain_to: Optional[list[str]] = None, chain_input_key: Optional[str] = None) -> CronJob:
         if cron_expression:
             croniter(cron_expression)  # raises ValueError on bad syntax -- fail at creation, not at every tick
         job = CronJob(
@@ -149,8 +164,19 @@ class CronStore:
             action_type=action_type,
             action_payload=action_payload,
             cron_expression=cron_expression,
+            chain_to=chain_to or [],
+            chain_input_key=chain_input_key,
         )
         self._jobs[job.id] = job
+        self._save()
+        return job
+
+    def update_chain(self, job_id: str, chain_to: list[str], chain_input_key: Optional[str] = None) -> Optional[CronJob]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        job.chain_to = chain_to
+        job.chain_input_key = chain_input_key
         self._save()
         return job
 

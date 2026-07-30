@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server'
+import { BACKEND_URL as BACKEND, backendHeaders } from '@/lib/nancy/backend-server'
 
-const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   try {
-    const res = await fetch(`${BACKEND}/nodes/${encodeURIComponent(id)}/health`, { cache: 'no-store' })
+    const res = await fetch(`${BACKEND}/nodes/${encodeURIComponent(id)}/health`, { headers: backendHeaders(), cache: 'no-store' })
     const json = await res.json().catch(() => ({}))
     return NextResponse.json(json, { status: res.status })
   } catch {

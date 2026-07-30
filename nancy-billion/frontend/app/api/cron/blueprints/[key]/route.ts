@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
+import { BACKEND_URL as BACKEND, backendHeaders } from '@/lib/nancy/backend-server'
 
-const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 export async function POST(req: Request, { params }: { params: Promise<{ key: string }> }) {
   const { key } = await params
@@ -8,7 +8,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ key: st
     const body = await req.json().catch(() => ({}))
     const res = await fetch(`${BACKEND}/cron/blueprints/${encodeURIComponent(key)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: backendHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     })
     const json = await res.json().catch(() => ({}))

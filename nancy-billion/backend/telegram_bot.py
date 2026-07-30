@@ -68,6 +68,10 @@ class TelegramNotifier:
         self._chat_handler: Optional[ChatHandler] = None
         self._image_broadcaster: Optional[Callable[[bytes, str], Awaitable[None]]] = None
         self._load_error: Optional[str] = None
+        # In-flight chat turns spawned off the poll loop. Held in a set purely
+        # so the event loop keeps a strong reference -- asyncio only keeps a
+        # weak one, so an un-stored task can be garbage-collected mid-turn.
+        self._inflight: set["asyncio.Task"] = set()
         if not self.token or not self.chat_id:
             self._load_error = "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not configured"
 
@@ -181,6 +185,13 @@ class TelegramNotifier:
                     "/getUpdates",
                     params={"offset": self._last_update_id + 1, "timeout": 25},
                 )
+                # A non-200 (commonly a 409 when a second poller overlaps
+                # during a restart) yields no results, and without this the
+                # loop would immediately re-request in a tight spin.
+                if resp.status_code != 200:
+                    logger.warning("Telegram getUpdates returned %s; backing off", resp.status_code)
+                    await asyncio.sleep(5)
+                    continue
                 data = resp.json()
                 for update in data.get("result", []):
                     self._last_update_id = max(self._last_update_id, update["update_id"])
@@ -191,19 +202,26 @@ class TelegramNotifier:
                         continue  # ignore anyone but the configured user
                     text = (message.get("text") or "").strip()
                     if text:
-                        await self._handle_reply(text)
+                        self._dispatch(text)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.warning("Telegram poll error: %s", e)
                 await asyncio.sleep(5)
 
-    async def _handle_reply(self, text: str) -> None:
+    def _dispatch(self, text: str) -> None:
+        """Route one incoming message without ever blocking the poll loop.
+
+        This is load-bearing. An approval reply can ONLY be resolved from this
+        loop, while a chat turn that hits a gated tool blocks waiting for that
+        very reply -- so awaiting the chat handler inline deadlocked every
+        gated action: the prompt arrived, "yes" was never read, and the request
+        timed out into a denial with nothing in the logs to explain it.
+        Approvals stay inline (they resolve a Future and return immediately);
+        chat turns go to a background task so the loop gets straight back to
+        getUpdates.
+        """
         lowered = text.lower()
-        # Only consume a bare "yes"/"no" as an approval reply if something is
-        # actually pending -- otherwise casual chat like "no thanks" or "yes,
-        # go on" would be silently swallowed instead of reaching the chat
-        # handler.
         if self._pending_approvals:
             if lowered in ("yes", "y", "approve", "approved"):
                 self._resolve_oldest_pending(True)
@@ -212,7 +230,22 @@ class TelegramNotifier:
                 self._resolve_oldest_pending(False)
                 return
 
-        # Not an approval reply -- treat it as a chat message.
+        task = asyncio.get_event_loop().create_task(self._handle_reply(text))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+        task.add_done_callback(self._log_task_error)
+
+    @staticmethod
+    def _log_task_error(task: "asyncio.Task") -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Telegram chat turn failed: %s", exc, exc_info=exc)
+
+    async def _handle_reply(self, text: str) -> None:
+        # Approval replies are consumed by _dispatch before they ever reach
+        # here, so anything arriving at this point is a chat message.
         if self._chat_handler is None:
             await self.send("Chat isn't connected yet on this deployment.")
             return
@@ -222,6 +255,14 @@ class TelegramNotifier:
         except Exception as e:
             logger.error("Telegram chat handler failed: %s", e)
             await self.send("Sorry, I hit an error working on that.")
+            return
+
+        # A provider can return a successful-but-empty response. Telegram
+        # rejects an empty `text` with a 400, which send() swallows -- so the
+        # symptom was no reply at all, with nothing to explain it.
+        if not (reply or "").strip():
+            logger.warning("Chat handler returned an empty reply for: %.80s", text)
+            await self.send("I didn't get a usable answer to that one, Sir. Try rephrasing?")
             return
 
         # Only attach an image for location/map-style queries -- not every reply.

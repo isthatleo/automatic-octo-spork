@@ -8,6 +8,15 @@ Every request must carry the shared secret in X-Node-Secret -- there is no
 other auth here, so this should only ever be run on a private/trusted
 network, matching how a paired device is expected to be used (LAN, VPN,
 or an SSH tunnel), never exposed directly to the public internet.
+
+Extra dependencies this file needs, NOT in backend/requirements.txt (this
+runs natively on the Windows node, never inside the Linux backend
+container, so it has its own footprint): `pip install pywinauto pywin32`.
+Without pywinauto specifically, /list_elements and /click_element (the
+numbered-overlay computer-use tools) fail with "No module named
+'pywinauto'" -- everything else in this file (screenshots, mouse/keyboard,
+clipboard, open_application) only needs pywin32, which most Windows Python
+installs already have.
 """
 from __future__ import annotations
 
@@ -158,6 +167,236 @@ async def clipboard_write_route(req: ClipboardWriteRequest, x_node_secret: Optio
     try:
         import pyperclip
         pyperclip.copy(req.text)
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+####################################################################
+# Real computer-use: numbered-element overlays + mouse/keyboard input.
+# Uses pywinauto (UI Automation backend) + pywin32 -- NOT part of the
+# Docker backend's requirements.txt (this script runs standalone on the
+# real Windows desktop, its own separate dependency footprint). Install
+# with `pip install pywinauto pywin32` on the node machine; every endpoint
+# below degrades to a real, honest error if they're missing rather than
+# crashing the whole agent.
+####################################################################
+
+# In-memory cache of the last real element enumeration, keyed by the
+# number shown in the overlay -- click_element looks a number up here.
+# Ephemeral by design (a fresh list_elements call replaces it); numbers
+# are only ever meaningful against the overlay image they were rendered on.
+_last_elements: dict[int, dict] = {}
+
+# UI Automation control types worth offering as click targets -- excludes
+# purely structural/decorative types (Pane, Group, Custom, Separator, ...)
+# so the numbered list stays to genuinely actionable elements.
+_ACTIONABLE_TYPES = {
+    "Button", "Edit", "CheckBox", "RadioButton", "ComboBox", "Hyperlink",
+    "MenuItem", "TabItem", "ListItem", "TreeItem", "Text", "SplitButton",
+}
+
+
+def _foreground_window():
+    import win32gui
+    from pywinauto import Application
+
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        raise RuntimeError("No foreground window (desktop may be locked or nothing is focused).")
+    app = Application(backend="uia").connect(handle=hwnd)
+    return app.window(handle=hwnd), hwnd
+
+
+class ClickElementRequest(BaseModel):
+    number: int
+    background: bool = False
+
+
+class MouseMoveRequest(BaseModel):
+    x: int
+    y: int
+
+
+class MouseClickRequest(BaseModel):
+    x: Optional[int] = None
+    y: Optional[int] = None
+    button: str = "left"
+    double: bool = False
+
+
+class MouseScrollRequest(BaseModel):
+    amount: int = -3  # negative scrolls down, matches pyautogui's convention
+
+
+class KeyboardTypeRequest(BaseModel):
+    text: str
+
+
+class KeyboardKeyRequest(BaseModel):
+    key: str  # e.g. "enter", "tab", "ctrl+c" (pyautogui hotkey syntax)
+
+
+@app.post("/list_elements")
+async def list_elements(x_node_secret: Optional[str] = Header(None)):
+    """Real UI Automation enumeration of the foreground window's actionable
+    descendants -- the numbered-element-overlay pattern: each element gets
+    a stable number (cached in _last_elements) a subsequent click_element
+    call can target, plus a real screenshot with numbered boxes drawn on
+    top so a vision-capable caller can decide which number to click,
+    instead of guessing raw pixel coordinates."""
+    _check_secret(x_node_secret)
+    try:
+        import base64
+        import io
+        from PIL import ImageGrab, ImageDraw
+
+        win, hwnd = _foreground_window()
+        global _last_elements
+        _last_elements = {}
+        elements_out = []
+        number = 1
+        for el in win.descendants():
+            try:
+                info = el.element_info
+                control_type = info.control_type
+                if control_type not in _ACTIONABLE_TYPES:
+                    continue
+                if not el.is_visible():
+                    continue
+                rect = el.rectangle()
+                if rect.width() <= 0 or rect.height() <= 0:
+                    continue
+                name = (info.name or "").strip()[:80]
+                entry = {
+                    "number": number, "name": name, "control_type": control_type,
+                    "rect": [rect.left, rect.top, rect.right, rect.bottom],
+                }
+                elements_out.append(entry)
+                _last_elements[number] = {
+                    "center": (rect.left + rect.width() // 2, rect.top + rect.height() // 2),
+                    "hwnd": hwnd, "control": el,
+                }
+                number += 1
+                if number > 60:  # keep the overlay legible -- not every window needs a full audit
+                    break
+            except Exception:
+                continue  # one bad element (stale/inaccessible) shouldn't kill the whole enumeration
+
+        img = ImageGrab.grab()
+        draw = ImageDraw.Draw(img)
+        for entry in elements_out:
+            l, t, r, b = entry["rect"]
+            draw.rectangle([l, t, r, b], outline="red", width=2)
+            label = str(entry["number"])
+            draw.rectangle([l, max(0, t - 16), l + 8 + 8 * len(label), t], fill="red")
+            draw.text((l + 2, max(0, t - 15)), label, fill="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+
+        return {
+            "success": True, "elements": elements_out,
+            "overlay_image_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/click_element")
+async def click_element(req: ClickElementRequest, x_node_secret: Optional[str] = Header(None)):
+    """Real click on a numbered element from the most recent list_elements
+    call. `background=True` attempts a non-focus-stealing click via
+    PostMessage (real Windows technique -- works for classic Win32 controls
+    that process posted mouse messages, but many modern/UWP/Electron apps
+    ignore posted messages and need real input instead). Default
+    (background=False) uses pywinauto's real click_input -- moves the
+    actual cursor and steals focus, but works reliably everywhere; this is
+    the same real tradeoff computer_use_tool.py's local clicking already
+    has, not a new limitation."""
+    _check_secret(x_node_secret)
+    entry = _last_elements.get(req.number)
+    if entry is None:
+        return {"success": False, "error": f"No element numbered {req.number} -- call list_elements first (numbers don't persist across calls)."}
+    try:
+        if req.background:
+            import win32api
+            import win32con
+            import win32gui
+
+            hwnd = entry["hwnd"]
+            x, y = entry["center"]
+            rect = win32gui.GetWindowRect(hwnd)
+            local_x, local_y = x - rect[0], y - rect[1]
+            lparam = win32api.MAKELONG(local_x, local_y)
+            win32gui.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lparam)
+            win32gui.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lparam)
+            return {"success": True, "method": "background_postmessage"}
+        entry["control"].click_input()
+        return {"success": True, "method": "click_input"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/mouse_move")
+async def mouse_move(req: MouseMoveRequest, x_node_secret: Optional[str] = Header(None)):
+    _check_secret(x_node_secret)
+    try:
+        import pyautogui
+        pyautogui.moveTo(req.x, req.y)
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/mouse_click")
+async def mouse_click(req: MouseClickRequest, x_node_secret: Optional[str] = Header(None)):
+    _check_secret(x_node_secret)
+    try:
+        import pyautogui
+        kwargs = {"button": req.button}
+        if req.x is not None and req.y is not None:
+            kwargs["x"], kwargs["y"] = req.x, req.y
+        if req.double:
+            pyautogui.doubleClick(**kwargs)
+        else:
+            pyautogui.click(**kwargs)
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/mouse_scroll")
+async def mouse_scroll(req: MouseScrollRequest, x_node_secret: Optional[str] = Header(None)):
+    _check_secret(x_node_secret)
+    try:
+        import pyautogui
+        pyautogui.scroll(req.amount)
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/keyboard_type")
+async def keyboard_type(req: KeyboardTypeRequest, x_node_secret: Optional[str] = Header(None)):
+    _check_secret(x_node_secret)
+    try:
+        import pyautogui
+        pyautogui.write(req.text, interval=0.02)
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/keyboard_key")
+async def keyboard_key(req: KeyboardKeyRequest, x_node_secret: Optional[str] = Header(None)):
+    _check_secret(x_node_secret)
+    try:
+        import pyautogui
+        keys = [k.strip() for k in req.key.split("+")]
+        if len(keys) > 1:
+            pyautogui.hotkey(*keys)
+        else:
+            pyautogui.press(keys[0])
         return {"success": True}
     except Exception as e:
         return {"success": False, "error": str(e)}

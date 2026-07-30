@@ -7,6 +7,17 @@ export const ContextPayloadSchema = z
     bridgeStatus: z
       .enum(['connected', 'degraded', 'disconnected', 'unknown'])
       .optional(),
+    /** Where this context event came from (e.g. 'dashboard'). The backend's
+     * _live_context_bridge_context() reads this key by name. */
+    source: z.string().max(64).optional(),
+    /** The panel currently open in the control room ('voice-hero' when the
+     * user is in the panel-less voice-first mode). Read by name by the
+     * backend and injected into the live system prompt. */
+    active_panel: z.string().max(64).nullable().optional(),
+    /** Live voice-loop state so Nancy knows mid-conversation whether she is
+     * currently speaking or thinking when a background channel pings her. */
+    speaking: z.boolean().optional(),
+    thinking: z.boolean().optional(),
     environmental: z
       .object({
         lighting: z.string().optional(),

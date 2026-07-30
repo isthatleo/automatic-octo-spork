@@ -1,0 +1,28 @@
+{
+  "name": "billion-mobile",
+  "version": "1.0.0",
+  "description": "Billion — Sovereign AI OS mobile app (Android + iOS via Capacitor)",
+  "private": true,
+  "scripts": {
+    "setup": "npm install && npm run add:all && npm run assets && npm run sync",
+    "add:all": "node scripts/add-platforms.js",
+    "add:android": "cap add android",
+    "add:ios": "cap add ios",
+    "assets": "capacitor-assets generate --iconBackgroundColor #05080e --iconBackgroundColorDark #05080e --splashBackgroundColor #05080e --splashBackgroundColorDark #05080e",
+    "sync": "cap sync && node scripts/patch-native.js",
+    "open:android": "cap open android",
+    "open:ios": "cap open ios",
+    "run:android": "cap run android",
+    "run:ios": "cap run ios"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^6.2.0"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/core": "^6.2.0",
+    "@capacitor/ios": "^6.2.0",
+    "@capacitor/splash-screen": "^6.0.3"
+  }
+}

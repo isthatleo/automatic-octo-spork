@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
+import { BACKEND_URL as BACKEND, backendHeaders } from '@/lib/nancy/backend-server'
 
-const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 export async function POST(request: Request) {
   try {
@@ -9,7 +9,7 @@ export async function POST(request: Request) {
     if (!file) return NextResponse.json({ success: false, detail: 'file is required' }, { status: 400 })
     const forward = new FormData()
     forward.append('file', file)
-    const res = await fetch(`${BACKEND}/voice/reference`, { method: 'POST', body: forward })
+    const res = await fetch(`${BACKEND}/voice/reference`, { headers: backendHeaders(), method: 'POST', body: forward })
     const json = await res.json()
     return NextResponse.json(json, { status: res.status })
   } catch {
@@ -19,7 +19,7 @@ export async function POST(request: Request) {
 
 export async function DELETE() {
   try {
-    const res = await fetch(`${BACKEND}/voice/reference`, { method: 'DELETE' })
+    const res = await fetch(`${BACKEND}/voice/reference`, { headers: backendHeaders(), method: 'DELETE' })
     const json = await res.json()
     return NextResponse.json(json, { status: res.status })
   } catch {

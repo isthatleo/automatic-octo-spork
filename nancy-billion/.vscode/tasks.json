@@ -1,0 +1,191 @@
+{
+  // Billion — everything you need is on Ctrl+Shift+P → "Tasks: Run Task".
+  // "Billion: Start everything" is the default build task (Ctrl+Shift+B).
+  "version": "2.0.0",
+  "tasks": [
+    // ---------------------------------------------------------------- stack
+    {
+      // Brings the stack up, waits for the backend to actually answer, then
+      // opens the control room. The wait matters: compose returns as soon as
+      // the containers exist, which is several seconds before they serve.
+      "label": "Billion: Start everything",
+      "detail": "docker compose up -d, wait for health, open the control room",
+      "type": "shell",
+      "command": "for i in $(seq 1 60); do curl -sf http://localhost:8000/health >/dev/null && break; sleep 2; done; xdg-open http://localhost:3005",
+      "windows": {
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\wait-and-open.ps1"
+      },
+      "osx": {
+        "command": "for i in $(seq 1 60); do curl -sf http://localhost:8000/health >/dev/null && break; sleep 2; done; open http://localhost:3005"
+      },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "dependsOrder": "sequence",
+      "dependsOn": ["Billion: _compose-up"]
+    },
+    {
+      "label": "Billion: _compose-up",
+      "hide": true,
+      "type": "shell",
+      "command": "docker compose up -d",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Billion: Stop everything",
+      "detail": "docker compose down",
+      "type": "shell",
+      "command": "docker compose down",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Billion: Restart backend",
+      "detail": "Pick up backend code changes without touching the frontend",
+      "type": "shell",
+      "command": "docker compose restart backend",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Billion: Rebuild backend",
+      "detail": "Rebuild the image — needed after requirements.txt changes",
+      "type": "shell",
+      "command": "docker compose up -d --build backend",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Billion: Logs (backend)",
+      "detail": "Follow backend logs — this is where the tool loop reports which model took the turn",
+      "type": "shell",
+      "command": "docker compose logs -f backend",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Billion: Logs (everything)",
+      "type": "shell",
+      "command": "docker compose logs -f",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Billion: Health check",
+      "detail": "Is the stack actually answering?",
+      "type": "shell",
+      "command": "curl -s http://localhost:8000/health && echo && curl -s -o /dev/null -w 'frontend: %{http_code}\\n' http://localhost:3005/",
+      "windows": {
+        "command": "powershell -NoProfile -Command \"try { (Invoke-WebRequest -UseBasicParsing http://localhost:8000/health).Content } catch { 'backend: DOWN' }; try { 'frontend: ' + (Invoke-WebRequest -UseBasicParsing http://localhost:3005/).StatusCode } catch { 'frontend: DOWN' }\""
+      },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+
+    // ------------------------------------------------------------ interfaces
+    {
+      "label": "Billion: Open control room",
+      "detail": "The web UI at localhost:3005",
+      "type": "shell",
+      "command": "xdg-open http://localhost:3005",
+      "windows": { "command": "start http://localhost:3005" },
+      "osx": { "command": "open http://localhost:3005" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "silent", "panel": "shared", "close": true }
+    },
+    {
+      "label": "Billion: Terminal chat (CLI)",
+      "detail": "The Hermes-style terminal — chat, /model, /memory, /tools",
+      "type": "shell",
+      "command": "python cli/billion.py",
+      "windows": { "command": "python cli\\billion.py" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true, "focus": true }
+    },
+    {
+      "label": "Billion: Desktop app (dev)",
+      "detail": "Run the Electron shell straight from source — no packaging",
+      "type": "shell",
+      "command": "npm start",
+      "options": { "cwd": "${workspaceFolder}/desktop" },
+      "dependsOn": ["Billion: _desktop-deps"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Billion: _desktop-deps",
+      "hide": true,
+      "type": "shell",
+      "command": "npm install --no-audit --no-fund",
+      "options": { "cwd": "${workspaceFolder}/desktop" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "silent", "panel": "dedicated" }
+    },
+
+    // ---------------------------------------------------------------- builds
+    {
+      "label": "Billion: Build desktop app",
+      "detail": "Installer for whichever OS you're on — output lands in desktop/dist",
+      "type": "shell",
+      "command": "./scripts/build-apps.sh desktop",
+      "windows": { "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\build-apps.ps1 desktop" },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Billion: Build Android app",
+      "detail": "Generates mobile/android and opens Android Studio — press Run for the emulator",
+      "type": "shell",
+      "command": "./scripts/build-apps.sh android",
+      "windows": { "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\build-apps.ps1 android" },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Billion: Build iOS app (macOS only)",
+      "detail": "Generates mobile/ios and opens Xcode — press Run for the simulator",
+      "type": "shell",
+      "command": "./scripts/build-apps.sh ios",
+      "windows": { "command": "echo iOS apps can only be built on macOS with Xcode." },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Billion: Regenerate icons",
+      "detail": "Redraw every app icon from the reactor mark",
+      "type": "shell",
+      "command": "python scripts/gen_icons.py",
+      "windows": { "command": "python scripts\\gen_icons.py" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+
+    // ----------------------------------------------------------------- tests
+    {
+      "label": "Billion: Run tests",
+      "detail": "Tool-routing checks plus the integration/setup suites",
+      "type": "shell",
+      "command": "python backend/test_tool_backend_order.py && python test_setup.py",
+      "windows": { "command": "python backend\\test_tool_backend_order.py; if ($?) { python test_setup.py }" },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Billion: Check mobile shell",
+      "detail": "Headless check of the mobile app's host discovery (needs playwright)",
+      "type": "shell",
+      "command": "node mobile/www/test_shell.js",
+      "windows": { "command": "node mobile\\www\\test_shell.js" },
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    }
+  ]
+}

@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 try:
@@ -61,6 +61,7 @@ import file_access
 import subagent_factory
 import terminal_tool
 import skill_loader
+import conversation_log
 from mcp_client import mcp_manager, plugin_store
 from moa import run_moa
 from inbound_webhooks_store import inbound_webhook_store
@@ -738,6 +739,24 @@ MEMORY_TOOLS = [
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "search_conversation_history",
+        "description": (
+            "Full-text (FTS5) search over the VERBATIM log of every real past chat turn -- exact "
+            "words, not semantic similarity. Use when the user asks what was literally said/decided "
+            "('what exactly did I tell you about X', 'when did we last discuss Y') or when "
+            "search_memory's consolidated topics aren't specific enough. Returns matched snippets "
+            "with role, channel, and timestamp, best matches first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "description": "Default 10, max 30."},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 DIFF_TOOLS = [
@@ -773,6 +792,42 @@ NODE_TOOLS = [
                 "cwd": {"type": "string"},
             },
             "required": ["node_id", "command"],
+        },
+    },
+]
+
+# Host-only (see COMPUTER_ACTION_TOOLS dispatcher below): enumerate the
+# foreground window's actionable controls with a numbered overlay drawn on a
+# real screenshot, then click one by number instead of guessing raw pixel
+# coordinates -- the same pattern OpenClaw/Hermes-style computer-use tools
+# use, backed by real Windows UI Automation (node_agent_stub.py).
+NUMBERED_OVERLAY_TOOLS = [
+    {
+        "name": "list_screen_elements",
+        "description": (
+            "List the real actionable UI elements (buttons, links, fields, ...) in the foreground "
+            "window on the paired host machine, each assigned a number and drawn as a numbered box "
+            "on a fresh screenshot. Use this before click_numbered_element instead of guessing raw "
+            "screen coordinates. Read-only, no approval needed. Requires a registered host node."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "click_numbered_element",
+        "description": (
+            "Click the UI element with the given number, as returned by a prior list_screen_elements "
+            "call. Requires the user's explicit yes/no approval before it takes effect."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "number": {"type": "integer"},
+                "background": {
+                    "type": "boolean",
+                    "description": "Post the click without stealing keyboard focus. Only works for classic Win32 controls.",
+                },
+            },
+            "required": ["number"],
         },
     },
 ]
@@ -854,6 +909,7 @@ app.add_middleware(
 # this backend may end up reachable beyond localhost (LAN, tunnel, etc.).
 # ---------------------------------------------------------------------------
 from fastapi import Request, Depends
+import secrets
 import time as _time
 from collections import defaultdict, deque
 
@@ -930,6 +986,113 @@ async def rate_limit(request: Request) -> None:
     client_ip = request.client.host if request.client else "unknown"
     if not _rate_limiter.check(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded - slow down")
+
+
+# Routes that must stay reachable without the bearer token. Everything else is
+# covered by _enforce_auth below -- an allowlist rather than the previous
+# opt-in-per-route Depends(), because opting in per route left 73 of 184 HTTP
+# routes uncovered, and the gaps were not the harmless tail: POST /cron/jobs
+# (persistent script execution), POST /config/keys (writes provider keys), and
+# GET /memory/conversations/search (every word ever said to Billion) were all
+# in it. Adding a route now means it is protected by default.
+_AUTH_EXEMPT_PATHS = {
+    "/",                    # banner
+    "/health",              # container healthcheck, no data
+    "/system/health",       # dashboards + the CLI's reachability probe
+    "/docs", "/redoc", "/openapi.json",
+    "/config/public",       # advertises whether auth is on -- deliberately open
+    "/auth/check",          # lets a client test a token without side effects
+}
+
+# Prefixes exempt for their own reasons: inbound webhooks authenticate with a
+# per-hook HMAC signature instead of the bearer token (that IS their auth), and
+# static assets carry nothing sensitive.
+_AUTH_EXEMPT_PREFIXES = ("/webhooks/inbound/", "/static/")
+
+
+def _is_auth_exempt(path: str) -> bool:
+    return path in _AUTH_EXEMPT_PATHS or path.startswith(_AUTH_EXEMPT_PREFIXES)
+
+
+@app.middleware("http")
+async def _enforce_auth(request: Request, call_next):
+    """Blanket auth + rate limiting for every HTTP route.
+
+    A no-op while BACKEND_AUTH_TOKEN is empty, exactly as before -- so a
+    localhost-only setup is unchanged -- but once the token is set this is
+    what makes 'reachable from the network' safe, rather than relying on
+    every future route remembering to add Depends(require_auth).
+    """
+    path = request.url.path
+    if _is_auth_exempt(path):
+        return await call_next(request)
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not _rate_limiter.check(client_ip):
+        return JSONResponse({"detail": "Rate limit exceeded - slow down"}, status_code=429)
+
+    if _BACKEND_AUTH_TOKEN:
+        header = request.headers.get("authorization", "")
+        token = header[7:] if header.lower().startswith("bearer ") else ""
+        if not token:
+            # Same-origin browser calls can't set a header on an EventSource
+            # or a plain <img>, so a query param is accepted as a fallback.
+            token = request.query_params.get("token", "")
+        if not secrets.compare_digest(token, _BACKEND_AUTH_TOKEN):
+            _record_security_failure("rest_auth", f"Bad or missing bearer token on {path}")
+            return JSONResponse(
+                {"detail": "Missing or invalid Authorization bearer token"}, status_code=401
+            )
+
+    return await call_next(request)
+
+
+@app.get("/auth/check")
+async def auth_check(request: Request):
+    """Cheap 'is this token good?' probe for clients (the CLI's boot screen,
+    the mobile shell) that want to tell 'wrong token' apart from 'backend
+    down'. Exempt from the gate on purpose -- it reports, it doesn't grant."""
+    if not _BACKEND_AUTH_TOKEN:
+        return {"auth_required": False, "valid": True}
+    header = request.headers.get("authorization", "")
+    token = header[7:] if header.lower().startswith("bearer ") else request.query_params.get("token", "")
+    return {"auth_required": True, "valid": secrets.compare_digest(token, _BACKEND_AUTH_TOKEN)}
+
+
+# --- WebSocket tickets ------------------------------------------------------
+# A browser cannot set an Authorization header when opening a WebSocket, and
+# putting the real token in the URL would leak it into history and logs. So the
+# page asks the (already authenticated) Next proxy for a short-lived
+# single-use ticket and opens the socket with that instead.
+_WS_TICKET_TTL_S = 60.0
+_ws_tickets: Dict[str, float] = {}
+
+
+def _mint_ws_ticket() -> str:
+    now = _time.time()
+    for t, exp in list(_ws_tickets.items()):
+        if exp < now:
+            _ws_tickets.pop(t, None)
+    ticket = secrets.token_urlsafe(32)
+    _ws_tickets[ticket] = now + _WS_TICKET_TTL_S
+    return ticket
+
+
+def _redeem_ws_ticket(ticket: str) -> bool:
+    """Single use: a redeemed ticket is removed, so a captured URL is worthless
+    the moment the real client has connected."""
+    if not ticket:
+        return False
+    expiry = _ws_tickets.pop(ticket, None)
+    return expiry is not None and expiry >= _time.time()
+
+
+@app.post("/auth/ws-ticket")
+async def issue_ws_ticket():
+    """Behind the normal gate -- you need the token to get a ticket."""
+    if not _BACKEND_AUTH_TOKEN:
+        return {"auth_required": False, "ticket": ""}
+    return {"auth_required": True, "ticket": _mint_ws_ticket(), "expires_in": int(_WS_TICKET_TTL_S)}
 
 # Global loop reference for thread-safe async calls
 main_loop = None
@@ -1328,7 +1491,8 @@ def _live_context_bridge_context() -> str:
     if not context:
         return ""
     parts = ["Live UI context:"]
-    for key in ("active_panel", "panel", "active_suggestions", "channel", "source"):
+    for key in ("active_panel", "panel", "active_suggestions", "channel", "source",
+                "speaking", "thinking"):
         if key in context:
             parts.append(f"{key}={context[key]}")
     if context.get("environmental"):
@@ -1779,7 +1943,11 @@ _WANTS_TOOLS_RE = re.compile(
     # Household member profiles (create/list/delete_profile, enroll_profile_voice, who_is_speaking).
     r"(create|make|add|new|delete|remove) .{0,20}profile\w*|"
     r"who(\'s|s| is) (speaking|talking)\b|"
-    r"(this is|enroll) .{0,20}voice\b|remember (my|this) voice\b)\b",
+    r"(this is|enroll) .{0,20}voice\b|remember (my|this) voice\b|"
+    # Real numbered-element-overlay computer use (list_screen_elements /
+    # click_numbered_element) -- distinct from the raw-coordinate click_screen
+    # phrasing already matched above.
+    r"(numbered|labell?ed) element\w*|click (element|number)\b|screen element\w*)\b",
     re.IGNORECASE,
 )
 
@@ -1826,15 +1994,57 @@ def _wants_tools(user_text: str) -> bool:
 # fix for the fabrication risk is TOOL_RESULT_FIDELITY_INSTRUCTION (llm.py),
 # not the model choice -- a fallback that answers unreliably beats one that
 # doesn't answer at all.
+# Stands in for an env var on the one entry that doesn't have one.
+_OLLAMA_LOCAL_SENTINEL = "OLLAMA_LOCAL"
+
 TOOL_FALLBACK_BACKENDS = [
     ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "OPENROUTER_MODEL", "openrouter/auto", "OpenRouterLLM"),
     ("GROQ_API_KEY", "https://api.groq.com/openai/v1", "GROQ_MODEL", "llama-3.3-70b-versatile", "GroqLLM"),
     ("OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "OPENCODE_MODEL", "big-pickle", "OpenCodeLLM"),
+    ("OPENAI_API_KEY", "https://api.openai.com/v1", "OPENAI_MODEL", "gpt-4o-mini", "OpenAILLM"),
+    # Ollama Cloud speaks the OpenAI tool-calling dialect at /v1. Without this
+    # entry, picking a cloud Ollama model meant every tool-using turn was
+    # quietly handed to Claude instead -- the selection looked like it worked
+    # right up until you asked it to actually do something.
+    ("OLLAMA_CLOUD_API_KEY", "https://ollama.com/v1", "OLLAMA_CLOUD_MODEL", "gpt-oss:120b", "OllamaCloudLLM"),
+    # Local daemon: no key to read, so _tool_backend_key hands back a
+    # placeholder whenever a local Ollama is actually configured.
+    (_OLLAMA_LOCAL_SENTINEL, "", "OLLAMA_MODEL", "llama3.1", "OllamaLLM"),
 ]
+
+# The live chain reports a local daemon under either name depending on how it
+# was built, and both mean "the tool loop may talk to local Ollama".
+_TOOL_BACKEND_CLASS_ALIASES = {"OllamaAutoModelsLLM": "OllamaLLM"}
+
+
+def _tool_backend_key(env_var: str) -> Optional[str]:
+    """Resolve the API key for one tool-capable fallback entry.
+
+    Two entries can't just read their own env var: local Ollama has no key at
+    all, and Ollama Cloud is commonly configured under OLLAMA_API_KEY because
+    that's the name Ollama's own CLI writes.
+    """
+    if env_var == _OLLAMA_LOCAL_SENTINEL:
+        return "ollama" if os.getenv("OLLAMA_BASE_URL") else None
+    if env_var == "OLLAMA_CLOUD_API_KEY":
+        return os.getenv("OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY")
+    return os.getenv(env_var)
+
+
+def _tool_backend_base_url(env_var: str, base_url: str) -> str:
+    if env_var == _OLLAMA_LOCAL_SENTINEL:
+        return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/") + "/v1"
+    return base_url
+
+
+def _tool_backend_class(name: str) -> str:
+    return _TOOL_BACKEND_CLASS_ALIASES.get(name, name)
 
 
 def _any_tool_backend_configured() -> bool:
-    return bool(os.getenv("ANTHROPIC_API_KEY")) or any(os.getenv(env_var) for env_var, *_ in TOOL_FALLBACK_BACKENDS)
+    return bool(os.getenv("ANTHROPIC_API_KEY")) or any(
+        _tool_backend_key(env_var) for env_var, *_ in TOOL_FALLBACK_BACKENDS
+    )
 
 # Claude gets the full tool arsenal -- its context/rate limits comfortably
 # absorb it. The OpenAI-compatible fallbacks don't: live-tested this session,
@@ -2030,7 +2240,7 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
         + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
         + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS
         + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + google_calendar.CALENDAR_TOOLS + NODE_TOOLS + DIFF_TOOLS
-        + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS
+        + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS + NUMBERED_OVERLAY_TOOLS
     )
 
 
@@ -2573,6 +2783,12 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         suggestions = pattern_suggestions.get_new_suggestions(memory_manager.graph)
         return {"success": True, "suggestions": suggestions}
 
+    if name == "search_conversation_history":
+        results = conversation_log.search(
+            tool_input.get("query", ""), limit=int(tool_input.get("limit", 10))
+        )
+        return {"success": True, "results": results, "stats": conversation_log.stats()}
+
     if name in ("calculate", "convert_units", "convert_currency", "get_weather", "generate_password", "generate_qr_code", "shorten_url", "get_public_ip_info"):
         fn = getattr(everyday_tools, name)
         kwargs = {k: v for k, v in tool_input.items() if v is not None}
@@ -2637,9 +2853,53 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         )
         if not approved:
             return {"success": False, "error": "User did not approve this screen control action."}
-        loop = asyncio.get_event_loop()
-        fn = getattr(computer_use_tool, name)
-        return await loop.run_in_executor(None, lambda: fn(**tool_input))
+        # Same container-has-no-display problem as _open_application_dispatch:
+        # route to the paired host node when one is registered, otherwise fall
+        # back to local pyautogui (correct when this backend happens to be
+        # running natively rather than inside Docker).
+        if HOST_NODE_ID in node_host.list_nodes():
+            host_dispatch = {
+                "click_screen": lambda: node_host.dispatch_mouse_click(
+                    HOST_NODE_ID, x=tool_input.get("x"), y=tool_input.get("y"),
+                    button=tool_input.get("button", "left"), double=tool_input.get("double", False),
+                ),
+                "move_mouse": lambda: node_host.dispatch_mouse_move(
+                    HOST_NODE_ID, tool_input.get("x"), tool_input.get("y")
+                ),
+                "type_text": lambda: node_host.dispatch_keyboard_type(HOST_NODE_ID, tool_input.get("text", "")),
+                "press_key": lambda: node_host.dispatch_keyboard_key(HOST_NODE_ID, tool_input.get("key", "")),
+                "scroll_screen": lambda: node_host.dispatch_mouse_scroll(HOST_NODE_ID, tool_input.get("amount", -3)),
+            }
+            result = await host_dispatch[name]()
+        else:
+            loop = asyncio.get_event_loop()
+            fn = getattr(computer_use_tool, name)
+            result = await loop.run_in_executor(None, lambda: fn(**tool_input))
+        evidence_ledger.record_evidence(name, description, result.get("success", False))
+        return result
+
+    if name in ("list_screen_elements", "click_numbered_element"):
+        # Host-only -- Windows UI Automation enumeration has no meaning inside
+        # the display-less Docker container, unlike click_screen's pyautogui
+        # fallback above (pyautogui can still move a virtual/headless pointer;
+        # pywinauto's UIA backend genuinely has nothing to enumerate there).
+        if HOST_NODE_ID not in node_host.list_nodes():
+            return {"success": False, "error": "No host node registered -- numbered element control requires node_agent_stub.py running on the real desktop."}
+        if name == "list_screen_elements":
+            result = await node_host.dispatch_list_elements(HOST_NODE_ID)
+            evidence_ledger.record_evidence(name, "list foreground window elements", result.get("success", False))
+            return result
+        number = tool_input.get("number")
+        approved = await _request_approval(
+            f"Nancy wants to click numbered element #{number} on your screen", timeout=120.0
+        )
+        if not approved:
+            return {"success": False, "error": "User did not approve this screen control action."}
+        result = await node_host.dispatch_click_element(
+            HOST_NODE_ID, number, background=tool_input.get("background", False)
+        )
+        evidence_ledger.record_evidence(name, f"click element #{number}", result.get("success", False))
+        return result
 
     if name == "create_subagent":
         return await _execute_create_subagent_tool(tool_input)
@@ -2916,9 +3176,21 @@ def _enforce_sir(text: str) -> str:
     return _SIR_RE.sub("Sir", text)
 
 
-def _build_chat_prompt(user_text: str, history_text: str) -> str:
-    """Shared prompt assembly for both the blocking hierarchy path and the
-    streaming path below -- kept in one place so they can't silently drift."""
+def _build_chat_parts(user_text: str, history_text: str) -> tuple[str, str, str]:
+    """Shared prompt assembly, split into (static_system, dynamic_context,
+    user_turn) so backends that support a real system role can use it:
+
+    - static_system: BASE_SYSTEM_PROMPT alone -- byte-identical every turn,
+      which is exactly what makes Anthropic prompt caching effective (the
+      cache key is a prefix match; see llm.py's _anthropic_system_blocks).
+    - dynamic_context: live system/UI context, matched skills, detected
+      links, retrieved memories -- changes turn to turn, still system-role
+      material rather than something the "user said".
+    - user_turn: conversation history + this turn's user text.
+
+    _build_chat_prompt() below joins these back into the exact single-string
+    prompt the OpenAI-compat fallbacks and non-Claude backends always used,
+    so the two shapes can't silently drift."""
     skills_block = skill_loader.build_skill_prompt_block(user_text)
     links_block = ""
     detected_urls = extract_urls(user_text)
@@ -2933,10 +3205,28 @@ def _build_chat_prompt(user_text: str, history_text: str) -> str:
     except Exception as e:
         logger.debug("Memory context lookup failed, continuing without it: %s", e)
         memory_block = ""
-    return (
-        f"{BASE_SYSTEM_PROMPT}\n\n{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n"
-        f"{skills_block}\n\n{links_block}\n\n{memory_block}\n\n{history_text}\nuser: {user_text}\nassistant:"
+    dynamic_context = (
+        f"{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n"
+        f"{skills_block}\n\n{links_block}\n\n{memory_block}"
     )
+    user_turn = f"{history_text}\nuser: {user_text}\nassistant:"
+    return BASE_SYSTEM_PROMPT, dynamic_context, user_turn
+
+
+def _chat_system_blocks(static_system: str, dynamic_context: str) -> list:
+    """Anthropic system blocks: cacheable static persona first (llm.py adds
+    the actual cache_control marker), per-turn dynamic context second."""
+    blocks = [{"type": "text", "text": static_system}]
+    if dynamic_context.strip():
+        blocks.append({"type": "text", "text": dynamic_context})
+    return blocks
+
+
+def _build_chat_prompt(user_text: str, history_text: str) -> str:
+    """Single-string prompt for backends without a usable system role --
+    identical content to _build_chat_parts, just joined."""
+    static_system, dynamic_context, user_turn = _build_chat_parts(user_text, history_text)
+    return f"{static_system}\n\n{dynamic_context}\n\n{user_turn}"
 
 
 async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
@@ -2960,7 +3250,117 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
         active_manager.learn_from_response(user_text, response_text)
     except Exception:
         logger.exception("Memory extraction/learning failed for this turn")
+    # Verbatim FTS5 log -- same chokepoint reasoning as the memory graph
+    # above: every real caller goes through here, so every real turn is
+    # findable by exact text later (search_conversation_history tool).
+    conversation_log.log_turn("user", user_text)
+    conversation_log.log_turn("assistant", response_text)
+    # Solve → distill → reuse (Hermes-style): a turn that took several real
+    # tool calls to solve is a candidate for becoming a named, reusable
+    # skill. Fire-and-forget so distillation never adds latency to the
+    # actual reply; the human approval gate lives inside.
+    try:
+        if len(debug.get("tool_trace") or []) >= _DISTILL_MIN_TOOL_CALLS:
+            asyncio.create_task(_maybe_distill_skill(user_text, response_text, debug["tool_trace"]))
+    except Exception:
+        logger.exception("Skill-distillation scheduling failed (reply unaffected)")
     return response_text, debug
+
+
+# ---------------------------------------------------------------------------
+# Skill distillation -- the solve → distill → reuse loop (borrowed from
+# Hermes Agent's procedural-memory design). When a chat turn genuinely
+# required a multi-step tool procedure, ask Claude to distill the solution
+# path into a SKILL.md-shaped procedure, get real Telegram approval, and
+# save it via skill_loader.save_skill so match_skills() injects it into
+# future prompts. Guardrails: never fires when an existing skill already
+# matched this request (that skill was already injected -- re-distilling it
+# would just accumulate near-duplicates), never overwrites an existing
+# skill, and always goes through the same _request_approval chokepoint as
+# every other sensitive action.
+# ---------------------------------------------------------------------------
+_DISTILL_MIN_TOOL_CALLS = 2
+
+_DISTILL_PROMPT = """A user request was just solved using a sequence of real tool calls. Decide whether this solution path is a REUSABLE PROCEDURE worth saving as a named skill, i.e. the same kind of request is likely to recur and the tool sequence is not trivially obvious.
+
+User request: {user_text}
+
+Tool calls made (in order): {tool_trace}
+
+Final answer given (truncated): {response_text}
+
+If it is NOT worth saving (one-off request, trivial single-purpose lookup, or too situation-specific), respond with exactly: NO
+
+Otherwise respond with ONLY a JSON object (no prose, no markdown fences):
+{{"name": "short-kebab-case-name", "description": "one sentence: what this skill does", "trigger_keywords": ["3-6", "lowercase", "keywords"], "instructions": "Step-by-step procedure in imperative Markdown, referencing the tools by name, generalized (no user-specific values hardcoded)"}}"""
+
+
+async def _maybe_distill_skill(user_text: str, response_text: str, tool_trace: List[str]) -> None:
+    try:
+        # An existing skill already covered this request -- don't distill a
+        # near-duplicate of it. (Keyword scan directly rather than
+        # match_skills(), which would wrongly bump the usage telemetry for
+        # a match that never got injected into any prompt.)
+        text_lower = user_text.lower()
+        if any(kw in text_lower for s in skill_loader.list_skills() for kw in s.trigger_keywords):
+            return
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            return
+        claude = AnthropicLLM()
+        raw = await asyncio.wait_for(
+            claude.generate(
+                _DISTILL_PROMPT.format(
+                    user_text=user_text[:600],
+                    tool_trace="; ".join(tool_trace)[:1200],
+                    response_text=response_text[:600],
+                ),
+                max_tokens=800,
+            ),
+            timeout=30.0,
+        )
+        raw = raw.strip()
+        if raw.upper().startswith("NO"):
+            return
+        # Tolerate markdown fences / stray prose around the JSON object.
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return
+        try:
+            spec = json.loads(match.group(0))
+        except (json.JSONDecodeError, ValueError):
+            return
+        name = str(spec.get("name", "")).strip()
+        instructions = str(spec.get("instructions", "")).strip()
+        keywords = spec.get("trigger_keywords") or []
+        if not name or not instructions or not isinstance(keywords, list):
+            return
+        if skill_loader.get_skill(name):
+            return
+        approved = await _request_approval(
+            f"🧠 Billion wants to save a new skill distilled from the last task:\n\n"
+            f"Name: {name}\nDescription: {spec.get('description', '')}\n"
+            f"Triggers: {', '.join(str(k) for k in keywords[:6])}\n\n"
+            f"Procedure:\n{instructions[:700]}\n\nSave this skill?",
+            timeout=300.0,
+        )
+        if not approved:
+            logger.info("Skill distillation for '%s' not approved, discarding", name)
+            return
+        saved = skill_loader.save_skill(
+            name=name,
+            description=str(spec.get("description", "")),
+            trigger_keywords=[str(k) for k in keywords],
+            instructions=instructions,
+        )
+        if saved:
+            await telegram_notifier.send(
+                f"✅ Skill '{saved.name}' saved -- Billion will follow it automatically "
+                f"when a matching request comes in."
+            )
+    except asyncio.TimeoutError:
+        logger.info("Skill distillation LLM call timed out (reply was unaffected)")
+    except Exception:
+        logger.exception("Skill distillation failed (reply was unaffected)")
 
 
 async def _generate_response_via_hierarchy_impl(user_text: str) -> tuple[str, dict]:
@@ -2998,7 +3398,11 @@ async def _generate_response_via_hierarchy_impl(user_text: str) -> tuple[str, di
     fallback does.
     """
     history_text = _history_to_text()
-    prompt = _build_chat_prompt(user_text, history_text)
+    static_system, dynamic_context, user_turn = _build_chat_parts(user_text, history_text)
+    # Single-string shape for backends without a usable system role
+    # (OpenAI-compat tool fallbacks, plain-chat fallback chain) -- same
+    # content, just joined.
+    prompt = f"{static_system}\n\n{dynamic_context}\n\n{user_turn}"
 
     # Real tool-use, with a real multi-backend fallback chain. Claude is
     # tried first (richest: vision support in tool results, native
@@ -3019,6 +3423,19 @@ async def _generate_response_via_hierarchy_impl(user_text: str) -> tuple[str, di
 
         all_tools = _all_chat_tools()
 
+        # Real per-turn tool trace -- which tools ran, with what inputs
+        # (truncated). Feeds the solve → distill → reuse skill loop (see
+        # _maybe_distill_skill): a turn that took several real tool calls
+        # to solve is a candidate for becoming a named, reusable skill.
+        tool_trace: List[str] = []
+
+        async def _traced_tool_progress(name: str, tool_input: Dict[str, Any]) -> None:
+            try:
+                tool_trace.append(f"{name}({json.dumps(tool_input, default=str)[:200]})")
+            except Exception:
+                tool_trace.append(name)
+            await _broadcast_tool_progress(name, tool_input)
+
         # A real screenshot/canvas image a tool produces used to only ever
         # be shown to the model internally -- the human never actually saw
         # it in either the web UI or Telegram. Collected here so both
@@ -3026,40 +3443,101 @@ async def _generate_response_via_hierarchy_impl(user_text: str) -> tuple[str, di
         # _telegram_chat_handler).
         captured_images: List[bytes] = []
 
-        if os.getenv("ANTHROPIC_API_KEY"):
+        # RESPECT THE USER'S PICKED PRIMARY (/model, /llm/primary): if the
+        # live chain's front backend is one of the OpenAI-compat tool-capable
+        # providers (Groq/OpenRouter/OpenCode), it gets first crack at the
+        # tool loop and Claude becomes the fallback -- previously Claude was
+        # hardcoded first whenever ANTHROPIC_API_KEY existed, which silently
+        # ignored an explicit model selection for every tool-using turn.
+        _primary_cls = _tool_backend_class(
+            llm_backend.backends[0].__class__.__name__ if llm_backend.backends else ""
+        )
+        _compat_classes = {t[4] for t in TOOL_FALLBACK_BACKENDS}
+        claude_first = _primary_cls not in _compat_classes
+        ordered_fallbacks = sorted(
+            TOOL_FALLBACK_BACKENDS,
+            key=lambda t: 0 if t[4] == _primary_cls else 1,
+        )
+        logger.info(
+            "Tool loop order: %s (primary=%s)",
+            "Claude first" if claude_first else f"{_primary_cls} first",
+            _primary_cls or "none",
+        )
+
+        async def _try_claude_tools():
+            claude = AnthropicLLM()
+            resp = await asyncio.wait_for(
+                claude.generate_with_tools(
+                    user_turn, all_tools, _file_tool_executor, max_tokens=1024,
+                    on_tool_image=captured_images.append,
+                    on_tool_call=_traced_tool_progress,
+                    # Real system role + prompt caching: the static
+                    # persona prompt and the tool schemas are cached
+                    # across every round of this loop (and across
+                    # turns), instead of re-billed at full input price
+                    # inside a single 45s-budget call.
+                    system=_chat_system_blocks(static_system, dynamic_context),
+                ),
+                timeout=45.0,
+            )
+            return _enforce_sir(resp), {"tool_use": True, "tool_backend": "AnthropicLLM", "images": captured_images, "tool_trace": tool_trace}
+
+        if claude_first and os.getenv("ANTHROPIC_API_KEY"):
             try:
-                claude = AnthropicLLM()
-                resp = await asyncio.wait_for(
-                    claude.generate_with_tools(
-                        prompt, all_tools, _file_tool_executor, max_tokens=1024,
-                        on_tool_image=captured_images.append,
-                        on_tool_call=_broadcast_tool_progress,
-                    ),
-                    timeout=45.0,
-                )
-                return _enforce_sir(resp), {"tool_use": True, "tool_backend": "AnthropicLLM", "images": captured_images}
+                return await _try_claude_tools()
             except Exception as e:
                 logger.warning("Claude tool-use path failed, trying next tool-capable backend: %s", e)
 
         fallback_tools = _trim_tools_for_fallback(all_tools)
-        for env_var, base_url, model_env, model_default, label in TOOL_FALLBACK_BACKENDS:
-            api_key = os.getenv(env_var)
+        # The compat providers can't be handed the full ~35-tool schema list
+        # (it blows Groq's per-minute token cap outright), so they get a
+        # trimmed set. The catch: _WANTS_TOOLS_RE still routes "what's on my
+        # calendar" into this loop, the picked model has no calendar tool, and
+        # it answers from imagination -- reported to the UI as a real tool turn.
+        # If a compat backend finishes a tool-wanting turn WITHOUT calling a
+        # single tool, and tools were withheld from it, we don't trust the
+        # answer: Claude gets the turn with the full arsenal.
+        _withheld = {t.get("name") for t in all_tools} - {t.get("name") for t in fallback_tools}
+        _claude_available = bool(os.getenv("ANTHROPIC_API_KEY"))
+        for env_var, base_url, model_env, model_default, label in ordered_fallbacks:
+            api_key = _tool_backend_key(env_var)
             if not api_key:
                 continue
             try:
                 resp = await asyncio.wait_for(
                     generate_with_tools_openai_compat(
-                        base_url, api_key, os.getenv(model_env, model_default),
+                        _tool_backend_base_url(env_var, base_url), api_key,
+                        os.getenv(model_env, model_default),
                         prompt, fallback_tools, _file_tool_executor,
                         max_tokens=1024, provider_label=label,
                         on_tool_image=captured_images.append,
-                        on_tool_call=_broadcast_tool_progress,
+                        on_tool_call=_traced_tool_progress,
                     ),
                     timeout=45.0,
                 )
-                return _enforce_sir(resp), {"tool_use": True, "tool_backend": label, "images": captured_images}
+                if _withheld and not tool_trace and _claude_available:
+                    logger.info(
+                        "%s answered a tool-wanting turn without calling any tool, and %d tools "
+                        "were withheld from it -- handing this turn to Claude rather than trusting it",
+                        label, len(_withheld),
+                    )
+                    try:
+                        return await _try_claude_tools()
+                    except Exception as e:
+                        logger.warning(
+                            "Claude could not take over the turn (%s); using %s's answer", e, label
+                        )
+                return _enforce_sir(resp), {"tool_use": True, "tool_backend": label, "images": captured_images, "tool_trace": tool_trace}
             except Exception as e:
                 logger.warning("%s tool-use path failed, trying next tool-capable backend: %s", label, e)
+
+        # Non-Claude primary exhausted its compat providers -- Claude is
+        # still the strongest tool runner, so it stays as the last resort.
+        if not claude_first and os.getenv("ANTHROPIC_API_KEY"):
+            try:
+                return await _try_claude_tools()
+            except Exception as e:
+                logger.warning("Claude last-resort tool-use path failed too: %s", e)
 
     if agent_service.is_ready():
         try:
@@ -3173,13 +3651,21 @@ async def _generate_response_stream(user_text: str):
         yield {"kind": "meta", "debug": debug}
         return
 
-    if os.getenv("ANTHROPIC_API_KEY"):
-        prompt = _build_chat_prompt(user_text, history_text)
+    # Streaming is Claude-only (other backends don't stream), but ONLY when
+    # Claude is actually the user's live primary -- if /model picked another
+    # provider, fall through to the non-streaming chain below, which starts
+    # from that picked primary instead of silently overriding it.
+    _stream_primary = llm_backend.backends[0].__class__.__name__ if llm_backend.backends else ""
+    if os.getenv("ANTHROPIC_API_KEY") and _stream_primary in ("", "AnthropicLLM"):
+        static_system, dynamic_context, user_turn = _build_chat_parts(user_text, history_text)
         try:
             claude = AnthropicLLM()
             got_any = False
             full_text = ""
-            async for delta in claude.generate_stream(prompt, max_tokens=512, temperature=0.7):
+            async for delta in claude.generate_stream(
+                user_turn, max_tokens=512, temperature=0.7,
+                system=_chat_system_blocks(static_system, dynamic_context),
+            ):
                 got_any = True
                 full_text += delta
                 yield {"kind": "delta", "text": delta}
@@ -3197,6 +3683,10 @@ async def _generate_response_stream(user_text: str):
                     active_manager.learn_from_response(user_text, full_text)
                 except Exception:
                     logger.exception("Memory extraction/learning failed for this streamed turn")
+                # Same verbatim FTS5 log as the wrapper path -- streamed
+                # turns bypass _generate_response_via_hierarchy entirely.
+                conversation_log.log_turn("user", user_text)
+                conversation_log.log_turn("assistant", full_text)
                 return
         except Exception as e:
             logger.warning("Streaming Claude call failed, falling back to non-streaming chain: %s", e)
@@ -3434,6 +3924,10 @@ class CronJobCreateRequest(BaseModel):
     # hour/minute when set. hour/minute stay required-by-default (0/0) for
     # backward compatibility with any existing caller still only sending those.
     cron_expression: Optional[str] = None
+    # Real job chaining -- see cron_store.CronJob's own docstring on these
+    # two fields for exactly how they interact.
+    chain_to: List[str] = []
+    chain_input_key: Optional[str] = None
 
 class WebhookCreateRequest(BaseModel):
     url: str
@@ -3779,8 +4273,27 @@ async def context_snapshot():
     return _context_bridge.snapshot()
 
 
+_CONTEXT_BRIDGE_STALE_S = 60.0
+
+
 def get_live_context_snapshot() -> Dict[str, Any]:
+    """Latest UI context, or {} once it has gone stale.
+
+    The dashboard heartbeats /context every ~10s while it's actually open
+    (see frontend app/page.tsx's context-bridge effect), so anything older
+    than a minute means the dashboard is gone -- injecting e.g. a stale
+    speaking=True from hours ago into the system prompt would be worse
+    than no context at all.
+    """
     snapshot = _context_bridge.snapshot()
+    updated_at = snapshot.get("updated_at")
+    if updated_at:
+        try:
+            age = (datetime.now() - datetime.fromisoformat(updated_at)).total_seconds()
+            if age > _CONTEXT_BRIDGE_STALE_S:
+                return {}
+        except (ValueError, TypeError):
+            return {}
     payload = snapshot.get("payload", {}) or {}
     return payload
 
@@ -3823,6 +4336,20 @@ async def get_projects():
         "success": True,
         "projects": projects,
         "count": len(projects)
+    }
+
+
+@app.get("/memory/conversations/search")
+async def search_conversation_history_rest(q: str, limit: int = 10):
+    """Verbatim FTS5 search over every logged chat turn -- the REST face of
+    the search_conversation_history chat tool (see conversation_log.py).
+    Exact-text recall with snippets, distinct from the semantic
+    /memory/search."""
+    return {
+        "success": True,
+        "query": q,
+        "results": conversation_log.search(q, limit=limit),
+        "stats": conversation_log.stats(),
     }
 
 
@@ -4152,39 +4679,29 @@ async def chat_endpoint(payload: ChatRequest):
     prompt = "\n".join(prompt_lines)
 
     try:
-        # Extract memories from conversation
-        memory_manager.extract_memories_from_conversation()
+        # ONE brain for every surface: this REST path (terminal CLI, curl,
+        # third-party callers) now goes through the exact same
+        # _generate_response_via_hierarchy chokepoint the WebSocket chat,
+        # voice turns, and Telegram already use -- full tool-use loop (file
+        # access, terminal, browser, canvas -- each sensitive action still
+        # Telegram-approval-gated), skill injection, agent routing, memory
+        # growth, verbatim FTS5 logging, and skill distillation included.
+        # Previously this endpoint ran its own reduced pipeline (plain LLM
+        # call, no tools, separate memory calls), which meant a terminal
+        # user talked to a measurably dumber Billion than the web UI did.
+        response, _hier_debug = await _generate_response_via_hierarchy(text)
 
-        # Select LLM based on task hint or detected intent
-        task_hint = payload.task_hint
-        if not task_hint and brain_decision['intent'] == IntentType.TRADING.value:
-            task_hint = "trading"
-            logger.debug("Auto-detected trading task")
-        elif not task_hint and brain_decision['intent'] == IntentType.CODING.value:
-            task_hint = "coding"
-            logger.debug("Auto-detected coding task")
-
-        # Augment prompt with relevant memories
-        augmented_prompt = memory_manager.augment_prompt_with_memory(prompt)
-
-        selected_llm = select_llm_for_task(task_hint)
-        logger.info(f"Chat endpoint using LLM: {selected_llm.__class__.__name__} (intent: {brain_decision['intent']}, task_hint: {task_hint})")
-
-        # Coding/self-improvement tasks get Claude with adaptive-thinking effort
-        # cranked up - select_llm_for_task() already routes "coding" hints to
-        # AnthropicLLM; this adds the effort param that class actually knows how
-        # to use (other backends don't accept it, hence the isinstance guard).
-        from llm import AnthropicLLM
-        if isinstance(selected_llm, AnthropicLLM) and task_hint in ("coding", "self_improvement", "devops"):
-            response = await selected_llm.generate(augmented_prompt, max_tokens=2048, temperature=0.7, effort="high")
-        else:
-            response = await selected_llm.generate(augmented_prompt, max_tokens=512, temperature=0.7)
-
-        # Record response in context
+        # Record response in the brain's own context (kept from the old
+        # path -- the intent classifier reads it for follow-up turns).
         nancy_brain.add_response(response)
 
-        # Learn from this exchange
-        memory_manager.learn_from_response(text, response)
+        # Append this REST turn to the same shared history the WS path
+        # maintains, so a terminal conversation and a web conversation are
+        # ONE continuous conversation with follow-up context, not two
+        # parallel amnesiacs.
+        if history_manager:
+            await history_manager.add({"role": "user", "content": text})
+            await history_manager.add({"role": "assistant", "content": response})
 
     except Exception as e:
         logger.exception("LLM generation failed: %s", e)
@@ -4232,6 +4749,16 @@ async def agent_status(agent_key: str):
     """Full status for a single agent."""
     status = agent_service.get_agent_status(agent_key)
     return {"success": True, "agent_key": agent_key, "status": status}
+
+
+@app.get("/health")
+async def health():
+    """Bare liveness ping -- exempt from auth (see _AUTH_EXEMPT_PATHS) since
+    it carries no data, just 'the process is up and answering HTTP'. Distinct
+    from /system/health, which is the real psutil metrics dump the dashboard
+    polls. This is what package.json's `npm run health` and any external
+    uptime/orchestration probe expects at the conventional /health path."""
+    return {"success": True, "status": "healthy"}
 
 
 @app.get("/system/health")
@@ -4468,9 +4995,12 @@ async def create_cron_job(req: CronJobCreateRequest):
         raise HTTPException(status_code=400, detail="channel_message jobs need action_payload.channel and action_payload.message")
     if req.action_type == "run_macro" and not req.action_payload.get("name"):
         raise HTTPException(status_code=400, detail="run_macro jobs need action_payload.name")
+    for chain_id in req.chain_to:
+        if cron_store.get(chain_id) is None:
+            raise HTTPException(status_code=400, detail=f"chain_to references unknown job id {chain_id!r}")
     job = cron_store.create(
         req.name, req.description, req.hour, req.minute, req.action_type, req.action_payload,
-        cron_expression=req.cron_expression,
+        cron_expression=req.cron_expression, chain_to=req.chain_to, chain_input_key=req.chain_input_key,
     )
     return {"success": True, "job": job.to_public_dict()}
 
@@ -4478,6 +5008,22 @@ async def create_cron_job(req: CronJobCreateRequest):
 @app.patch("/cron/jobs/{job_id}")
 async def toggle_cron_job(job_id: str, enabled: bool):
     job = cron_store.set_enabled(job_id, enabled)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"success": True, "job": job.to_public_dict()}
+
+
+class CronChainUpdateRequest(BaseModel):
+    chain_to: List[str] = []
+    chain_input_key: Optional[str] = None
+
+
+@app.patch("/cron/jobs/{job_id}/chain")
+async def update_cron_job_chain(job_id: str, req: CronChainUpdateRequest):
+    for chain_id in req.chain_to:
+        if cron_store.get(chain_id) is None:
+            raise HTTPException(status_code=400, detail=f"chain_to references unknown job id {chain_id!r}")
+    job = cron_store.update_chain(job_id, req.chain_to, req.chain_input_key)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     return {"success": True, "job": job.to_public_dict()}
@@ -4649,6 +5195,38 @@ async def voice_clear():
     """Removes the enrolled voice profile -- after this, _voice_mismatch()
     is always False again (nothing to compare against) until re-enrolled."""
     return voice_id.clear_enrollment()
+
+
+class VoiceTranscribeRequest(BaseModel):
+    audio_b64: str
+
+
+@app.post("/voice/transcribe", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def voice_transcribe(req: VoiceTranscribeRequest):
+    """One-shot server-side STT: a base64 WebM/Opus clip (the exact format
+    frontend voice-capture.ts's MediaRecorder produces) in, a transcript
+    out, via the same faster-whisper backend the WS audio path uses.
+
+    This is the REST fallback for browsers without the Web Speech API
+    (Firefox, Safari) -- see frontend lib/nancy/use-voice.ts's server-STT
+    loop. Chrome keeps using its native on-device recognition (lower
+    latency, zero backend load) and never calls this."""
+    if not req.audio_b64 or len(req.audio_b64) > 8_000_000:  # ~6MB decoded cap
+        raise HTTPException(status_code=400, detail="audio_b64 missing or too large")
+    try:
+        decoded = decode_webm_opus_b64_to_pcm(
+            req.audio_b64,
+            target_sample_rate=int(os.getenv("STT_SAMPLE_RATE", "16000")),
+        )
+        audio_np = pcm_int16_to_float32(decoded.pcm_int16)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not decode audio: {e}")
+    try:
+        transcript = await stt_backend.transcribe(audio_np)
+    except Exception as e:
+        logger.warning("voice_transcribe STT failed: %s", e)
+        raise HTTPException(status_code=503, detail=f"STT backend unavailable: {e}")
+    return {"success": True, "transcript": (transcript or "").strip()}
 
 
 @app.get("/canvas")
@@ -5134,6 +5712,352 @@ async def upsert_key(req: KeyUpsertRequest):
     }
 
 
+# ---------------------------------------------------------------------------
+# Ollama Cloud connect flow -- one-click connect from the Overview page.
+# Unlike the generic /config/keys write above (honest "takes effect on
+# restart"), these endpoints validate the key against ollama.com LIVE and
+# hot-rebuild the running FallbackLLM chain in place, so connect/disconnect
+# genuinely applies immediately. Disconnect is also reachable from the
+# built-in terminal: `curl -X POST http://localhost:8000/ollama-cloud/disconnect`.
+# ---------------------------------------------------------------------------
+
+class OllamaCloudConnectRequest(BaseModel):
+    api_key: str
+
+
+def _ollama_cloud_masked_key() -> Optional[str]:
+    key = os.getenv("OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY")
+    if not key:
+        return None
+    return f"{key[:4]}…{key[-4:]}" if len(key) > 10 else "…"
+
+
+def _rebuild_llm_chain() -> List[str]:
+    """Swap the live FallbackLLM's backend list in place (same object every
+    module already holds a reference to, so the whole app picks it up)."""
+    from llm import get_llm_backends
+    llm_backend.backends = get_llm_backends()
+    return [b.__class__.__name__ for b in llm_backend.backends]
+
+
+@app.get("/tools/catalog")
+async def tools_catalog():
+    """Grouped catalog of every REAL tool the chat tool-use loop can call
+    (the same _all_chat_tools() list both the WS chat and skill runner
+    use). Powers the CLI boot screen's 'Available Tools' column -- names
+    grouped by their leading prefix (file_*, browser_*, ...), singletons
+    folded into 'general'."""
+    groups: Dict[str, List[str]] = {}
+    for tool in _all_chat_tools():
+        name = tool.get("name", "")
+        if not name:
+            continue
+        prefix = name.split("_", 1)[0] if "_" in name else name
+        groups.setdefault(prefix, []).append(name)
+    merged: Dict[str, List[str]] = {}
+    general: List[str] = []
+    for prefix, names in groups.items():
+        if len(names) == 1:
+            general.extend(names)
+        else:
+            merged[prefix] = sorted(names)
+    if general:
+        merged["general"] = sorted(general)
+    total = sum(len(v) for v in merged.values())
+    return {"success": True, "groups": dict(sorted(merged.items())), "total": total}
+
+
+# Provider slug → (env var for the key, env var for the model, live models fetcher)
+# Each fetcher returns a plain list of model-id strings, best-effort: a
+# provider whose listing endpoint can't be reached reports [] rather than
+# failing the whole response.
+async def _list_models_opencode(session) -> List[str]:
+    key = os.getenv("OPENCODE_API_KEY")
+    if not key:
+        return []
+    async with session.get("https://opencode.ai/zen/v1/models",
+                           headers={"Authorization": f"Bearer {key}"}) as r:
+        if r.status != 200:
+            return []
+        data = await r.json()
+    return sorted(str(m.get("id")) for m in data.get("data", []) if m.get("id"))
+
+
+async def _list_models_ollama_cloud(session) -> List[str]:
+    key = os.getenv("OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY")
+    if not key:
+        return []
+    base = os.getenv("OLLAMA_CLOUD_BASE_URL", "https://ollama.com")
+    async with session.get(f"{base}/api/tags", headers={"Authorization": f"Bearer {key}"}) as r:
+        if r.status != 200:
+            return []
+        data = await r.json()
+    return sorted(str(m.get("name")) for m in data.get("models", []) if m.get("name"))
+
+
+async def _list_models_ollama_local(session) -> List[str]:
+    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    async with session.get(f"{base}/api/tags") as r:
+        if r.status != 200:
+            return []
+        data = await r.json()
+    return sorted(str(m.get("name")) for m in data.get("models", []) if m.get("name"))
+
+
+async def _list_models_groq(session) -> List[str]:
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        return []
+    async with session.get("https://api.groq.com/openai/v1/models",
+                           headers={"Authorization": f"Bearer {key}"}) as r:
+        if r.status != 200:
+            return []
+        data = await r.json()
+    return sorted(str(m.get("id")) for m in data.get("data", []) if m.get("id"))
+
+
+async def _list_models_anthropic(session) -> List[str]:
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        return []
+    async with session.get("https://api.anthropic.com/v1/models",
+                           headers={"x-api-key": key, "anthropic-version": "2023-06-01"}) as r:
+        if r.status != 200:
+            return []
+        data = await r.json()
+    return [str(m.get("id")) for m in data.get("data", []) if m.get("id")]
+
+
+_MODEL_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "anthropic":   {"label": "Anthropic (Claude)", "model_env": "ANTHROPIC_MODEL",    "backend_cls": "AnthropicLLM",       "fetch": _list_models_anthropic},
+    "groq":        {"label": "Groq",               "model_env": "GROQ_MODEL",         "backend_cls": "GroqLLM",            "fetch": _list_models_groq},
+    "opencode":    {"label": "OpenCode Zen",       "model_env": "OPENCODE_MODEL",     "backend_cls": "OpenCodeLLM",        "fetch": _list_models_opencode},
+    "ollamacloud": {"label": "Ollama Cloud",       "model_env": "OLLAMA_CLOUD_MODEL", "backend_cls": "OllamaCloudLLM",     "fetch": _list_models_ollama_cloud},
+    "ollama":      {"label": "Ollama (local)",     "model_env": "OLLAMA_MODEL",       "backend_cls": "OllamaAutoModelsLLM", "fetch": _list_models_ollama_local},
+}
+
+
+@app.get("/llm/models")
+async def llm_list_models(backend: Optional[str] = None):
+    """LIVE per-provider model enumeration -- each list is fetched from the
+    provider's own real listing endpoint with YOUR key, so it shows exactly
+    the models your account can actually call (OpenCode Zen's /v1/models,
+    Ollama Cloud's and local Ollama's /api/tags, Groq's and Anthropic's
+    model APIs). Powers the CLI's /model picker. `backend` narrows to one
+    provider slug (anthropic|groq|opencode|ollamacloud|ollama)."""
+    import aiohttp
+    wanted = {backend.strip().lower()} if backend else set(_MODEL_PROVIDERS)
+    out: Dict[str, Any] = {}
+    timeout = aiohttp.ClientTimeout(total=12)
+    async with aiohttp.ClientSession(timeout=timeout, headers={"Accept-Encoding": "identity"}) as session:
+        for slug, spec in _MODEL_PROVIDERS.items():
+            if slug not in wanted:
+                continue
+            try:
+                models = await spec["fetch"](session)
+            except Exception as e:
+                logger.debug("Model listing for %s failed: %s", slug, e)
+                models = []
+            out[slug] = {
+                "label": spec["label"],
+                "current": os.getenv(spec["model_env"]) or None,
+                "models": models[:60],
+                "total": len(models),
+            }
+    if backend and not out:
+        raise HTTPException(status_code=404, detail=f"Unknown provider '{backend}'. Known: {sorted(_MODEL_PROVIDERS)}")
+    return {"success": True, "providers": out}
+
+
+class LlmModelRequest(BaseModel):
+    backend: str
+    model: str
+    make_primary: bool = True
+
+
+def _persist_primary(backend_cls: str) -> None:
+    """Write the chosen primary to backend/.env so it survives a restart.
+
+    Both /llm/model and /llm/primary used to reorder the live chain in memory
+    only, which meant an explicit pick was silently dropped on the next
+    restart -- and llm.get_llm_backends() rebuilds from the catalog's default
+    order, putting Claude back in front along with its tool-loop priority.
+    """
+    try:
+        os.environ["LLM_PRIMARY"] = backend_cls
+        from dotenv import set_key
+        env_path = Path(__file__).parent / ".env"
+        if not env_path.exists():
+            env_path.touch()
+        set_key(str(env_path), "LLM_PRIMARY", backend_cls)
+    except Exception as e:
+        # Never fail the request over this -- the in-memory switch already
+        # worked, persistence is the bonus.
+        logger.warning("Could not persist LLM_PRIMARY=%s: %s", backend_cls, e)
+
+
+@app.post("/llm/model", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def llm_set_model(req: LlmModelRequest):
+    """Set the ACTIVE model for a provider, live: updates the running
+    backend instance, the process env (chat paths construct fresh backend
+    instances per call, which read env), and persists to backend/.env so
+    the choice survives a restart. Optionally also promotes that provider
+    to primary in the chain (the default -- picking a model usually means
+    'talk to this now')."""
+    slug = req.backend.strip().lower().replace(" ", "")
+    spec = _MODEL_PROVIDERS.get(slug)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Unknown provider '{req.backend}'. Known: {sorted(_MODEL_PROVIDERS)}")
+    model = req.model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="model cannot be empty")
+
+    os.environ[spec["model_env"]] = model
+    from dotenv import set_key
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        env_path.touch()
+    set_key(str(env_path), spec["model_env"], model)
+
+    switched = False
+    for i, b in enumerate(llm_backend.backends):
+        if b.__class__.__name__ == spec["backend_cls"]:
+            if hasattr(b, "model"):
+                b.model = model
+            if req.make_primary:
+                llm_backend.backends.insert(0, llm_backend.backends.pop(i))
+                _persist_primary(spec["backend_cls"])
+            switched = True
+            break
+
+    chain = [b.__class__.__name__ for b in llm_backend.backends]
+    logger.info("Model set: %s -> %s (primary=%s); chain %s", slug, model, req.make_primary, chain)
+    return {
+        "success": True,
+        "backend": spec["label"],
+        "model": model,
+        "primary": req.make_primary and switched,
+        "in_chain": switched,
+        "chain": chain,
+        "message": (f"{spec['label']} now uses {model}"
+                    + (" and is the live primary." if req.make_primary and switched else ".")
+                    + ("" if switched else f" ({spec['label']} isn't in the live chain yet -- configure its key first.)")),
+    }
+
+
+class LlmPrimaryRequest(BaseModel):
+    backend: str
+
+
+@app.post("/llm/primary", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def llm_set_primary(req: LlmPrimaryRequest):
+    """Live /model switch: move the named backend to the FRONT of the
+    running FallbackLLM chain (in-memory reorder of the same list every
+    caller already holds -- applies to the very next message, survives
+    until restart). Matches on class name or its lowercase stem, e.g.
+    'anthropic', 'groq', 'OllamaCloudLLM', 'opencode'."""
+    want = req.backend.strip().lower().replace(" ", "")
+    if not want:
+        raise HTTPException(status_code=400, detail="backend cannot be empty")
+    for i, b in enumerate(llm_backend.backends):
+        cls = b.__class__.__name__
+        stem = cls.lower().removesuffix("llm")
+        if want in (cls.lower(), stem) or want == stem.removesuffix("automodels"):
+            llm_backend.backends.insert(0, llm_backend.backends.pop(i))
+            _persist_primary(cls)
+            chain = [x.__class__.__name__ for x in llm_backend.backends]
+            logger.info("LLM primary switched to %s via /llm/primary; chain now %s", cls, chain)
+            return {"success": True, "primary": cls, "chain": chain, "persisted": True}
+    raise HTTPException(
+        status_code=404,
+        detail=f"No backend matching '{req.backend}' in the live chain: "
+               f"{[b.__class__.__name__ for b in llm_backend.backends]}",
+    )
+
+
+@app.get("/ollama-cloud/status")
+async def ollama_cloud_status():
+    connected = bool(os.getenv("OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY"))
+    return {
+        "success": True,
+        "connected": connected,
+        "key_masked": _ollama_cloud_masked_key(),
+        "model": os.getenv("OLLAMA_CLOUD_MODEL", "gpt-oss:120b"),
+        "base_url": os.getenv("OLLAMA_CLOUD_BASE_URL", "https://ollama.com"),
+        "in_chain": any(b.__class__.__name__ == "OllamaCloudLLM" for b in llm_backend.backends),
+        "connect_url": "https://ollama.com/settings/keys",
+    }
+
+
+@app.post("/ollama-cloud/connect", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def ollama_cloud_connect(req: OllamaCloudConnectRequest):
+    """Validate the pasted key against ollama.com for real (GET /api/tags
+    with the Bearer token), persist it to backend/.env, and hot-rebuild the
+    live LLM chain so Ollama Cloud is usable on the very next message."""
+    import aiohttp
+    api_key = req.api_key.strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="api_key cannot be empty")
+    base_url = os.getenv("OLLAMA_CLOUD_BASE_URL", "https://ollama.com")
+    try:
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
+            async with session.get(
+                f"{base_url}/api/tags",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=aiohttp.ClientTimeout(total=12),
+            ) as resp:
+                if resp.status in (401, 403):
+                    raise HTTPException(status_code=401, detail="ollama.com rejected this key (unauthorized). Check it at https://ollama.com/settings/keys")
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail=f"ollama.com answered {resp.status} while validating the key")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach ollama.com to validate the key: {e}")
+
+    from dotenv import set_key
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        env_path.touch()
+    set_key(str(env_path), "OLLAMA_CLOUD_API_KEY", api_key)
+    os.environ["OLLAMA_CLOUD_API_KEY"] = api_key
+    chain = _rebuild_llm_chain()
+    logger.info("Ollama Cloud connected (key validated live); chain rebuilt: %s", chain)
+    return {
+        "success": True,
+        "connected": True,
+        "key_masked": _ollama_cloud_masked_key(),
+        "chain": chain,
+        "message": "Ollama Cloud connected and live in the fallback chain -- no restart needed.",
+    }
+
+
+@app.post("/ollama-cloud/disconnect", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def ollama_cloud_disconnect():
+    """Logout: remove the key from .env and the process env, and hot-rebuild
+    the chain so Ollama Cloud drops out immediately."""
+    from dotenv import unset_key
+    env_path = Path(__file__).parent / ".env"
+    removed = False
+    for name in ("OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY"):
+        if os.environ.pop(name, None) is not None:
+            removed = True
+        if env_path.exists():
+            try:
+                unset_key(str(env_path), name)
+            except Exception:
+                logger.debug("unset_key(%s) failed (key may not be in .env)", name)
+    chain = _rebuild_llm_chain()
+    logger.info("Ollama Cloud disconnected; chain rebuilt: %s", chain)
+    return {
+        "success": True,
+        "connected": False,
+        "removed": removed,
+        "chain": chain,
+        "message": "Ollama Cloud disconnected -- key removed from .env and the live chain.",
+    }
+
+
 @app.get("/tts/status")
 async def tts_status():
     """Whether TTS is using the real neural voice (NeuTTS-nano) and which
@@ -5422,9 +6346,39 @@ class ArmRequest(BaseModel):
     reason: Optional[str] = None
 
 
+ARM_MAX_SECONDS = float(os.getenv("ARM_MAX_SECONDS", "1800"))  # 30 minutes
+
+
 @app.post("/safety/arm", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def arm_safety_switch(req: ArmRequest):
-    return arm_switch.arm(req.duration_s, req.reason)
+    """Arming is the keystone: every other gate in this file is written as
+    `if not arm_switch.is_armed()`, so one call here disables all of them at
+    once. That made it the single most valuable endpoint to reach, and it was
+    the only dangerous one with no approval of its own -- an unauthenticated
+    caller could arm for a day and then walk through every gate unprompted.
+
+    It now costs a Telegram approval, and the window is capped so a
+    typo'd (or hostile) duration can't leave the system armed indefinitely.
+    """
+    duration = max(1.0, min(float(req.duration_s), ARM_MAX_SECONDS))
+    capped = duration < float(req.duration_s)
+
+    reason = req.reason or "no reason given"
+    if not await _request_approval(
+        f"Nancy wants to ARM the safety switch for {int(duration)}s "
+        f"({reason}).\n\nWhile armed, file writes, shell commands and Docker "
+        f"operations run WITHOUT asking you again.",
+        timeout=120.0,
+    ):
+        logger.warning("Arm request denied (duration=%ss, reason=%s)", duration, reason)
+        raise HTTPException(status_code=403, detail="Arming was not approved.")
+
+    result = arm_switch.arm(duration, req.reason)
+    logger.info("Safety switch ARMED for %ss (reason=%s)", duration, reason)
+    if isinstance(result, dict) and capped:
+        result["capped_to_seconds"] = duration
+        result["note"] = f"Requested window shortened to the {int(ARM_MAX_SECONDS)}s maximum."
+    return result
 
 
 @app.post("/safety/disarm", dependencies=[Depends(require_auth), Depends(rate_limit)])
@@ -6301,10 +7255,20 @@ async def websocket_endpoint(websocket: WebSocket):
     # WebSocket auth: HTTPException-based Depends() doesn't apply to WS routes,
     # so check the same shared-secret manually (no-op unless BACKEND_AUTH_TOKEN
     # is set). Pass ?token=... on the connection URL.
-    if _BACKEND_AUTH_TOKEN and websocket.query_params.get("token") != _BACKEND_AUTH_TOKEN:
-        _record_security_failure("ws_auth", "Invalid or missing WebSocket auth token")
-        await websocket.close(code=4401)
-        return
+    if _BACKEND_AUTH_TOKEN:
+        supplied = websocket.query_params.get("token", "")
+        # A browser can't set an Authorization header on a WebSocket, and the
+        # real token has no business sitting in a URL (history, proxy logs,
+        # referrers). So the page fetches a short-lived single-use ticket
+        # through the authenticated proxy and presents that instead. The raw
+        # token still works for non-browser clients like the CLI.
+        ok = bool(supplied) and secrets.compare_digest(supplied, _BACKEND_AUTH_TOKEN)
+        if not ok:
+            ok = _redeem_ws_ticket(websocket.query_params.get("ticket", ""))
+        if not ok:
+            _record_security_failure("ws_auth", "Invalid or missing WebSocket auth token/ticket")
+            await websocket.close(code=4401)
+            return
     client_ip = websocket.client.host if websocket.client else "unknown"
     if not _rate_limiter.check(client_ip):
         await websocket.close(code=4429)
@@ -7015,69 +7979,87 @@ async def _cron_execution_loop() -> None:
         try:
             now = datetime.now()
             for job in cron_store.due_jobs(now):
-                try:
-                    if job.action_type == "telegram_message":
-                        text = job.action_payload.get("text", "")
-                        await _send_or_queue(text)
-                        cron_store.mark_run(job.id, "sent telegram message")
-                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": "sent telegram message"})
-                    elif job.action_type == "agent_task":
-                        agent_key = job.action_payload.get("agent_key")
-                        task_type = job.action_payload.get("task_type", "query")
-                        payload = job.action_payload.get("payload", {})
-                        if agent_service.is_ready() and agent_key:
-                            result = await agent_service.run(agent_key, {"type": task_type, **payload}, timeout=60.0)
-                            summary = json.dumps(result)[:300]
-                            cron_store.mark_run(job.id, summary)
-                            if telegram_notifier.status["available"]:
-                                await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
-                            await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": result})
-                        else:
-                            cron_store.mark_run(job.id, "skipped: agent service not ready")
-                    elif job.action_type == "run_skill":
-                        summary = await _run_cron_skill(job.action_payload, f"scheduled job \"{job.name}\"")
-                        cron_store.mark_run(job.id, summary)
-                        if telegram_notifier.status["available"]:
-                            await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
-                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
-                    elif job.action_type == "terminal_command":
-                        summary = await _run_cron_terminal_command(job.action_payload, f"Scheduled job \"{job.name}\"")
-                        cron_store.mark_run(job.id, summary)
-                        if telegram_notifier.status["available"]:
-                            await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
-                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
-                    elif job.action_type == "run_script":
-                        summary = await _run_cron_script(job.action_payload, f"scheduled job \"{job.name}\"")
-                        cron_store.mark_run(job.id, summary)
-                        if telegram_notifier.status["available"] and not summary.startswith("(silent"):
-                            await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
-                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
-                    elif job.action_type == "channel_message":
-                        summary = await _run_cron_channel_message(job.action_payload, f"scheduled job \"{job.name}\"")
-                        cron_store.mark_run(job.id, summary)
-                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
-                    elif job.action_type == "memory_consolidate":
-                        summary = await _run_cron_memory_consolidate(job.action_payload, f"scheduled job \"{job.name}\"")
-                        cron_store.mark_run(job.id, summary)
-                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
-                    elif job.action_type == "commitment_checkin":
-                        summary = await _run_cron_commitment_checkin(job.action_payload, f"scheduled job \"{job.name}\"")
-                        cron_store.mark_run(job.id, summary)
-                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
-                    elif job.action_type == "run_macro":
-                        macro = macro_store.macro_store.find_by_name(job.action_payload.get("name", ""))
-                        if macro is None:
-                            summary = f"error: no macro named {job.action_payload.get('name')!r}"
-                        else:
-                            result = await _run_macro(macro)
-                            summary = f"ran macro {macro.name!r} ({'ok' if result.get('success') else 'had a failed step'})"
-                        cron_store.mark_run(job.id, summary)
-                        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
-                except Exception as e:
-                    logger.exception("Cron job %s failed: %s", job.name, e)
-                    cron_store.mark_run(job.id, f"error: {e}")
+                await _run_cron_job_with_chain(job)
         except Exception:
             logger.exception("Cron execution loop tick failed")
+
+
+async def _execute_cron_job(job: "cron_store.CronJob") -> str:
+    """The real per-action-type execution for exactly one job -- extracted
+    from _cron_execution_loop so a CHAINED job (see _run_cron_job_with_chain)
+    can be run immediately, off-schedule, through the exact same real logic
+    a normally-due job goes through, rather than a second copy. Returns the
+    same summary string mark_run/chaining/webhooks all key off."""
+    if job.action_type == "telegram_message":
+        text = job.action_payload.get("text", "")
+        await _send_or_queue(text)
+        return "sent telegram message"
+    if job.action_type == "agent_task":
+        agent_key = job.action_payload.get("agent_key")
+        task_type = job.action_payload.get("task_type", "query")
+        payload = job.action_payload.get("payload", {})
+        if agent_service.is_ready() and agent_key:
+            result = await agent_service.run(agent_key, {"type": task_type, **payload}, timeout=60.0)
+            summary = json.dumps(result)[:300]
+            if telegram_notifier.status["available"]:
+                await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
+            return summary
+        return "skipped: agent service not ready"
+    if job.action_type == "run_skill":
+        summary = await _run_cron_skill(job.action_payload, f"scheduled job \"{job.name}\"")
+        if telegram_notifier.status["available"]:
+            await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
+        return summary
+    if job.action_type == "terminal_command":
+        summary = await _run_cron_terminal_command(job.action_payload, f"Scheduled job \"{job.name}\"")
+        if telegram_notifier.status["available"]:
+            await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
+        return summary
+    if job.action_type == "run_script":
+        summary = await _run_cron_script(job.action_payload, f"scheduled job \"{job.name}\"")
+        if telegram_notifier.status["available"] and not summary.startswith("(silent"):
+            await telegram_notifier.send(f"Cron job \"{job.name}\" ran:\n\n{summary}")
+        return summary
+    if job.action_type == "channel_message":
+        return await _run_cron_channel_message(job.action_payload, f"scheduled job \"{job.name}\"")
+    if job.action_type == "memory_consolidate":
+        return await _run_cron_memory_consolidate(job.action_payload, f"scheduled job \"{job.name}\"")
+    if job.action_type == "commitment_checkin":
+        return await _run_cron_commitment_checkin(job.action_payload, f"scheduled job \"{job.name}\"")
+    if job.action_type == "run_macro":
+        macro = macro_store.macro_store.find_by_name(job.action_payload.get("name", ""))
+        if macro is None:
+            return f"error: no macro named {job.action_payload.get('name')!r}"
+        result = await _run_macro(macro)
+        return f"ran macro {macro.name!r} ({'ok' if result.get('success') else 'had a failed step'})"
+    return f"error: unknown action_type {job.action_type!r}"
+
+
+async def _run_cron_job_with_chain(job: "cron_store.CronJob", depth: int = 0) -> None:
+    """Runs one job for real, records the result, fires webhooks, and then
+    -- the actual job-chaining feature -- runs every job in job.chain_to
+    IMMEDIATELY (off their own schedule) with this job's real result
+    injected into their action_payload[chain_input_key] if set. depth caps
+    real chain recursion at 5 hops so a mistaken A->B->A cycle can't loop
+    forever."""
+    try:
+        summary = await _execute_cron_job(job)
+        cron_store.mark_run(job.id, summary)
+        await _fire_webhooks("cron_job_ran", {"job_id": job.id, "job_name": job.name, "result": summary})
+    except Exception as e:
+        logger.exception("Cron job %s failed: %s", job.name, e)
+        summary = f"error: {e}"
+        cron_store.mark_run(job.id, summary)
+
+    if not job.chain_to or summary.startswith("error:") or depth >= 5:
+        return
+    for chain_id in job.chain_to:
+        child = cron_store.get(chain_id)
+        if child is None or not child.enabled:
+            continue
+        if job.chain_input_key:
+            child.action_payload = {**child.action_payload, job.chain_input_key: summary}
+        await _run_cron_job_with_chain(child, depth=depth + 1)
 
 
 async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "job") -> str:
@@ -7110,8 +8092,12 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
     if not os.getenv("ANTHROPIC_API_KEY"):
         return "Cannot run skill: ANTHROPIC_API_KEY not configured (tool-use requires Claude)"
 
+    # Static persona goes in the (cached) system role -- see llm.py's
+    # _anthropic_system_blocks; only the per-run instructions stay in the
+    # user prompt. Same split as the interactive chat path.
+    skill_system = _chat_system_blocks(BASE_SYSTEM_PROMPT, "")
     prompt = (
-        f"{BASE_SYSTEM_PROMPT}\n\nA {trigger_name} triggered this skill (or skill bundle) -- follow its "
+        f"A {trigger_name} triggered this skill (or skill bundle) -- follow its "
         f"instructions and actually do the work, don't just describe it. If more than one skill is listed, "
         f"follow all of them together as one combined procedure.\n\n"
         f"{skills_block}\n\n"
@@ -7124,7 +8110,8 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
     # fallen out of sync with every tool added to the other one.
     resp = await asyncio.wait_for(
         claude.generate_with_tools(
-            prompt, _all_chat_tools(), _execute_file_tool, max_tokens=1024
+            prompt, _all_chat_tools(), _execute_file_tool, max_tokens=1024,
+            system=skill_system,
         ),
         timeout=120.0,
     )
@@ -7192,6 +8179,19 @@ async def _run_cron_script(action_payload: Dict[str, Any], trigger_name: str = "
     data-collection from the LLM call that turns it into a response."""
     script = action_payload.get("script", "")
     no_agent = bool(action_payload.get("no_agent", False))
+
+    # This is reachable from POST /webhooks/inbound (which hands the caller
+    # the HMAC secret it then signs with) and from POST /cron/jobs, so an
+    # arbitrary script could be run -- and persisted across restarts in
+    # cron_jobs.json -- with no prompt at all. Its sibling
+    # _run_cron_terminal_command has always gated; this one just never did.
+    if not arm_switch.is_armed():
+        preview = script if len(script) <= 600 else script[:600] + "\n…"
+        if not await _request_approval(
+            f"\"{trigger_name}\" wants to run a script:\n\n{preview}", timeout=120.0
+        ):
+            return "Not approved: running a script requires explicit approval and none was given in time"
+
     result = await run_script_tool.run_script(script, no_agent=no_agent)
     if not result.get("success"):
         return f"error: {result.get('error')}"

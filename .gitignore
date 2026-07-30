@@ -12,3 +12,17 @@
 *.pyc
 **/.next/
 *.log
+
+# Staging area for files Claude moved out of the tree (delete at leisure --
+# the sandbox cannot delete files on this machine, only move them here).
+_to_delete/
+
+# Build/backup artifacts, not source -- see the node_modules note above,
+# same 100MB-push-blocker risk (billion-src.tgz alone is 141MB).
+nancy-billion/billion-src.tgz
+nancy-billion/backups/
+
+# A full separate clone (has its own .git) vendored for the real NeuTTS
+# voice engine -- not this repo's source, and `git add` would either error
+# on the nested .git or silently create a submodule reference nobody set up.
+neutts/

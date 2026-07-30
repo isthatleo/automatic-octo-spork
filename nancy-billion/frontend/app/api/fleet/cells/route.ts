@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server'
+import { BACKEND_URL as BACKEND, backendHeaders } from '@/lib/nancy/backend-server'
 
-const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 export async function GET() {
   try {
-    const res = await fetch(`${BACKEND}/fleet/cells`, { cache: 'no-store' })
+    const res = await fetch(`${BACKEND}/fleet/cells`, { headers: backendHeaders(), cache: 'no-store' })
     if (!res.ok) return NextResponse.json({ success: false, cells: [] }, { status: res.status })
     return NextResponse.json(await res.json())
   } catch {
@@ -17,7 +17,7 @@ export async function POST(req: Request) {
     const body = await req.json()
     const res = await fetch(`${BACKEND}/fleet/cells`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: backendHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     })
     const json = await res.json().catch(() => ({}))

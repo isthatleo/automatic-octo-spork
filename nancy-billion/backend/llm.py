@@ -34,6 +34,32 @@ TOOL_RESULT_FIDELITY_INSTRUCTION = (
 )
 
 
+def _anthropic_system_blocks(system, extra_instruction: str | None = None):
+    """Normalize a `system` argument into Anthropic system-block form, with
+    real prompt caching on the FIRST block.
+
+    Accepts: None, a plain string, or an already-built list of
+    {"type": "text", ...} blocks. The first (largest/most stable by
+    convention -- callers put their static persona prompt there) block gets
+    `cache_control: {"type": "ephemeral"}` so Anthropic caches the prefix
+    across the many calls that share it: every round of a tool-use loop
+    re-sends the identical system prompt, as does every chat turn, so
+    without this the full persona+skills text is re-billed and re-processed
+    every single time (higher latency AND cost -- cache reads are billed at
+    a fraction of input-token price).
+    """
+    blocks: list = []
+    if isinstance(system, str) and system.strip():
+        blocks = [{"type": "text", "text": system}]
+    elif isinstance(system, list):
+        blocks = [dict(b) for b in system if isinstance(b, dict) and b.get("text", "").strip()]
+    if blocks:
+        blocks[0] = {**blocks[0], "cache_control": {"type": "ephemeral"}}
+    if extra_instruction:
+        blocks.append({"type": "text", "text": extra_instruction})
+    return blocks or None
+
+
 class LLMBackend(ABC):
     @abstractmethod
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
@@ -130,6 +156,12 @@ class OllamaLLM(LLMBackend):
         self._last_usage: dict | None = None
         logger.info(f"OllamaLLM initialized with base_url={self.base_url}, model={self.model}")
 
+    def _auth_headers(self) -> Dict[str, str]:
+        """Local Ollama needs no auth; OllamaCloudLLM overrides this with a
+        real Bearer token. Kept as a method so both classes share one
+        generate() implementation instead of drifting apart."""
+        return {}
+
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
         import aiohttp
         import json
@@ -149,7 +181,7 @@ class OllamaLLM(LLMBackend):
         # entire backend out of the fallback chain on every real call.
         # Requesting no compression sidesteps it without a new dependency.
         async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
-            async with session.post(url, json=payload) as resp:
+            async with session.post(url, json=payload, headers=self._auth_headers()) as resp:
                 if resp.status == 200:
                     result = await resp.json()
                     # Ollama's real response reports exact token counts AND a
@@ -166,6 +198,39 @@ class OllamaLLM(LLMBackend):
                 else:
                     text = await resp.text()
                     raise Exception(f"Ollama error: {resp.status} - {text}")
+
+class OllamaCloudLLM(OllamaLLM):
+    """Ollama Cloud (ollama.com) -- Ollama's hosted service running large
+    open models (gpt-oss 120b, deepseek-v3.1 671b, qwen3-coder 480b, ...)
+    on their datacenter GPUs, behind the exact same Ollama REST API shape
+    the local daemon serves, just with a Bearer API key. Sits BETWEEN the
+    other cloud providers and the local Ollama daemon in the fallback
+    chain (see get_llm_backends): far higher quality than anything a
+    CPU-only box can run locally, so it should be tried first -- but it
+    still needs internet + quota, so local Ollama remains the true offline
+    last resort behind it.
+
+    Key: OLLAMA_CLOUD_API_KEY (falls back to OLLAMA_API_KEY -- the name
+    Ollama's own tooling uses). Model: OLLAMA_CLOUD_MODEL, default
+    gpt-oss:120b. Base URL override: OLLAMA_CLOUD_BASE_URL."""
+
+    def __init__(self, model: str | None = None):
+        self.api_key = os.getenv("OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY")
+        if not self.api_key:
+            logger.warning("OLLAMA_CLOUD_API_KEY not set; Ollama Cloud LLM will not function")
+        self.base_url = os.getenv("OLLAMA_CLOUD_BASE_URL", "https://ollama.com")
+        self.model = model or os.getenv("OLLAMA_CLOUD_MODEL", "gpt-oss:120b")
+        self._last_usage: dict | None = None
+        logger.info(f"OllamaCloudLLM initialized with base_url={self.base_url}, model={self.model}")
+
+    def _auth_headers(self) -> Dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}"}
+
+    async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+        if not self.api_key:
+            raise Exception("OLLAMA_CLOUD_API_KEY (or OLLAMA_API_KEY) not configured")
+        return await super().generate(prompt, max_tokens=max_tokens, temperature=temperature)
+
 
 class VLLMLLM(LLMBackend):
     """Real HTTP client for a self-hosted vLLM server's OpenAI-compatible API
@@ -235,15 +300,38 @@ class AnthropicLLM(LLMBackend):
         max_tokens: int = 512,
         temperature: float = 0.7,
         effort: str | None = None,
+        system: str | list | None = None,
+        images: list[str] | None = None,
     ) -> str:
+        """`system`: real system-role prompt (cached -- see
+        _anthropic_system_blocks) instead of the previous convention of
+        concatenating persona text into the user message, which burned
+        full input-token price on every call and gave the model a weaker
+        instruction hierarchy. `images`: base64 PNG/JPEG strings for real
+        vision input (e.g. a screenshot or user-shared photo) alongside the
+        text prompt."""
         if not self.api_key:
             raise Exception("ANTHROPIC_API_KEY not configured")
         client = self._get_client()
+        if images:
+            content: list = [
+                {"type": "image",
+                 "source": {"type": "base64",
+                            "media_type": "image/png" if not img.startswith("/9j/") else "image/jpeg",
+                            "data": img}}
+                for img in images
+            ]
+            content.append({"type": "text", "text": prompt})
+        else:
+            content = prompt
         kwargs: dict = {
             "model": self.model,
             "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
         }
+        system_blocks = _anthropic_system_blocks(system)
+        if system_blocks:
+            kwargs["system"] = system_blocks
         if effort:
             kwargs["output_config"] = {"effort": effort}
         try:
@@ -269,9 +357,11 @@ class AnthropicLLM(LLMBackend):
         max_tokens: int = 512,
         temperature: float = 0.7,
         effort: str | None = None,
+        system: str | list | None = None,
     ):
         """Yield text deltas as they arrive. Not part of the LLMBackend interface
-        (other backends don't stream yet) — call directly when streaming is wanted."""
+        (other backends don't stream yet) — call directly when streaming is wanted.
+        `system` behaves exactly as in generate() (real system role + prompt cache)."""
         if not self.api_key:
             raise Exception("ANTHROPIC_API_KEY not configured")
         client = self._get_client()
@@ -280,6 +370,9 @@ class AnthropicLLM(LLMBackend):
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
+        system_blocks = _anthropic_system_blocks(system)
+        if system_blocks:
+            kwargs["system"] = system_blocks
         if effort:
             kwargs["output_config"] = {"effort": effort}
         async with client.messages.stream(**kwargs) as stream:
@@ -295,6 +388,7 @@ class AnthropicLLM(LLMBackend):
         max_rounds: int = 15,
         on_tool_image: Optional[Callable[[bytes], None]] = None,
         on_tool_call: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
+        system: str | list | None = None,
     ) -> str:
         """Full Claude tool-use loop: send `prompt` + `tools`, execute any
         requested tool calls via `tool_executor(name, input) -> result_dict`,
@@ -327,14 +421,28 @@ class AnthropicLLM(LLMBackend):
         messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
         schema_by_name = {t["name"]: t.get("input_schema", {}) for t in tools if isinstance(t, dict) and "name" in t}
 
+        # Caller's system prompt (persona/context) rides in the real system
+        # role -- with prompt caching on its first block -- instead of being
+        # concatenated into the user message. The fidelity instruction is
+        # always appended as a final system block, preserving the previous
+        # behavior when no caller system prompt is given.
+        system_blocks = _anthropic_system_blocks(system, extra_instruction=TOOL_RESULT_FIDELITY_INSTRUCTION)
+
+        # Cache the tools array too (cache_control on the LAST tool marks
+        # the whole tools prefix cacheable) -- the tool schemas are by far
+        # the most byte-identical thing re-sent on every round of the loop.
+        cached_tools = list(tools)
+        if cached_tools and isinstance(cached_tools[-1], dict):
+            cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+
         for _ in range(max_rounds):
             try:
                 response = await client.messages.create(
                     model=self.model,
                     max_tokens=max_tokens,
-                    system=TOOL_RESULT_FIDELITY_INSTRUCTION,
+                    system=system_blocks,
                     messages=messages,
-                    tools=tools,
+                    tools=cached_tools,
                 )
             except Exception as e:
                 raise Exception(f"Anthropic error: {e}")
@@ -342,8 +450,15 @@ class AnthropicLLM(LLMBackend):
             if response.stop_reason != "tool_use":
                 for block in response.content:
                     if block.type == "text":
-                        return block.text
-                return ""
+                        if block.text.strip():
+                            return block.text
+                # No text at all: a refusal, a max_tokens stop on the first
+                # round, or thinking-only output. Returning "" here counted as
+                # success and stopped the fallback chain dead, so the caller
+                # got silence. Fail instead, and let the next backend try.
+                raise RuntimeError(
+                    f"Claude returned no text (stop_reason={response.stop_reason})"
+                )
 
             messages.append({"role": "assistant", "content": response.content})
 
@@ -474,7 +589,13 @@ async def generate_with_tools_openai_compat(
             tool_calls = message.get("tool_calls")
             if not tool_calls:
                 logger.info("%s: model answered without calling any tool (round used, model=%s)", provider_label, model)
-                return message.get("content") or ""
+                content = message.get("content") or ""
+                # `content: null` with no tool call is a routine outcome for
+                # these providers (content filter, malformed tool call). It is
+                # not an answer, so don't let it end the chain as if it were.
+                if not content.strip():
+                    raise RuntimeError(f"{provider_label} returned an empty response")
+                return content
 
             messages.append({
                 "role": "assistant",
@@ -726,15 +847,95 @@ class OpenCodeLLM(LLMBackend):
     registry convention, not what this raw REST endpoint expects.
     """
 
+    # Model-level fallback chain WITHIN OpenCode Zen: if the active model
+    # fails (rate-limited, out of quota, model retired, reasoning budget
+    # exhausted with no content, ...), the next one is tried in order before
+    # this whole backend reports failure to FallbackLLM's provider-level
+    # chain. Ids are Zen's bare kebab-case form (same convention as
+    # 'big-pickle', confirmed against the live /v1/models list -- which
+    # _available_models() also re-checks at runtime, so a guessed-wrong or
+    # since-retired id is skipped instead of burning a doomed API call).
+    # Override without a code change via OPENCODE_FALLBACK_MODELS
+    # (comma-separated).
+    DEFAULT_FALLBACK_MODELS = [
+        "big-pickle",
+        "mimo-v2.5-free",
+        "nemotron-ultra-3-free",
+        "hy3-free",
+        "deepseek-v4-flash-free",
+        "north-mini-code-free",
+    ]
+
     def __init__(self):
         self.api_key = os.getenv("OPENCODE_API_KEY")
         if not self.api_key:
             logger.warning("OPENCODE_API_KEY not set; OpenCode Zen LLM will not function")
         self.model = os.getenv("OPENCODE_MODEL", "big-pickle")
+        env_fallbacks = os.getenv("OPENCODE_FALLBACK_MODELS", "")
+        self.fallback_models = (
+            [m.strip() for m in env_fallbacks.split(",") if m.strip()]
+            if env_fallbacks.strip()
+            else list(self.DEFAULT_FALLBACK_MODELS)
+        )
         self._last_usage: dict | None = None
-        logger.info(f"OpenCodeLLM initialized with model={self.model}")
+        # Live /v1/models id set, fetched lazily on the first primary-model
+        # failure and cached for the process lifetime. None = not fetched
+        # yet or fetch failed (in which case candidates are tried raw --
+        # an unknown id just errors and the loop moves on).
+        self._live_model_ids: set[str] | None = None
+        logger.info(
+            f"OpenCodeLLM initialized with model={self.model}, "
+            f"fallbacks={self.fallback_models}"
+        )
+
+    async def _available_models(self) -> set[str] | None:
+        """Fetch (once) the live model-id list so fallback candidates that
+        don't actually exist are skipped rather than tried. Best-effort:
+        returns None if the endpoint can't be reached, which callers treat
+        as 'no filtering'."""
+        if self._live_model_ids is not None:
+            return self._live_model_ids
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
+                async with session.get(
+                    "https://opencode.ai/zen/v1/models",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+            ids = {str(m.get("id", "")) for m in data.get("data", []) if m.get("id")}
+            if ids:
+                self._live_model_ids = ids
+            return self._live_model_ids
+        except Exception as e:
+            logger.debug("OpenCode Zen /v1/models fetch failed (fallbacks tried unfiltered): %s", e)
+            return None
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+        # Primary model first, then the fallback chain (minus any duplicate
+        # of the primary), each candidate tried at most once.
+        candidates = [self.model] + [m for m in self.fallback_models if m != self.model]
+        last_error: Exception | None = None
+        for i, model in enumerate(candidates):
+            if i > 0:
+                # First failure just happened -- lazily check the live model
+                # list so retired/mistyped fallback ids get skipped.
+                live = await self._available_models()
+                if live is not None and model not in live:
+                    logger.info("OpenCode Zen fallback '%s' not in live model list, skipping", model)
+                    continue
+            try:
+                return await self._generate_once(model, prompt, max_tokens, temperature)
+            except Exception as e:
+                last_error = e
+                logger.warning("OpenCode Zen model '%s' failed (%s)%s", model, e,
+                               " -- trying next fallback model" if i < len(candidates) - 1 else "")
+        raise Exception(f"OpenCode Zen: all models failed ({len(candidates)} tried). Last error: {last_error}")
+
+    async def _generate_once(self, model: str, prompt: str, max_tokens: int, temperature: float) -> str:
         import aiohttp
         url = "https://opencode.ai/zen/v1/chat/completions"
         headers = {
@@ -742,7 +943,7 @@ class OpenCodeLLM(LLMBackend):
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "user", "content": prompt}
             ],
@@ -1003,6 +1204,16 @@ class FallbackLLM(LLMBackend):
                     ),
                     timeout=self.BACKEND_TIMEOUT_S,
                 )
+                # A provider can return HTTP 200 with nothing in it -- a
+                # content filter, a refusal, a malformed tool call, or
+                # `content: null`, which several OpenAI-compatible providers
+                # emit routinely. That used to count as success, so the chain
+                # stopped dead on it and the empty string travelled all the
+                # way to the user: no reply at all on Telegram, a raw JSON
+                # blob in the CLI. Treat it as this backend failing so the
+                # next one actually gets a turn.
+                if not (result or "").strip():
+                    raise RuntimeError(f"{backend.__class__.__name__} returned an empty response")
                 logger.info(f"LLM backend {backend.__class__.__name__} succeeded")
                 # Backends that can extract real provider-reported usage from
                 # their own raw API response stash it on self._last_usage
@@ -1036,9 +1247,14 @@ class FallbackLLM(LLMBackend):
                 )
                 last_exception = e
                 continue
-        # If all backends failed, raise the last exception
+        # If all backends failed, raise the last exception. `last_exception`
+        # is still None when every backend was skipped by the no-key guard
+        # above -- raising that gave the user "exceptions must derive from
+        # BaseException" instead of anything about LLMs.
         logger.error("All LLM backends failed")
-        raise last_exception
+        raise last_exception or RuntimeError(
+            "No LLM backend was usable -- none is configured with a working key."
+        )
 
 # Real, declarative catalog of cloud LLM providers -- single source of truth
 # for get_llm_backends()'s PHASE 1 below AND for main_new.py's /config/keys
@@ -1055,6 +1271,11 @@ LLM_PROVIDER_CATALOG: list[tuple[str, str, type, str]] = [
     ("OPENROUTER_API_KEY", "OpenRouter", OpenRouterLLM, "aggregator backend"),
     ("OPENCODE_API_KEY", "OpenCode Zen", OpenCodeLLM, "coding-focused cloud backend"),
     ("CLAWROUTER_API_KEY", "ClawRouter", ClawRouterLLM, "managed multi-provider backend"),
+    # Last of the cloud tier, but deliberately still IN the cloud tier: a
+    # datacenter-hosted 120B+ open model beats anything a CPU-only box can
+    # run locally, so Ollama Cloud must be tried before the local Ollama
+    # daemon (Phase 2 below), which stays as the true offline last resort.
+    ("OLLAMA_CLOUD_API_KEY", "Ollama Cloud", OllamaCloudLLM, "hosted open-model backend"),
 ]
 
 
@@ -1101,6 +1322,15 @@ def get_llm_backends():
                 if free_model != backends[-1].model:
                     logger.info(f"Adding GeminiLLM as free-tier fallback (model={free_model})")
                     backends.append(GeminiLLM(model=free_model))
+
+    # Ollama Cloud via the OLLAMA_API_KEY spelling (the one Ollama's own
+    # tooling uses) -- the catalog entry above only checks
+    # OLLAMA_CLOUD_API_KEY, so this catches the other real way people set
+    # it. Still added HERE, before the local daemon below: hosted 120B+
+    # models outrank anything local, but local stays the offline fallback.
+    if os.getenv("OLLAMA_API_KEY") and not any(isinstance(b, OllamaCloudLLM) for b in backends):
+        logger.info("Adding OllamaCloudLLM (via OLLAMA_API_KEY) ahead of local Ollama")
+        backends.append(OllamaCloudLLM())
 
     # ---- PHASE 2: Local (free, offline fallback) ----
     disable_auto_ollama = os.getenv("DISABLE_AUTO_OLLAMA", "0").strip() == "1"
@@ -1163,7 +1393,44 @@ def get_llm_backends():
         logger.warning("No valid LLM backends configured; using DummyLLM")
         backends.append(DummyLLM())
 
+    backends = apply_primary_preference(backends)
+
     logger.info(f"LLM backend chain initialized with {len(backends)} backends: {[b.__class__.__name__ for b in backends]}")
+    return backends
+
+
+def matches_backend_name(cls_name: str, want: str) -> bool:
+    """Does `want` name this backend class? Accepts the full class name, its
+    lowercase stem ('anthropic' for AnthropicLLM), and the stem with the
+    OllamaAutoModels suffix dropped, which is how the CLI and UI refer to a
+    local daemon."""
+    want = (want or "").strip().lower().replace(" ", "")
+    if not want:
+        return False
+    stem = cls_name.lower().removesuffix("llm")
+    return want in (cls_name.lower(), stem) or want == stem.removesuffix("automodels")
+
+
+def apply_primary_preference(backends: list) -> list:
+    """Move the backend named by LLM_PRIMARY to the front of the chain.
+
+    /llm/primary and /llm/model used to reorder the live list in memory only,
+    so an explicit model choice silently reverted to the catalog's default
+    (Claude first) on the next restart -- and `docker compose watch` restarts
+    on any backend edit, so 'the next restart' was often minutes away. The
+    choice is written to .env; this is what honours it on the way back up.
+    """
+    want = os.getenv("LLM_PRIMARY", "").strip()
+    if not want or not backends:
+        return backends
+    for i, b in enumerate(backends):
+        if matches_backend_name(b.__class__.__name__, want):
+            if i:
+                backends.insert(0, backends.pop(i))
+                logger.info("LLM_PRIMARY=%s honoured; %s leads the chain", want, b.__class__.__name__)
+            return backends
+    logger.warning("LLM_PRIMARY=%s is not in the live chain (%s); leaving default order",
+                   want, [b.__class__.__name__ for b in backends])
     return backends
 
 

@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server'
+import { BACKEND_URL as BACKEND, backendHeaders } from '@/lib/nancy/backend-server'
 
-const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 export async function GET() {
   try {
-    const res = await fetch(`${BACKEND}/plugins`, { cache: 'no-store' })
+    const res = await fetch(`${BACKEND}/plugins`, { headers: backendHeaders(), cache: 'no-store' })
     const json = await res.json()
     return NextResponse.json(json, { status: res.status })
   } catch {
@@ -19,7 +19,7 @@ export async function POST(request: Request) {
     // behind Telegram approval, which can take up to 2 minutes to resolve.
     const res = await fetch(`${BACKEND}/plugins`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: backendHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(130_000),
     })

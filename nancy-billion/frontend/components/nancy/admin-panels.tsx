@@ -35,7 +35,8 @@ import {
   Orbit, RotateCcw, X, TrendingUp,
 } from 'lucide-react'
 
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
+// Same-origin authenticated proxy -- see app/api/backend/[...path]/route.ts.
+const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? '/api/backend'
 
 /* Small shared primitives for the CRUD panels below */
 function PrimaryButton({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
@@ -3297,13 +3298,30 @@ function MemoryGalaxyView() {
   // view to center it instead of an instant jump cut, the "sleek
   // transition" the galaxy is supposed to feel like.
   const cameraAnimRef = useRef<{ from: { x: number; y: number; scale: number }; to: { x: number; y: number; scale: number }; start: number; duration: number } | null>(null)
-  // Purely decorative fixed backdrop -- generated once, independent of any
-  // real memory data, just atmosphere.
-  const backgroundStarsRef = useRef<Array<{ x: number; y: number; r: number; phase: number }>>(
-    Array.from({ length: 140 }, () => ({
-      x: Math.random(), y: Math.random(), r: 0.4 + Math.random() * 1.1, phase: Math.random() * Math.PI * 2,
+  // Purely decorative backdrop -- generated once, independent of any real
+  // memory data, just atmosphere. TWO star layers drifting at different
+  // speeds gives real parallax depth (the far layer barely moves), and a
+  // handful of nebula clouds + the occasional shooting star make the sky
+  // feel alive without ever being busy -- minimum motion, like an actual
+  // night sky, not a screensaver.
+  const backgroundStarsRef = useRef<Array<{ x: number; y: number; r: number; phase: number; layer: number }>>(
+    Array.from({ length: 190 }, (_, i) => ({
+      x: Math.random(), y: Math.random(),
+      r: i < 120 ? 0.3 + Math.random() * 0.8 : 0.6 + Math.random() * 1.2,
+      phase: Math.random() * Math.PI * 2,
+      layer: i < 120 ? 0 : 1, // 0 = far (slow), 1 = near (slightly faster)
     })),
   )
+  const nebulaRef = useRef<Array<{ x: number; y: number; r: number; hue: string; drift: number; phase: number }>>(
+    [
+      { x: 0.22, y: 0.3, r: 0.34, hue: 'rgba(56, 189, 248, 0.05)', drift: 0.0000045, phase: 0 },
+      { x: 0.74, y: 0.62, r: 0.4, hue: 'rgba(167, 139, 250, 0.045)', drift: 0.0000032, phase: 2.1 },
+      { x: 0.55, y: 0.18, r: 0.26, hue: 'rgba(244, 190, 79, 0.03)', drift: 0.0000058, phase: 4.2 },
+    ],
+  )
+  // One shooting star at a time, seldom -- a real sky event, not confetti.
+  const shootingRef = useRef<{ x: number; y: number; vx: number; vy: number; born: number } | null>(null)
+  const nextShootingAtRef = useRef<number>(performance.now() + 6000 + Math.random() * 9000)
 
   const [nodes, setNodes] = useState<GraphNode[]>([])
   const [loading, setLoading] = useState(true)
@@ -3434,6 +3452,12 @@ function MemoryGalaxyView() {
       for (const a of list) {
         a.vx += (cx - a.x) * 0.0012
         a.vy += (cy - a.y) * 0.0012
+        // Galactic rotation: a tiny tangential drift around the center, so
+        // the whole memory field slowly swirls like a real galaxy instead
+        // of settling into a frozen constellation. Perpendicular to the
+        // center vector; the centering spring above keeps orbits bound.
+        a.vx += -(a.y - cy) * 0.00035
+        a.vy += (a.x - cx) * 0.00035
         a.vx *= 0.86
         a.vy *= 0.86
         const isDraggedNode = dragging?.mode === 'node' && dragging.id === a.id
@@ -3466,15 +3490,63 @@ function MemoryGalaxyView() {
       ctx.setTransform(dprRef.current, 0, 0, dprRef.current, 0, 0)
       ctx.clearRect(0, 0, w, h)
 
-      // Fixed decorative starfield backdrop -- drawn in raw screen space
-      // (before the pan/zoom transform below), so it reads as a distant sky
-      // rather than something that scrolls with the graph.
+      // Decorative deep-sky backdrop -- drawn in raw screen space (before
+      // the pan/zoom transform below), so it reads as a distant sky rather
+      // than something that scrolls with the graph.
+      // 1) Nebula clouds: huge, near-invisible radial gradients drifting
+      //    imperceptibly -- depth, not decoration.
+      for (const nb of nebulaRef.current) {
+        const dx = Math.sin(now * nb.drift + nb.phase) * 0.03
+        const dy = Math.cos(now * nb.drift * 0.8 + nb.phase) * 0.02
+        const nx = (nb.x + dx) * w, ny = (nb.y + dy) * h, nr = nb.r * Math.max(w, h)
+        const grad = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr)
+        grad.addColorStop(0, nb.hue)
+        grad.addColorStop(1, 'rgba(0,0,0,0)')
+        ctx.fillStyle = grad
+        ctx.fillRect(nx - nr, ny - nr, nr * 2, nr * 2)
+      }
+      // 2) Parallax starfield: two layers drifting at different speeds.
       for (const bs of backgroundStarsRef.current) {
-        const twinkle = 0.35 + 0.35 * (0.5 + 0.5 * Math.sin(now * 0.0006 + bs.phase))
+        const speed = bs.layer === 0 ? 0.0000012 : 0.0000032
+        const sx = ((bs.x + now * speed) % 1) * w
+        const twinkle = 0.3 + (bs.layer === 0 ? 0.28 : 0.4) * (0.5 + 0.5 * Math.sin(now * 0.0006 + bs.phase))
         ctx.beginPath()
-        ctx.arc(bs.x * w, bs.y * h, bs.r, 0, Math.PI * 2)
+        ctx.arc(sx, bs.y * h, bs.r, 0, Math.PI * 2)
         ctx.fillStyle = `rgba(226, 232, 240, ${twinkle.toFixed(3)})`
         ctx.fill()
+      }
+      // 3) The rare shooting star: one streak every 6-15s, ~700ms of life.
+      if (!shootingRef.current && now >= nextShootingAtRef.current) {
+        const fromLeft = Math.random() < 0.5
+        shootingRef.current = {
+          x: fromLeft ? -0.05 * w : 1.05 * w,
+          y: Math.random() * h * 0.5,
+          vx: (fromLeft ? 1 : -1) * (0.9 + Math.random() * 0.5),
+          vy: 0.25 + Math.random() * 0.2,
+          born: now,
+        }
+        nextShootingAtRef.current = now + 6000 + Math.random() * 9000
+      }
+      const shot = shootingRef.current
+      if (shot) {
+        const life = (now - shot.born) / 700
+        if (life >= 1) {
+          shootingRef.current = null
+        } else {
+          const px = shot.x + shot.vx * (now - shot.born)
+          const py = shot.y + shot.vy * (now - shot.born)
+          const fade = 1 - life
+          const tail = 46
+          const tgrad = ctx.createLinearGradient(px, py, px - shot.vx * tail, py - shot.vy * tail)
+          tgrad.addColorStop(0, `rgba(226, 232, 240, ${(0.85 * fade).toFixed(3)})`)
+          tgrad.addColorStop(1, 'rgba(226, 232, 240, 0)')
+          ctx.strokeStyle = tgrad
+          ctx.lineWidth = 1.2
+          ctx.beginPath()
+          ctx.moveTo(px, py)
+          ctx.lineTo(px - shot.vx * tail, py - shot.vy * tail)
+          ctx.stroke()
+        }
       }
 
       ctx.save()
@@ -3533,7 +3605,22 @@ function MemoryGalaxyView() {
         ctx.shadowBlur = (planet ? 18 : 8) * view.scale
         ctx.beginPath()
         ctx.arc(n.x, n.y, drawRadius, 0, Math.PI * 2)
-        ctx.fillStyle = color
+        if (planet) {
+          // A lit sphere, not a flat disc: light falls from the upper-left
+          // (a bright limb fading into the body color and a darker
+          // terminator edge), which is what makes a "planet" actually read
+          // as planetary at a glance.
+          const lg = ctx.createRadialGradient(
+            n.x - drawRadius * 0.4, n.y - drawRadius * 0.4, drawRadius * 0.1,
+            n.x, n.y, drawRadius,
+          )
+          lg.addColorStop(0, 'rgba(255,255,255,0.85)')
+          lg.addColorStop(0.35, color)
+          lg.addColorStop(1, 'rgba(8, 12, 22, 0.9)')
+          ctx.fillStyle = lg
+        } else {
+          ctx.fillStyle = color
+        }
         ctx.fill()
         ctx.restore()
 

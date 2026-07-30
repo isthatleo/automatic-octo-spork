@@ -190,6 +190,48 @@ def restore_skill(name: str) -> bool:
     return True
 
 
+def save_skill(
+    name: str,
+    description: str,
+    trigger_keywords: List[str],
+    instructions: str,
+) -> Skill | None:
+    """Write a new skill folder (skills/<slug>/SKILL.md) and hot-register it
+    in the in-memory library immediately -- no backend restart needed. This
+    is the persistence half of the Hermes-style solve → distill → reuse
+    loop (see main_new.py's _maybe_distill_skill): a successful multi-tool
+    solution path becomes a named procedure that match_skills() can inject
+    into future prompts.
+
+    Refuses to overwrite an existing (or archived) skill of the same name --
+    distillation must never silently clobber a curated skill.
+    """
+    slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in name.strip().lower()).strip("-")
+    if not slug:
+        return None
+    if get_skill(name) or slug in list_archived_skills() or (SKILLS_DIR / slug).exists():
+        logger.info("save_skill: '%s' already exists, not overwriting", name)
+        return None
+    frontmatter = yaml.safe_dump(
+        {
+            "name": name,
+            "description": description,
+            "trigger_keywords": [str(k).lower() for k in trigger_keywords if str(k).strip()],
+        },
+        sort_keys=False,
+        allow_unicode=True,
+    ).strip()
+    skill_dir = SKILLS_DIR / slug
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(f"---\n{frontmatter}\n---\n\n{instructions.strip()}\n", encoding="utf-8")
+    skill = _parse_skill_md(skill_md)
+    if skill:
+        _SKILLS[skill.name] = skill
+        logger.info("save_skill: registered new skill '%s' at %s", skill.name, skill_md)
+    return skill
+
+
 def get_skill(name: str) -> Skill | None:
     return _SKILLS.get(name)
 

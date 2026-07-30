@@ -5,7 +5,10 @@
 
 import type { AgentInfo, AgentResult, AgentServiceStats } from './types'
 
-const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
+// Same-origin proxy, not the backend directly. Two reasons: on a phone
+// `localhost` is the phone, and the bearer token lives on the Next server
+// where the browser can't see it. See app/api/backend/[...path]/route.ts.
+const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? '/api/backend'
 
 // ---------------------------------------------------------------------------
 // HTTP helpers

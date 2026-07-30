@@ -119,7 +119,7 @@ function useAgentsBrief(intervalMs = 15000) {
 /** Real logical core count, read client-side only (avoids an SSR/hydration
  * mismatch, since `navigator` doesn't exist on the server) — replaces a
  * fabricated "128 cores" figure. */
-function useCpuCoreCount() {
+export function useCpuCoreCount() {
   const [cores, setCores] = useState<number | null>(null)
   useEffect(() => {
     setCores(typeof navigator !== 'undefined' ? navigator.hardwareConcurrency ?? null : null)
@@ -201,7 +201,7 @@ function useLlmUsageBrief(intervalMs = 30000) {
   return usage
 }
 
-interface AchievementsBrief {
+export interface AchievementsBrief {
   unlocked: number
   total: number
   /** Real usage-derived counters already computed by achievements_store.py
@@ -225,7 +225,7 @@ interface AchievementsBrief {
 
 /** Real unlocked/total achievement counts + activity breakdown --
  * achievements_store.py, Batch 7. */
-function useAchievementsBrief(intervalMs = 60000) {
+export function useAchievementsBrief(intervalMs = 60000) {
   const [data, setData] = useState<AchievementsBrief | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -245,7 +245,7 @@ function useAchievementsBrief(intervalMs = 60000) {
  * activity.uptime_hours, tracked since the process actually started) --
  * replaces the client-side "since this browser tab mounted" session timer
  * with the real thing now that the backend exposes it. */
-function formatUptime(hours: number | null | undefined): string {
+export function formatUptime(hours: number | null | undefined): string {
   if (hours == null) return '…'
   const totalMinutes = Math.round(hours * 60)
   const d = Math.floor(totalMinutes / 1440)
@@ -257,7 +257,7 @@ function formatUptime(hours: number | null | undefined): string {
 }
 
 /** Real relative time to a cron job's next_run timestamp (cron_store.py). */
-function formatRelative(iso: string | undefined): string {
+export function formatRelative(iso: string | undefined): string {
   if (!iso) return '…'
   const diffMs = new Date(iso).getTime() - Date.now()
   if (diffMs <= 0) return 'due now'
@@ -271,7 +271,7 @@ function formatRelative(iso: string | undefined): string {
 /** Real arm-switch + egress-proxy state -- both are live, actionable safety
  * surfaces from Batches 1/6 with no visibility anywhere on the main
  * dashboard until now. */
-function useSafetyBrief(intervalMs = 15000) {
+export function useSafetyBrief(intervalMs = 15000) {
   const [armed, setArmed] = useState<boolean | null>(null)
   const [proxyRunning, setProxyRunning] = useState<boolean | null>(null)
   useEffect(() => {

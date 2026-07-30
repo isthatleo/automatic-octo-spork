@@ -1,13 +1,13 @@
 import { NextResponse } from 'next/server'
+import { BACKEND_URL as BACKEND, backendHeaders } from '@/lib/nancy/backend-server'
 
-const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params
     const { searchParams } = new URL(request.url)
     const pinned = searchParams.get('pinned') ?? 'true'
-    const res = await fetch(`${BACKEND}/canvas/${encodeURIComponent(id)}?pinned=${pinned}`, { method: 'PATCH' })
+    const res = await fetch(`${BACKEND}/canvas/${encodeURIComponent(id)}?pinned=${pinned}`, { headers: backendHeaders(), method: 'PATCH' })
     const json = await res.json()
     return NextResponse.json(json, { status: res.status })
   } catch {
@@ -21,7 +21,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     const body = await request.json()
     const res = await fetch(`${BACKEND}/canvas/${encodeURIComponent(id)}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: backendHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     })
     const json = await res.json()
@@ -34,7 +34,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params
-    const res = await fetch(`${BACKEND}/canvas/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    const res = await fetch(`${BACKEND}/canvas/${encodeURIComponent(id)}`, { headers: backendHeaders(), method: 'DELETE' })
     const json = await res.json()
     return NextResponse.json(json, { status: res.status })
   } catch {

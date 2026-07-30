@@ -198,6 +198,14 @@ export function AgentTaskModal({ agent, onClose, onResult }: AgentTaskModalProps
               <span className={cn('text-[0.5rem]', statusColor)}>
                 {agent.status}
               </span>
+              {(agent.hardware_connected === false || (agent.mode && agent.mode !== 'production' && agent.mode !== 'real')) && (
+                <span
+                  className="rounded border border-accent/50 px-1.5 py-0.5 text-[0.45rem] uppercase tracking-wide text-accent"
+                  title="Honesty flag reported by the agent itself: its results come from simulated data or a designed-for integration with no real hardware attached."
+                >
+                  {agent.hardware_connected === false ? 'simulated · no hardware' : agent.mode}
+                </span>
+              )}
             </div>
             <p className="mt-0.5 text-[0.55rem] text-muted-foreground">{agent.domain} · {agent.description}</p>
           </div>

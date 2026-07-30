@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
+import { BACKEND_URL as BACKEND, backendHeaders } from '@/lib/nancy/backend-server'
 
-const BACKEND = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000'
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
@@ -10,7 +10,7 @@ export async function GET(req: Request) {
     const url = new URL(`${BACKEND}/files/glob`)
     url.searchParams.set('pattern', pattern)
     url.searchParams.set('path', searchParams.get('path') ?? '.')
-    const res = await fetch(url.toString(), { cache: 'no-store' })
+    const res = await fetch(url.toString(), { headers: backendHeaders(), cache: 'no-store' })
     const json = await res.json().catch(() => ({}))
     return NextResponse.json(json, { status: res.status })
   } catch {

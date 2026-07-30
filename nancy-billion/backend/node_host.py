@@ -124,6 +124,38 @@ async def dispatch_clipboard_write(node_id: str, text: str) -> Dict[str, Any]:
     return await _call_node(node_id, "/clipboard_write", {"text": text})
 
 
+async def dispatch_list_elements(node_id: str) -> Dict[str, Any]:
+    """Real numbered-element-overlay enumeration of the node's foreground
+    window -- returns both the element list and a screenshot with numbered
+    boxes drawn on it, so a vision-capable caller can pick a number for
+    dispatch_click_element rather than guessing raw pixel coordinates."""
+    return await _call_node(node_id, "/list_elements", {})
+
+
+async def dispatch_click_element(node_id: str, number: int, background: bool = False) -> Dict[str, Any]:
+    return await _call_node(node_id, "/click_element", {"number": number, "background": background})
+
+
+async def dispatch_mouse_move(node_id: str, x: int, y: int) -> Dict[str, Any]:
+    return await _call_node(node_id, "/mouse_move", {"x": x, "y": y})
+
+
+async def dispatch_mouse_click(node_id: str, x: Optional[int] = None, y: Optional[int] = None, button: str = "left", double: bool = False) -> Dict[str, Any]:
+    return await _call_node(node_id, "/mouse_click", {"x": x, "y": y, "button": button, "double": double})
+
+
+async def dispatch_mouse_scroll(node_id: str, amount: int = -3) -> Dict[str, Any]:
+    return await _call_node(node_id, "/mouse_scroll", {"amount": amount})
+
+
+async def dispatch_keyboard_type(node_id: str, text: str) -> Dict[str, Any]:
+    return await _call_node(node_id, "/keyboard_type", {"text": text})
+
+
+async def dispatch_keyboard_key(node_id: str, key: str) -> Dict[str, Any]:
+    return await _call_node(node_id, "/keyboard_key", {"key": key})
+
+
 async def check_node_health(node_id: str) -> Dict[str, Any]:
     nodes = _load_nodes()
     node = nodes.get(node_id)

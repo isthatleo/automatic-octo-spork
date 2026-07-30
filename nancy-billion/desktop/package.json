@@ -1,0 +1,27 @@
+{
+  "name": "billion-desktop",
+  "productName": "Billion",
+  "version": "1.0.0",
+  "description": "Billion — Sovereign AI OS desktop app (wraps the local control room)",
+  "main": "main.js",
+  "author": "Leonard Lomude",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "os.sovereign.billion",
+    "productName": "Billion",
+    "icon": "build/icon.png",
+    "win": { "target": ["nsis", "portable"] },
+    "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },
+    "linux": { "target": ["AppImage", "deb"], "category": "Utility" }
+  }
+}
