@@ -8,7 +8,6 @@
 let ctx: AudioContext | null = null
 let master: GainNode | null = null
 let enabled = true
-let hum: { osc: OscillatorNode; gain: GainNode } | null = null
 
 function ac(): AudioContext | null {
   if (typeof window === 'undefined') return null
@@ -28,7 +27,6 @@ function ac(): AudioContext | null {
 
 export function setSfxEnabled(v: boolean) {
   enabled = v
-  if (!v) stopHum()
 }
 
 /** Must be called from a user gesture to unlock audio on iOS/Safari. */
@@ -139,33 +137,6 @@ export const sfx = {
     tone(1200, 0.05, 'square', 0.12, 0.09)
     tone(1600, 0.14, 'sine', 0.2, 0.2)
   },
-  /** Ambient reactor hum (loops until stopped) */
-  startHum() {
-    const c = ac()
-    if (!c || !master || !enabled || hum) return
-    const osc = c.createOscillator()
-    const g = c.createGain()
-    const lp = c.createBiquadFilter()
-    lp.type = 'lowpass'
-    lp.frequency.value = 260
-    osc.type = 'sawtooth'
-    osc.frequency.value = 55
-    osc.connect(lp).connect(g).connect(master)
-    g.gain.value = 0
-    g.gain.linearRampToValueAtTime(0.045, c.currentTime + 1.2)
-    osc.start()
-    hum = { osc, gain: g }
-  },
-}
-
-export function stopHum() {
-  const c = ac()
-  if (!c || !hum) return
-  hum.gain.gain.cancelScheduledValues(c.currentTime)
-  hum.gain.gain.linearRampToValueAtTime(0, c.currentTime + 0.4)
-  const h = hum
-  hum = null
-  setTimeout(() => { try { h.osc.stop() } catch {} }, 500)
 }
 
 /**

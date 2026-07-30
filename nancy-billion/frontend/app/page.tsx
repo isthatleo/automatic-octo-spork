@@ -640,7 +640,6 @@ export default function Page() {
     if (booting) return
     unlockSfx()
     sfx.boot()
-    sfx.startHum()
     const fallback = 'Online, Sir. Say my name whenever you need me.'
     const t = setTimeout(() => {
       // Real personalized greeting (live forex rates, memory/projects, open

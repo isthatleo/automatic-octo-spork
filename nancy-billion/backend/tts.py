@@ -120,33 +120,55 @@ class Pyttsx3TTS(TTSBackend):
                         logger.info(f"TTS using voice (hazel/en-GB): {getattr(v, 'name', '')}")
                         return
 
-                # Enhanced fallback heuristic for female British voice.
-                preferred_substrings = ["hazel", "zira", "female", "woman", "british", "uk", "english"]
-                female_indicators = ["female", "woman", "girl", "lady"]
-                british_indicators = ["hazel", "en-gb", "gb", "brit", "uk", "english", "british"]
-                
+                # Real bug, confirmed live: on espeak/espeak-ng (this container's
+                # driver -- pyttsx3 only uses SAPI5 on native Windows), loose
+                # substring indicators like "english"/"uk"/"gb" false-positive
+                # on plenty of NON-English voices whose descriptive name merely
+                # mentions English in passing -- e.g. "Chinese (Mandarin, latin
+                # as English)" (transliteration note, not a language) contains
+                # "english"; "Ukrainian"'s own id/lang IS "uk". Both tied the
+                # real English (Great Britain) voice's score, and since ties
+                # kept whichever voice the loop saw FIRST (list order, not
+                # relevance), Nancy ended up speaking through a Chinese voice.
+                # Fixed by first filtering to voices whose actual `languages`
+                # field (the structured signal espeak reports, not the human-
+                # readable name) is really English, and only ranking
+                # accent/gender preference within that filtered set.
+                def is_english(v) -> bool:
+                    langs = getattr(v, "languages", None) or []
+                    if isinstance(langs, (str, bytes)):
+                        langs = [langs]
+                    for lang in langs:
+                        code = lang.decode("utf-8", "ignore") if isinstance(lang, bytes) else str(lang)
+                        if code.strip().lower().split("-")[0] == "en":
+                            return True
+                    # Fallback for drivers that report languages oddly: the id
+                    # itself encodes the language for espeak (e.g. "gmw/en-gb").
+                    id_ = str(getattr(v, "id", "")).lower()
+                    return "/en" in id_ or id_.startswith("en")
+
+                english_voices = [v for v in voices if is_english(v)]
+                candidates = english_voices or voices  # never silently pick nothing if no English voice exists
+
+                female_indicators = ["female", "woman", "girl", "lady", "zira", "hazel"]
+                british_indicators = ["en-gb", "great britain", "british", "rp", "received pronunciation"]
+
                 best = None
                 best_score = -1
-                for v in voices:
+                for v in candidates:
                     t = voice_text(v)
                     s = 0
-                    # Strong preference for known British female voices
-                    if "hazel" in t:
-                        s += 300
-                    # British indicators
                     if any(indicator in t for indicator in british_indicators):
                         s += 200
-                    # Female indicators
                     if any(indicator in t for indicator in female_indicators):
                         s += 150
-                    # Explicit desired voice match
                     if desired and desired in t:
                         s += 1000
                     if s > best_score:
                         best = v
                         best_score = s
 
-                if best is not None and best_score > 0:
+                if best is not None:
                     self.engine.setProperty("voice", getattr(best, "id", None) or getattr(best, "name", None))
                     logger.info(f"TTS using voice (enhanced heuristic): {getattr(best, 'name', '')}")
 
