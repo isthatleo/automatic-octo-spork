@@ -26,3 +26,11 @@ nancy-billion/backups/
 # voice engine -- not this repo's source, and `git add` would either error
 # on the nested .git or silently create a submodule reference nobody set up.
 neutts/
+
+# Generated native app projects/build output -- regenerated on demand
+# (`npm run add:android`/`add:ios` in mobile/, `npm run dist:*` in desktop/),
+# not source. The Electron dist/ folder alone contains a 180MB+ .exe --
+# same 100MB-push-blocker risk noted above.
+nancy-billion/desktop/dist/
+nancy-billion/mobile/android/
+nancy-billion/mobile/ios/
