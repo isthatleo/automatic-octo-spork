@@ -70,6 +70,14 @@ from blueprint_catalog import CATALOG as BLUEPRINT_CATALOG, get_blueprint, bluep
 from skill_bundles import skill_bundle_store
 import run_script_tool
 from web_tool import fetch_url, web_search, extract_urls, WEB_TOOLS
+from media_tools import generate_image, MEDIA_TOOLS
+from research_tools import search_arxiv, get_prediction_markets, RESEARCH_TOOLS
+from document_tools import (
+    create_word_document, create_excel_spreadsheet, create_pdf_document,
+    create_powerpoint_presentation, DOCUMENT_TOOLS,
+)
+from email_tools import send_email, list_recent_emails, EMAIL_TOOLS
+from jupyter_tools import run_python_kernel, restart_python_kernel, JUPYTER_TOOLS
 import browser_tool
 import everyday_tools
 import archive_tools
@@ -1947,7 +1955,18 @@ _WANTS_TOOLS_RE = re.compile(
     # Real numbered-element-overlay computer use (list_screen_elements /
     # click_numbered_element) -- distinct from the raw-coordinate click_screen
     # phrasing already matched above.
-    r"(numbered|labell?ed) element\w*|click (element|number)\b|screen element\w*)\b",
+    r"(numbered|labell?ed) element\w*|click (element|number)\b|screen element\w*|"
+    # Real image generation (generate_image), arXiv/prediction-market
+    # research (search_arxiv/get_prediction_markets), Office/PDF document
+    # creation, and email send/receive -- all added 2026-07-31 (Hermes-parity
+    # gap-closing).
+    r"(generate|create|make|draw) (an? |the )?(image|picture|illustration|artwork)\b|"
+    r"\barxiv\b|search (for )?(a |the )?paper|academic paper\w*|"
+    r"prediction market\w*|polymarket\b|betting odds\b|"
+    r"(create|make|generate|write) (a |an )?(word document|\.docx|spreadsheet|\.xlsx|excel (file|sheet)|pdf( document| file)?)\b|"
+    r"(send|write|compose) (an? )?email\b|(check|read|list) (my |the )?(recent |unread )?emails?\b|"
+    r"(create|make|generate|write) (a |an )?(powerpoint|\.pptx|presentation|slide deck)\b|"
+    r"(run|execute) (this |that |some )?python\b|python kernel\b|jupyter\b)\b",
     re.IGNORECASE,
 )
 
@@ -2240,7 +2259,8 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
         + everyday_tools.EVERYDAY_TOOLS + archive_tools.ARCHIVE_TOOLS
         + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS
         + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + google_calendar.CALENDAR_TOOLS + NODE_TOOLS + DIFF_TOOLS
-        + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS + NUMBERED_OVERLAY_TOOLS
+        + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS + NUMBERED_OVERLAY_TOOLS + MEDIA_TOOLS
+        + RESEARCH_TOOLS + DOCUMENT_TOOLS + EMAIL_TOOLS + JUPYTER_TOOLS
     )
 
 
@@ -2372,6 +2392,62 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
 
     if name == "web_search":
         return await web_search(tool_input.get("query", ""), max_results=tool_input.get("max_results", 5))
+
+    if name == "generate_image":
+        result = await generate_image(tool_input.get("prompt", ""), title=tool_input.get("title", ""))
+        evidence_ledger.record_evidence("generate_image", tool_input.get("prompt", "")[:80], result.get("success", False))
+        return result
+
+    if name == "search_arxiv":
+        return await search_arxiv(tool_input.get("query", ""), max_results=tool_input.get("max_results", 5))
+
+    if name == "get_prediction_markets":
+        return await get_prediction_markets(tool_input.get("query", ""), max_results=tool_input.get("max_results", 5))
+
+    if name in ("create_word_document", "create_excel_spreadsheet", "create_pdf_document", "create_powerpoint_presentation"):
+        loop = asyncio.get_event_loop()
+        if name == "create_word_document":
+            fn = lambda: create_word_document(tool_input.get("path", ""), tool_input.get("title", ""), tool_input.get("sections"))
+        elif name == "create_excel_spreadsheet":
+            fn = lambda: create_excel_spreadsheet(
+                tool_input.get("path", ""), tool_input.get("headers", []), tool_input.get("rows", []),
+                sheet_name=tool_input.get("sheet_name", "Sheet1"),
+            )
+        elif name == "create_powerpoint_presentation":
+            fn = lambda: create_powerpoint_presentation(
+                tool_input.get("path", ""), tool_input.get("title", ""), tool_input.get("slides", []),
+                subtitle=tool_input.get("subtitle", ""),
+            )
+        else:
+            fn = lambda: create_pdf_document(tool_input.get("path", ""), tool_input.get("title", ""), tool_input.get("sections"))
+        result = await loop.run_in_executor(None, fn)
+        evidence_ledger.record_evidence(name, tool_input.get("path", ""), result.get("success", False))
+        return result
+
+    if name == "send_email":
+        to, subject, body = tool_input.get("to", ""), tool_input.get("subject", ""), tool_input.get("body", "")
+        if not await _request_approval(f"Nancy wants to email {to}: {subject!r}", timeout=120.0):
+            return {"success": False, "error": "User did not approve this email."}
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: send_email(to, subject, body))
+        evidence_ledger.record_evidence("send_email", f"to {to}: {subject}", result.get("success", False))
+        return result
+
+    if name == "list_recent_emails":
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: list_recent_emails(tool_input.get("limit", 10), tool_input.get("unread_only", False))
+        )
+
+    if name == "run_python_kernel":
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: run_python_kernel(tool_input.get("code", "")))
+        evidence_ledger.record_evidence("run_python_kernel", tool_input.get("code", "")[:80], result.get("success", False))
+        return result
+
+    if name == "restart_python_kernel":
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, restart_python_kernel)
 
     if name == "llm_structured_task":
         return await structured_llm_call(tool_input.get("prompt", ""), tool_input.get("json_schema", {}))

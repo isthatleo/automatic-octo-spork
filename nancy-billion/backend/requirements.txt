@@ -155,6 +155,19 @@ python-lsp-server[all]>=1.14.0
 # already a dependency via other tooling; python-docx is the .docx equivalent.
 python-docx>=1.2.0
 
+# Document CREATION (document_tools.py) -- the write-side counterpart to the
+# extraction above. python-docx (already present, above) also handles .docx
+# creation; these cover .xlsx, .pdf, and .pptx respectively.
+openpyxl>=3.1.0
+reportlab>=4.2.0
+python-pptx>=1.0.0
+
+# Real stateful Python execution (jupyter_tools.py) -- a genuine persistent
+# IPython kernel per session (variables/imports survive between calls), not
+# a fresh `execute_command python -c ...` subprocess each time.
+jupyter_client>=8.6.0
+ipykernel>=6.29.0
+
 # Real LAN service discovery (mdns_discovery.py).
 zeroconf>=0.140.0
 
@@ -171,7 +184,15 @@ docker>=7.0.0
 # second backtracking loop re-walking unrelated packages (uvicorn, one
 # version at a time) trying to satisfy the whole graph; an exact pin skips
 # that search entirely.
-playwright==1.48.0
+# Bumped 1.48.0 -> 1.55.0 (still an exact pin, same reasoning above): 1.48.0
+# depends on greenlet==3.1.1 exactly, which has no prebuilt wheel for Python
+# 3.14 and fails to compile from source against 3.14's changed CPython
+# internals (_PyInterpreterFrame, Py_C_RECURSION_LIMIT) -- confirmed live
+# trying to run this backend natively on Windows outside Docker. 1.55.0
+# depends on greenlet<4.0.0,>=3.1.1 (a range, satisfied by 3.5.4's real
+# cp314 wheel) without changing anything about the actual browser-automation
+# API this codebase uses.
+playwright==1.55.0
 
 # Real on-demand webcam capture (node_agent_stub.py's /camera_snapshot).
 # Only ever actually exercised when node_agent_stub.py runs natively on the
