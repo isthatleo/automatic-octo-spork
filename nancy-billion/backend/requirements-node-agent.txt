@@ -1,0 +1,35 @@
+# node_agent_stub.py's own dependencies -- NOT part of requirements.txt on
+# purpose. That file installs into the Linux backend container; this script
+# runs natively on the Windows machine it's paired with (see
+# scripts/start-node-agent.ps1), a completely separate Python environment
+# with its own footprint. Install with:
+#
+#   pip install -r backend/requirements-node-agent.txt
+#
+# fastapi/uvicorn/pydantic are already needed for the stub's own HTTP server
+# but are pinned loosely here since this environment doesn't share the
+# backend container's exact-version lock file.
+fastapi
+uvicorn
+pydantic
+
+# UI Automation (numbered-element-overlay enumeration + click-by-number) --
+# without this, /list_elements and /click_element fail with "No module
+# named 'pywinauto'" while every other endpoint in the file still works
+# (they only need pywin32, below).
+pywinauto==0.6.9
+
+# Screenshots, mouse/keyboard input, clipboard, open_application, camera --
+# already present on most Windows Python installs, but pinned here for
+# reproducibility.
+pywin32==312
+
+# Screenshot capture (/screenshot).
+Pillow==12.3.0
+# Clipboard read/write (/clipboard_read, /clipboard_write).
+pyperclip==1.11.0
+# Raw mouse/keyboard input (/mouse_move, /mouse_click, /keyboard_type, /keyboard_key).
+PyAutoGUI==0.9.54
+# One-shot webcam capture (/camera_snapshot). Headless build -- no GUI
+# window functions are used, just VideoCapture + imencode.
+opencv-python-headless==4.10.0.84

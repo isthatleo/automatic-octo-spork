@@ -11,7 +11,8 @@ or an SSH tunnel), never exposed directly to the public internet.
 
 Extra dependencies this file needs, NOT in backend/requirements.txt (this
 runs natively on the Windows node, never inside the Linux backend
-container, so it has its own footprint): `pip install pywinauto pywin32`.
+container, so it has its own footprint):
+`pip install -r backend/requirements-node-agent.txt`.
 Without pywinauto specifically, /list_elements and /click_element (the
 numbered-overlay computer-use tools) fail with "No module named
 'pywinauto'" -- everything else in this file (screenshots, mouse/keyboard,
@@ -177,9 +178,9 @@ async def clipboard_write_route(req: ClipboardWriteRequest, x_node_secret: Optio
 # Uses pywinauto (UI Automation backend) + pywin32 -- NOT part of the
 # Docker backend's requirements.txt (this script runs standalone on the
 # real Windows desktop, its own separate dependency footprint). Install
-# with `pip install pywinauto pywin32` on the node machine; every endpoint
-# below degrades to a real, honest error if they're missing rather than
-# crashing the whole agent.
+# with `pip install -r backend/requirements-node-agent.txt` on the node
+# machine; every endpoint below degrades to a real, honest error if they're
+# missing rather than crashing the whole agent.
 ####################################################################
 
 # In-memory cache of the last real element enumeration, keyed by the
