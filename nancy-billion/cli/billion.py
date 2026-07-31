@@ -35,6 +35,18 @@ SESSION_ID = time.strftime("%Y%m%d_%H%M%S") + "_" + os.urandom(2).hex()
 
 # os.system('') flips modern Windows consoles into VT mode so ANSI renders.
 os.system("")
+# Real crash, confirmed live: Windows' Python defaults stdout/stderr to the
+# legacy console codepage (cp1252 here) whenever it isn't attached to a real
+# interactive terminal -- piped output, a redirected file, some CI runners --
+# and the box-drawing (╭) and braille spinner (⠋) characters below
+# aren't in that codepage, so the very first print() crashed with
+# UnicodeEncodeError before anything ever rendered. reconfigure() is a no-op
+# error if stdout has no such method (rare, older embedded interpreters).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 CYAN, GOLD, DIM, BOLD, RED, RESET = "\033[96m", "\033[93m", "\033[2m", "\033[1m", "\033[91m", "\033[0m"
 
 # Dot-matrix reactor orb -- Billion's mark, in the same dotted style as the
