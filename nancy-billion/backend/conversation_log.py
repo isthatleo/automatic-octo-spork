@@ -113,6 +113,25 @@ def search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
         return []
 
 
+def recent_turns(role: str = "user", limit: int = 500) -> List[str]:
+    """Real historical turn text for one role, newest first -- used by
+    MLAgent to build a real training set from what was actually said,
+    instead of synthetic/fabricated examples."""
+    limit = max(1, min(int(limit), 5000))
+    try:
+        with _lock, _connect() as conn:
+            if not _ensure_schema(conn):
+                return []
+            rows = conn.execute(
+                "SELECT content FROM turns WHERE role = ? ORDER BY ts DESC LIMIT ?",
+                (role, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
+    except Exception:
+        logger.exception("conversation_log.recent_turns failed")
+        return []
+
+
 def stats() -> Dict[str, Any]:
     try:
         with _lock, _connect() as conn:

@@ -75,6 +75,7 @@ _BUILTIN_COMMANDS = [
     ("approvals", "See what's waiting on your approval"),
     ("image", "Generate an image -- /image a description"),
     ("recall", "Search your memory -- /recall a topic"),
+    ("coworkers", "See what background tasks are being worked on"),
 ]
 
 
@@ -86,6 +87,29 @@ def _extract_location_query(text: str) -> Optional[str]:
     if not m:
         return None
     query = m.group(1).strip().rstrip("?.!,")
+    return query or None
+
+
+_INFO_PLACE_RE = re.compile(
+    r"\b(?:history of|brief history of|background of|tell me about|what do you know about|information about|facts about)\s+(.+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_info_place_query(text: str) -> Optional[str]:
+    """Best-effort extraction of a place name from an INFORMATIONAL question
+    ('history of Rome', 'tell me about Kyoto') -- distinct from
+    _extract_location_query's action-oriented phrasing ('locate Rome', 'show
+    me Kyoto'). Whether the extracted phrase is actually a real place (as
+    opposed to 'tell me about jazz') is left entirely to snapshot_for_query's
+    own real geocoding lookup, which simply returns None for anything that
+    doesn't resolve -- so a non-place topic never needs special-casing here."""
+    m = _INFO_PLACE_RE.search(text)
+    if not m:
+        return None
+    query = m.group(1).strip().rstrip("?.!,")
+    # Trims a trailing "'s history"/"'s background" some phrasings leave behind.
+    query = re.sub(r"['’]s\s+(history|background|story)$", "", query, flags=re.IGNORECASE).strip()
     return query or None
 
 
@@ -172,10 +196,10 @@ class TelegramNotifier:
         failure rather than raising, since a notification failing shouldn't
         break whatever triggered it. Sent as escaped HTML so it renders
         identically to plain text for every existing caller, while this
-        module's own richly-formatted messages can use _send_html directly."""
-        await self._send_html(_escape_html(text))
+        module's own richly-formatted messages can use send_html directly."""
+        await self.send_html(_escape_html(text))
 
-    async def _send_html(self, html_text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
+    async def send_html(self, html_text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
         """Send a pre-built HTML-formatted message -- the caller is
         responsible for escaping any embedded dynamic/untrusted text (see
         _escape_html). Returns the sent message_id (used later to edit an
@@ -215,6 +239,28 @@ class TelegramNotifier:
             resp.raise_for_status()
         except Exception as e:
             logger.error("Telegram send_document failed: %s", e)
+
+    async def send_photo(self, image_bytes: bytes, caption: str = "") -> None:
+        """Send an image as a real inline photo card -- unlike send_document
+        (which preserves every pixel for zooming into detail), Telegram
+        renders this directly in the chat as a proper photo, which is what
+        actually looks good for something like a location-history recon
+        shot. Caption is sent as HTML, same as send_html -- caller escapes
+        any dynamic text it embeds."""
+        if self._load_error:
+            logger.warning("Telegram send_photo skipped: %s", self._load_error)
+            return
+        try:
+            client = self._client_or_raise()
+            resp = await client.post(
+                "/sendPhoto",
+                data={"chat_id": self.chat_id, "caption": caption[:1024], "parse_mode": "HTML"},
+                files={"photo": ("snapshot.jpg", image_bytes, "image/jpeg")},
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            logger.error("Telegram send_photo failed: %s", e)
 
     async def _send_chat_action(self, action: str) -> None:
         if self._load_error:
@@ -264,7 +310,7 @@ class TelegramNotifier:
                 {"text": "❌ Deny", "callback_data": f"appr:{request_id}:no"},
             ]]
         }
-        pending.message_id = await self._send_html(
+        pending.message_id = await self.send_html(
             f"{body_html}\n\n<i>Tap a button, or reply yes/no. Times out in {int(timeout)}s -&gt; denied.</i>",
             reply_markup=keyboard,
         )
@@ -462,7 +508,7 @@ class TelegramNotifier:
             logger.error("Telegram command /%s failed: %s", command, e)
             await self.send(f"Sorry, I hit an error running /{command}.")
             return
-        await self._send_html(reply_html)
+        await self.send_html(reply_html)
 
     async def _send_start_message(self) -> None:
         text = (
@@ -475,7 +521,7 @@ class TelegramNotifier:
             [{"text": "\U0001f3a8 Image", "callback_data": "cmd:image"}, {"text": "\U0001f9e0 Recall", "callback_data": "cmd:recall"}],
             [{"text": "\U0001f510 Approvals", "callback_data": "cmd:approvals"}, {"text": "❓ Help", "callback_data": "cmd:help"}],
         ]}
-        await self._send_html(text, reply_markup=keyboard)
+        await self.send_html(text, reply_markup=keyboard)
 
     async def _send_help_message(self) -> None:
         lines = ["<b>What I can do</b>", ""]
@@ -483,16 +529,16 @@ class TelegramNotifier:
             lines.append(f"/{cmd} -- {_escape_html(desc)}")
         lines.append("")
         lines.append("Or just message me anything -- I'll chat like normal, with real tools and memory behind the scenes.")
-        await self._send_html("\n".join(lines))
+        await self.send_html("\n".join(lines))
 
     async def _send_approvals_message(self) -> None:
         if not self._pending_approvals:
-            await self._send_html("✅ Nothing waiting on your approval right now, Sir.")
+            await self.send_html("✅ Nothing waiting on your approval right now, Sir.")
             return
         lines = ["\U0001f510 <b>Pending approvals</b>", ""]
         for pending in self._pending_approvals.values():
             lines.append(f"• {_escape_html(pending.description)}")
-        await self._send_html("\n".join(lines))
+        await self.send_html("\n".join(lines))
 
     async def _handle_reply(self, text: str) -> None:
         # Approval replies are consumed by _dispatch before they ever reach
@@ -516,7 +562,10 @@ class TelegramNotifier:
             await self.send("I didn't get a usable answer to that one, Sir. Try rephrasing?")
             return
 
-        # Only attach an image for location/map-style queries -- not every reply.
+        # A direct location COMMAND ("locate Rome", "show me Kyoto") -- the
+        # map itself is the point of the request, so it goes out full-
+        # resolution via send_document with the reply as its caption, same
+        # as before.
         location_query = _extract_location_query(text)
         if location_query:
             snapshot = await snapshot_for_query(location_query)
@@ -530,6 +579,34 @@ class TelegramNotifier:
                 if self._image_broadcaster:
                     try:
                         await self._image_broadcaster(image_bytes, caption)
+                    except Exception as e:
+                        logger.warning("image_broadcaster failed: %s", e)
+                return
+
+        # An INFORMATIONAL question ABOUT a place ("history of Rome", "tell
+        # me about Kyoto") gets a two-part card instead of one caption-
+        # limited message: the full detailed answer as its own richly-
+        # formatted message (Telegram's caption cap is 1024 chars -- nowhere
+        # near enough for the 3-4+ paragraph replies this channel's style
+        # now asks for), followed by a real satellite/night recon photo as a
+        # visual follow-up. snapshot_for_query's own geocoding decides
+        # whether this is actually a place at all -- a non-place topic
+        # ("tell me about jazz") returns None and just falls through to the
+        # plain reply below, no special-casing needed here.
+        place_query = _extract_info_place_query(text)
+        if place_query:
+            snapshot = await snapshot_for_query(place_query)
+            if snapshot is not None:
+                image_bytes, display_name, was_night = snapshot
+                await self.send_html(
+                    f"\U0001f4d6 <b>{_escape_html(display_name)}</b>\n\n{_escape_html(reply)}"
+                )
+                style = "\U0001f319 Night recon" if was_night else "\U0001f6f0 Satellite recon"
+                caption = f"{style} · <b>{_escape_html(display_name)}</b>"
+                await self.send_photo(image_bytes, caption=caption)
+                if self._image_broadcaster:
+                    try:
+                        await self._image_broadcaster(image_bytes, f"{style} · {display_name}")
                     except Exception as e:
                         logger.warning("image_broadcaster failed: %s", e)
                 return

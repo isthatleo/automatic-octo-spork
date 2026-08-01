@@ -51,6 +51,10 @@ from .llm_utility_agents import GeneralPurposeAgent, ClaudeAgent, ClaudeCodeGuid
 from .statusline_setup_agent import StatuslineSetupAgent
 # Meta-agent: creates and deploys new specialized agents (writes to agents/specialized/dynamic/)
 from .agent_creator_agent import AgentCreatorAgent
+# Real ML training lifecycle: MLAgent owns the scikit-learn model artifact,
+# ModelTrainingAgent owns the training/dataset/personalization lifecycle.
+from .ml_agent import MLAgent
+from .model_training_agent import ModelTrainingAgent
 
 # Registry of all available specialized agents
 SPECIALIZED_AGENTS = {
@@ -106,6 +110,9 @@ SPECIALIZED_AGENTS = {
     "statusline_setup":         StatuslineSetupAgent,
     # ---- Meta-agent: creates and deploys new specialized agents ----
     "agent_creator":            AgentCreatorAgent,
+    # ---- Real ML training lifecycle ----
+    "machine_learning":         MLAgent,
+    "model_training":           ModelTrainingAgent,
 }
 
 def get_available_agents():

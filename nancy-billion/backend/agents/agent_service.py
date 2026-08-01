@@ -63,6 +63,14 @@ _ROUTE_RULES: List[tuple[list[str], str]] = [
     (["neural interface", "brain-computer", "bci", "eeg", "neuroprosth"],        "neural_interface"),
     (["holograph", "display", "ar ", "mixed reality", "spatial"],                "holographic_display"),
     (["environment", "climate", "hvac", "smart home", "iot", "sensor"],          "environmental_control"),
+    # Nancy's own self-training lifecycle -- deliberately narrow/distinct
+    # keywords so this doesn't fight the existing "data sci"/"model train"
+    # rule above, which is about ordinary data-science requests, not Nancy
+    # training herself.
+    (["train your own model", "train yourself", "retrain yourself", "your own model",
+      "personalize your model", "personalized model"],                          "model_training"),
+    (["classify this message", "predict the domain", "domain classifier",
+      "which agent should handle"],                                             "machine_learning"),
 ]
 
 

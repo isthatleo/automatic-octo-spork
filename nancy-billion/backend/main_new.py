@@ -1933,6 +1933,11 @@ _WANTS_TOOLS_RE = re.compile(
     # framing); bare "while I'm away"/"let me know when" alone are too
     # generic/ambiguous to trigger on safely.
     r"in the background|"
+    # Real coworker delegation (delegate_to_coworker) -- explicit
+    # hand-it-off phrasing, distinct from "in the background" above (which
+    # already covers that specific wording).
+    r"\b(delegate|put someone on|have (a |your )?(coworker|specialist|team) (look into|handle|work on)|"
+    r"assign (this|that|it) to (a |your )?(coworker|specialist|team))\b|"
     # Everyday-usage tools (everyday_tools.py/archive_tools.py/network_tools.py/
     # personal_tools.py/clipboard/SMS) -- each phrase here is a clear,
     # deliberate imperative naming its own action, not generic conversation.
@@ -2143,6 +2148,7 @@ _FALLBACK_TOOL_NAMES = {
     "delete_file", "move_file", "execute_command", "fetch_url", "web_search",
     "post_to_canvas", "open_application", "look_at_camera", "run_background_task",
     "browser_navigate", "browser_get_text", "browser_screenshot", "browser_click", "browser_fill",
+    "delegate_to_coworker",
 }
 
 
@@ -2289,6 +2295,130 @@ ARTIFACT_TOOL: Dict[str, Any] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Coworker delegation -- Nancy's own version of the background-subagent
+# pattern (fire off a real task, keep talking, report back when it's done)
+# rather than blocking the whole conversation on a long-running task. Every
+# other tool call in this codebase runs synchronously inside the current
+# turn; this is the one deliberate exception, for tasks that plausibly take
+# longer than a user wants to wait mid-conversation for.
+# ---------------------------------------------------------------------------
+_coworker_tasks: Dict[str, Dict[str, Any]] = {}
+_COWORKER_MAX_HISTORY = 20
+
+DELEGATE_TASK_TOOL: Dict[str, Any] = {
+    "name": "delegate_to_coworker",
+    "description": (
+        "Hand off a task that would take a while to a coworker to work on in the background, "
+        "instead of making the user wait for it mid-conversation. Use this for anything genuinely "
+        "long-running or exploratory (deep research, a multi-step analysis, monitoring something "
+        "over time) where the right answer is 'I'll look into that and get back to you', not for "
+        "quick questions you can just answer directly. Returns immediately; the real result is "
+        "pushed to the user (Telegram + web) the moment the coworker finishes -- never silently, "
+        "and never faked or guessed in the meantime."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task": {"type": "string", "description": "A clear, self-contained description of what the coworker should do."},
+            "domain": {
+                "type": "string",
+                "description": (
+                    "Optional: which specialist should take this (e.g. 'data_science', 'crypto_trading', "
+                    "'security'). Leave unset to auto-route the same way ordinary chat messages are routed, "
+                    "or to fall back to a general-purpose answer if nothing matches."
+                ),
+            },
+        },
+        "required": ["task"],
+    },
+}
+
+
+async def _run_coworker_task(task_id: str, description: str, domain: Optional[str]) -> None:
+    """The actual background work -- runs completely independently of
+    whatever turn/channel requested it. Whichever channel gets notified
+    (Telegram + every connected web/voice session) sees the SAME real
+    result a synchronous reply would have gotten, just delivered whenever
+    it's genuinely ready instead of holding the conversation open."""
+    record = _coworker_tasks[task_id]
+    try:
+        # The LLM picking delegate_to_coworker's optional "domain" arg
+        # sometimes names a domain that isn't a real agent key (confirmed
+        # live: it once passed "general", which doesn't exist) -- validate
+        # against the real roster rather than letting agent_service.run()
+        # log a scary "agent not found" error for what's really just an
+        # invalid-argument case with a perfectly good fallback already below.
+        routed_key = domain if domain in agent_service._agents else None
+        if not routed_key and agent_service.is_ready():
+            from agents.agent_service import _auto_route
+            routed_key = _auto_route(description)
+
+        if routed_key:
+            result = await agent_service.run(
+                routed_key, {"type": "query", "query": description}, timeout=300.0,
+            )
+            response_text = str(result.get("response") or result.get("result") or "")
+            if not response_text or result.get("success", True) is False:
+                # The routed specialist came up empty -- a general-purpose
+                # answer is still worth more than reporting failure outright.
+                response_text, _ = await _generate_response_via_hierarchy(description, channel="telegram")
+        else:
+            response_text, _ = await _generate_response_via_hierarchy(description, channel="telegram")
+
+        record["status"] = "done"
+        record["result"] = response_text
+    except Exception as e:
+        logger.exception("Coworker task %s failed", task_id)
+        record["status"] = "failed"
+        record["result"] = f"Ran into an error: {e}"
+    finally:
+        record["finished_at"] = _time.time()
+
+    elapsed = record["finished_at"] - record["started_at"]
+    icon = "✅" if record["status"] == "done" else "⚠️"
+    from telegram_bot import _escape_html
+    # Telegram hard-caps a single message at 4096 chars -- confirmed live,
+    # a genuinely thorough Telegram-style answer (see the channel="telegram"
+    # style addendum, which explicitly asks for real depth) can exceed that
+    # on its own, and the send silently 400'd with no result ever reaching
+    # the user. Truncate the body rather than trying to fit an unbounded
+    # answer into a fixed-size push notification.
+    header = f"{icon} <b>Coworker finished</b> ({elapsed:.0f}s)\n\n<i>{_escape_html(description)}</i>\n\n"
+    body = _escape_html(record["result"])
+    budget = 4000 - len(header)
+    if len(body) > budget:
+        body = body[:budget].rstrip() + "…"
+    await telegram_notifier.send_html(header + body)
+    asyncio.create_task(_broadcast_reply_to_web(f"[Coworker] {record['result']}", source="coworker"))
+
+
+async def _delegate_to_coworker(task: str, domain: Optional[str] = None) -> Dict[str, Any]:
+    task = (task or "").strip()
+    if not task:
+        return {"success": False, "error": "task description is required"}
+
+    task_id = f"cw-{int(_time.time() * 1000)}"
+    _coworker_tasks[task_id] = {
+        "id": task_id, "task": task, "domain": domain,
+        "status": "working", "result": None,
+        "started_at": _time.time(), "finished_at": None,
+    }
+    # Trim in-memory history so this never grows without bound across a
+    # long-running process -- same reasoning as _history_to_text's cap.
+    if len(_coworker_tasks) > _COWORKER_MAX_HISTORY:
+        oldest_id = min(_coworker_tasks, key=lambda k: _coworker_tasks[k]["started_at"])
+        if _coworker_tasks[oldest_id]["status"] != "working":
+            _coworker_tasks.pop(oldest_id, None)
+
+    asyncio.create_task(_run_coworker_task(task_id, task, domain))
+    return {
+        "success": True,
+        "task_id": task_id,
+        "message": f"Sent to {domain or 'a specialist'} -- I'll let you know the moment it's done.",
+    }
+
+
 def _attach_python_syntax_check(result: Dict[str, Any], path: str) -> None:
     """Real verification after a write/edit actually lands on disk -- the
     same discipline Claude Code itself follows (compile-check a file right
@@ -2315,7 +2445,7 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
     function makes structurally impossible to repeat, since editing this
     list edits both callers at once."""
     return (
-        FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL]
+        FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL, DELEGATE_TASK_TOOL]
         + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS
         + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS
         + SMS_TOOLS + WATCH_TOOLS + SECURITY_MODE_TOOLS + MACRO_TOOLS + DEVICE_ROUTING_TOOLS + PRESENCE_TOOLS + PROFILE_TOOLS + SELF_MAINTENANCE_TOOLS + MEMORY_TOOLS + TRADING_BACKTEST_TOOLS + SWARM_TOOLS
@@ -2414,6 +2544,9 @@ async def _run_macro(macro: "macro_store.Macro") -> Dict[str, Any]:
 async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: str = "") -> Dict[str, Any]:
     if mcp_manager.is_plugin_tool(name):
         return await mcp_manager.call_tool(name, tool_input)
+
+    if name == "delegate_to_coworker":
+        return await _delegate_to_coworker(tool_input.get("task", ""), tool_input.get("domain"))
 
     if name == "post_to_canvas":
         try:
@@ -7783,6 +7916,22 @@ async def _telegram_recall_command(args: str) -> str:
     return f"\U0001f9e0 <b>Memory recall</b>\n\n{_escape_html(block)}"
 
 
+async def _telegram_coworkers_command(args: str = "") -> str:
+    """/coworkers -- real visibility into every delegate_to_coworker task,
+    past and present, so 'a coworker is looking into that' is always
+    checkable rather than a black box."""
+    from telegram_bot import _escape_html
+
+    if not _coworker_tasks:
+        return "\U0001f465 No coworker tasks yet, Sir. Ask me to delegate something and I'll put someone on it."
+    lines = ["\U0001f465 <b>Coworkers</b>", ""]
+    icons = {"working": "⏳", "done": "✅", "failed": "⚠️"}
+    for record in sorted(_coworker_tasks.values(), key=lambda r: r["started_at"], reverse=True)[:10]:
+        icon = icons.get(record["status"], "❔")
+        lines.append(f"{icon} {_escape_html(record['task'][:80])}")
+    return "\n".join(lines)
+
+
 async def _telegram_status_command(args: str = "") -> str:
     """Real /status command reply -- reuses the exact same agent-fleet and
     open-trade data as the personalized greeting's system_status/
@@ -7888,6 +8037,7 @@ async def startup_event():
     telegram_notifier.set_command_handler("markets", _telegram_markets_command)
     telegram_notifier.set_command_handler("image", _telegram_image_command)
     telegram_notifier.set_command_handler("recall", _telegram_recall_command)
+    telegram_notifier.set_command_handler("coworkers", _telegram_coworkers_command)
     telegram_notifier.set_image_broadcaster(
         lambda image_bytes, caption: _broadcast_reply_to_web("", [image_bytes], source="telegram")
     )
@@ -7896,6 +8046,8 @@ async def startup_event():
     asyncio.create_task(_cron_execution_loop())
     asyncio.create_task(_self_healing_loop())
     asyncio.create_task(_self_maintenance_loop())
+    asyncio.create_task(_proactive_agent_loop())
+    asyncio.create_task(_model_training_loop())
     # Both loops above only run their first real check after a full sleep
     # interval (5min / 24h by default) -- populate real initial statuses
     # immediately so the alert dashboard reflects reality from boot instead
@@ -8169,6 +8321,121 @@ async def _update_system_health_status() -> str:
     )
     rank = {"green": 0, "yellow": 1, "red": 2}
     return severity if rank[severity] >= rank[backend_severity] else backend_severity
+
+
+# ---------------------------------------------------------------------------
+# Proactive agents -- every specialized agent gets real, periodic time to
+# check in on its own domain and write anything genuinely noteworthy to
+# memory, rather than sitting completely idle until directly invoked. This
+# was an explicit, repeated complaint: an agent that's "active" but never
+# actually does anything unless called on is functionally decorative.
+#
+# Deliberately conservative on two axes, both learned the hard way earlier
+# this session: ONE agent per cycle (not all ~46 at once) on a long interval,
+# and routed through LOCAL-ONLY Ollama (_proactive_local_llm) rather than the
+# global llm_backend fallback chain. Real user chat requests already fight
+# through Gemini's exhausted free-tier quota and Anthropic's zero credit
+# balance before landing on Groq/OpenRouter -- adding continuous background
+# agent activity to that SAME shared budget would make real replies slower
+# and more likely to fail, exactly the problem this session spent hours
+# fixing. Local Ollama inference costs no API quota and doesn't compete for
+# it, at the honest cost of a much slower per-call turnaround and lower
+# answer quality -- an acceptable trade for background reflection that isn't
+# blocking a live conversation.
+# ---------------------------------------------------------------------------
+PROACTIVE_AGENT_INTERVAL_S = float(os.getenv("PROACTIVE_AGENT_INTERVAL_S", "1200"))  # 20 min
+_proactive_agent_index = 0
+
+
+async def _proactive_local_llm(prompt: str, max_tokens: int = 200) -> Optional[str]:
+    """Local-only LLM call for background agent work -- see the module-level
+    note above for why this deliberately does NOT fall back to any cloud
+    backend. Returns None (never raises) if Ollama isn't reachable or has no
+    models pulled; the caller just skips that cycle."""
+    try:
+        from llm import OllamaAutoModelsLLM
+        ollama = OllamaAutoModelsLLM()
+        return await asyncio.wait_for(
+            ollama.generate(prompt, max_tokens=max_tokens, temperature=0.4), timeout=90.0,
+        )
+    except Exception as e:
+        logger.debug("Proactive local LLM call unavailable (Ollama not reachable?): %s", e)
+        return None
+
+
+async def _run_proactive_check(key: str) -> None:
+    """One agent's real proactive check-in, written to the same memory graph
+    the chat pipeline's get_memory_context_string reads from -- so anything
+    genuinely found here is already there the next time the user asks about
+    it, not just a log line nobody sees."""
+    agent = agent_service._agents.get(key)
+    if agent is None:
+        return
+    prompt = (
+        f"You are {agent.agent_name}, a specialist in {agent.domain.replace('-', ' ')}. "
+        "Take a moment to proactively reflect on your area of expertise right now: is there "
+        "anything genuinely noteworthy, newly relevant, or worth flagging? If honestly nothing "
+        "new, reply with exactly: NOTHING_NEW. Otherwise give ONE real, concrete, specific "
+        "insight in 1-2 sentences -- not a generic description of what you do."
+    )
+    answer = await _proactive_local_llm(prompt)
+    if not answer or "NOTHING_NEW" in answer.upper() or not answer.strip():
+        return
+    try:
+        memory_manager.graph.add_or_merge_memory(
+            f"[{agent.agent_name}] {answer.strip()}",
+            MemoryType.INSIGHT,
+            {"source": "proactive_agent", "agent_key": key},
+            importance=0.4,
+        )
+        logger.info("Proactive check-in from %s recorded to memory", agent.agent_name)
+    except Exception:
+        logger.exception("Failed to record proactive insight from %s", key)
+
+
+async def _proactive_agent_loop() -> None:
+    """Rotates through the whole agent roster, one per cycle -- at the
+    default 20-minute interval, a full rotation through ~46 agents takes
+    roughly 15 hours. That's the honest tradeoff for "every agent eventually
+    does real background work" without pegging the CPU or exhausting quota
+    around the clock; see the module-level note above for the full
+    reasoning. PROACTIVE_AGENT_INTERVAL_S can be shortened for a machine
+    with headroom to spare, or the loop disabled entirely by setting it to
+    a very large number."""
+    global _proactive_agent_index
+    await asyncio.sleep(120)  # let the rest of startup (agent init, etc.) settle first
+    while True:
+        try:
+            if agent_service.is_ready():
+                keys = list(agent_service._agents.keys())
+                if keys:
+                    key = keys[_proactive_agent_index % len(keys)]
+                    _proactive_agent_index += 1
+                    await _run_proactive_check(key)
+        except Exception:
+            logger.exception("Proactive agent cycle failed")
+        await asyncio.sleep(PROACTIVE_AGENT_INTERVAL_S)
+
+
+MODEL_TRAINING_INTERVAL_S = float(os.getenv("MODEL_TRAINING_INTERVAL_S", str(6 * 3600)))  # every 6 hours
+
+
+async def _model_training_loop() -> None:
+    """Runs ModelTrainingAgent's full real lifecycle (dataset export from
+    actual conversations, MLAgent classifier retraining, and a real
+    personalized local Ollama model refresh) on its own schedule --
+    heavier and far less frequent than the generic per-agent proactive
+    check-in above, since this does substantive real work (actually
+    training a model) rather than a quick reflection."""
+    await asyncio.sleep(300)  # let real conversation data accumulate before the first run
+    while True:
+        try:
+            if agent_service.is_ready():
+                result = await agent_service.run("model_training", {"type": "run_cycle"}, timeout=300.0)
+                logger.info("Model training cycle finished: %s", result.get("success") if isinstance(result, dict) else result)
+        except Exception:
+            logger.exception("Model training cycle failed")
+        await asyncio.sleep(MODEL_TRAINING_INTERVAL_S)
 
 
 async def _pattern_suggestions_loop() -> None:

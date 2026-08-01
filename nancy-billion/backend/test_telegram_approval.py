@@ -58,7 +58,7 @@ async def main() -> None:
     bot.send = fake_send            # type: ignore[assignment]
 
     # request_approval() and the built-in /start,/help,/approvals commands
-    # send through _send_html (real HTML formatting, e.g. the "<b>Approval
+    # send through send_html (real HTML formatting, e.g. the "<b>Approval
     # needed</b>" prompt) rather than send() -- stub it the same way so this
     # test doesn't need a real network/bot token, and so a substring check
     # like "Approval needed" still matches text captured from either path.
@@ -66,7 +66,7 @@ async def main() -> None:
         sent.append(html_text)
         return 1
 
-    bot._send_html = fake_send_html  # type: ignore[assignment]
+    bot.send_html = fake_send_html  # type: ignore[assignment]
 
     async def fake_finalize(pending, value) -> None:
         pass
