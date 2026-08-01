@@ -71,6 +71,22 @@ _ROUTE_RULES: List[tuple[list[str], str]] = [
       "personalize your model", "personalized model"],                          "model_training"),
     (["classify this message", "predict the domain", "domain classifier",
       "which agent should handle"],                                             "machine_learning"),
+    (["ping", "traceroute", "dns lookup", "port check", "public ip", "is .* reachable"], "network_diagnostics"),
+    (["hash this", "sha256", "sha512", "md5 hash", "encrypt this", "decrypt this", "fernet key"], "cryptography"),
+    (["distance between", "how far is", "geocode"],                             "geospatial"),
+    (["analyze this image", "dominant color", "image metadata"],                "image_processing"),
+    (["analyze this audio", "waveform", "analyze this wav"],                    "audio_analysis"),
+    (["nash equilibrium", "zero-sum game", "expected value of", "game theory"], "game_theory"),
+    (["elo rating", "win probability", "sports analytics"],                     "sports_analytics"),
+    (["value at risk", "monte carlo simulation", "portfolio risk", "sharpe ratio"], "risk_management"),
+    (["contrast ratio", "wcag", "color accessibility"],                         "accessibility"),
+    (["carbon footprint", "co2 emissions", "carbon emissions"],                 "carbon_footprint"),
+    (["database integrity", "inspect the database", "table row count"],         "database_admin"),
+    (["readability score", "flesch", "sentiment of this text"],                 "psychometrics"),
+    (["word frequency", "n-gram", "text similarity"],                          "linguistics"),
+    (["convert.*time zone", "timezone", "meeting overlap", "working hours overlap"], "timezone_scheduling"),
+    (["cyclomatic complexity", "code complexity", "analyze this code"],         "code_complexity"),
+    (["spawn tasks", "delegate to agents", "generate and delegate", "orchestrate tasks"], "task_orchestration"),
 ]
 
 

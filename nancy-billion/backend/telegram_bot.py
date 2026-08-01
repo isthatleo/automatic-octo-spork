@@ -76,6 +76,7 @@ _BUILTIN_COMMANDS = [
     ("image", "Generate an image -- /image a description"),
     ("recall", "Search your memory -- /recall a topic"),
     ("coworkers", "See what background tasks are being worked on"),
+    ("tasks", "See the last proactive agent task batch"),
 ]
 
 

@@ -55,6 +55,26 @@ from .agent_creator_agent import AgentCreatorAgent
 # ModelTrainingAgent owns the training/dataset/personalization lifecycle.
 from .ml_agent import MLAgent
 from .model_training_agent import ModelTrainingAgent
+# Additional real-computation domain agents.
+from .network_diagnostics_agent import NetworkDiagnosticsAgent
+from .cryptography_agent import CryptographyAgent
+from .geospatial_agent import GeospatialAgent
+from .image_processing_agent import ImageProcessingAgent
+from .audio_analysis_agent import AudioAnalysisAgent
+from .game_theory_agent import GameTheoryAgent
+from .sports_analytics_agent import SportsAnalyticsAgent
+from .risk_management_agent import RiskManagementAgent
+from .accessibility_agent import AccessibilityAgent
+from .carbon_footprint_agent import CarbonFootprintAgent
+from .database_admin_agent import DatabaseAdminAgent
+from .psychometrics_agent import PsychometricsAgent
+from .linguistics_agent import LinguisticsAgent
+from .timezone_scheduling_agent import TimezoneSchedulingAgent
+from .code_complexity_agent import CodeComplexityAgent
+# Proactive, self-directed task generation + delegation (distinct from the
+# reactive DispatcherAgent above) -- the real engine behind "every agent is
+# always doing something" (see main_new.py's proactive-agent scheduling).
+from .task_orchestrator_agent import TaskOrchestratorAgent
 
 # Registry of all available specialized agents
 SPECIALIZED_AGENTS = {
@@ -113,6 +133,24 @@ SPECIALIZED_AGENTS = {
     # ---- Real ML training lifecycle ----
     "machine_learning":         MLAgent,
     "model_training":           ModelTrainingAgent,
+    # ---- Additional real-computation domain agents ----
+    "network_diagnostics":      NetworkDiagnosticsAgent,
+    "cryptography":             CryptographyAgent,
+    "geospatial":                GeospatialAgent,
+    "image_processing":         ImageProcessingAgent,
+    "audio_analysis":           AudioAnalysisAgent,
+    "game_theory":              GameTheoryAgent,
+    "sports_analytics":         SportsAnalyticsAgent,
+    "risk_management":          RiskManagementAgent,
+    "accessibility":            AccessibilityAgent,
+    "carbon_footprint":         CarbonFootprintAgent,
+    "database_admin":           DatabaseAdminAgent,
+    "psychometrics":            PsychometricsAgent,
+    "linguistics":              LinguisticsAgent,
+    "timezone_scheduling":      TimezoneSchedulingAgent,
+    "code_complexity":          CodeComplexityAgent,
+    # ---- Proactive task generation + delegation ----
+    "task_orchestration":       TaskOrchestratorAgent,
 }
 
 def get_available_agents():

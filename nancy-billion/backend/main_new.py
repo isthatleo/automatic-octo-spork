@@ -1185,6 +1185,8 @@ You have access to a variety of tools for system control, coding, web search, me
 _VOICE_STYLE_ADDENDUM = """
 Always address the user as "Sir" (always capitalized, even mid-sentence) -- naturally, the way a butler-style assistant (JARVIS) would, not stiffly or in every single sentence. Never use their name or any other title.
 
+This is a voice-first relationship -- the user talks to you like this most of the time, without ever opening a dashboard, the way someone talks to a trusted colleague or advisor they've worked with for years, not a report-generating assistant they query occasionally. Let real personality and warmth come through: react naturally to what they actually say, have a genuine opinion when one is asked for instead of hedging into neutrality, and ask a real follow-up question when it would genuinely help the conversation (not as a scripted formality tacked onto every reply). Use the live memory/context you're given below as a real colleague would -- reference something you actually know about their projects, preferences, or recent conversations when it's relevant, rather than treating every message as a fresh, context-free query from a stranger.
+
 Calibrate the length and depth of every response to what was actually asked -- this matters doubly here since your replies are spoken aloud, and a long answer means a long wait before the user hears anything useful:
 - A quick factual question ("what's the price of X", "what time is it", "is Y online") gets a direct answer in one or two sentences -- no preamble, no unrequested context, no restating the question.
 - Casual conversation (greetings, small talk, a quick check-in) gets a short, natural, conversational reply -- not a report.
@@ -7932,6 +7934,23 @@ async def _telegram_coworkers_command(args: str = "") -> str:
     return "\n".join(lines)
 
 
+async def _telegram_tasks_command(args: str = "") -> str:
+    """/tasks -- real visibility into the last proactive orchestrator batch,
+    so "every agent is always doing something" is checkable, not a claim
+    taken on faith."""
+    from telegram_bot import _escape_html
+
+    result = await agent_service.run("task_orchestration", {"type": "status"}, timeout=10.0)
+    last_batch = result.get("last_batch") if isinstance(result, dict) else None
+    if not last_batch:
+        return "\U0001f916 No proactive task batch has run yet, Sir -- the first one fires shortly after startup."
+    lines = ["\U0001f916 <b>Last proactive task batch</b>", ""]
+    for item in last_batch.get("results", [])[:10]:
+        icon = "✅" if item.get("success") else "⚠️"
+        lines.append(f"{icon} <b>{_escape_html(item.get('agent_key', '?'))}</b>: {_escape_html(item.get('task', '')[:100])}")
+    return "\n".join(lines)
+
+
 async def _telegram_status_command(args: str = "") -> str:
     """Real /status command reply -- reuses the exact same agent-fleet and
     open-trade data as the personalized greeting's system_status/
@@ -8038,6 +8057,7 @@ async def startup_event():
     telegram_notifier.set_command_handler("image", _telegram_image_command)
     telegram_notifier.set_command_handler("recall", _telegram_recall_command)
     telegram_notifier.set_command_handler("coworkers", _telegram_coworkers_command)
+    telegram_notifier.set_command_handler("tasks", _telegram_tasks_command)
     telegram_notifier.set_image_broadcaster(
         lambda image_bytes, caption: _broadcast_reply_to_web("", [image_bytes], source="telegram")
     )
@@ -8324,34 +8344,42 @@ async def _update_system_health_status() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Proactive agents -- every specialized agent gets real, periodic time to
-# check in on its own domain and write anything genuinely noteworthy to
-# memory, rather than sitting completely idle until directly invoked. This
-# was an explicit, repeated complaint: an agent that's "active" but never
-# actually does anything unless called on is functionally decorative.
+# Proactive agents -- every specialized agent gets real, periodic work to do
+# instead of sitting idle until directly invoked. This was an explicit,
+# repeated complaint: an agent that's "active" but never actually does
+# anything unless called on is functionally decorative.
 #
-# Deliberately conservative on two axes, both learned the hard way earlier
-# this session: ONE agent per cycle (not all ~46 at once) on a long interval,
-# and routed through LOCAL-ONLY Ollama (_proactive_local_llm) rather than the
-# global llm_backend fallback chain. Real user chat requests already fight
-# through Gemini's exhausted free-tier quota and Anthropic's zero credit
-# balance before landing on Groq/OpenRouter -- adding continuous background
-# agent activity to that SAME shared budget would make real replies slower
-# and more likely to fail, exactly the problem this session spent hours
-# fixing. Local Ollama inference costs no API quota and doesn't compete for
-# it, at the honest cost of a much slower per-call turnaround and lower
-# answer quality -- an acceptable trade for background reflection that isn't
-# blocking a live conversation.
+# TaskOrchestratorAgent (agents/specialized/task_orchestrator_agent.py) is
+# the real engine: each cycle it proposes a batch of concrete, genuinely
+# useful tasks against the real agent roster and runs them CONCURRENTLY via
+# agent_service.run(), so one cycle covers several agents at once rather
+# than one agent reflecting alone -- a materially faster path to "every
+# agent has actually done real work recently" than checking in on agents
+# one at a time.
+#
+# Still deliberately bounded on two axes, both learned the hard way earlier
+# this session: TaskOrchestratorAgent caps a batch at a handful of tasks
+# (not all ~60+ agents at once), and everything here runs through LOCAL-ONLY
+# Ollama (_proactive_local_llm) rather than the global llm_backend fallback
+# chain. Real user chat requests already fight through Gemini's exhausted
+# free-tier quota and Anthropic's zero credit balance before landing on
+# Groq/OpenRouter -- adding continuous background agent activity to that
+# SAME shared budget would make real replies slower and more likely to
+# fail, exactly the problem this session spent hours fixing. Local Ollama
+# inference costs no API quota and doesn't compete for it, at the honest
+# cost of a much slower per-call turnaround and lower answer quality -- an
+# acceptable trade for background work that isn't blocking a live
+# conversation.
 # ---------------------------------------------------------------------------
-PROACTIVE_AGENT_INTERVAL_S = float(os.getenv("PROACTIVE_AGENT_INTERVAL_S", "1200"))  # 20 min
-_proactive_agent_index = 0
+PROACTIVE_AGENT_INTERVAL_S = float(os.getenv("PROACTIVE_AGENT_INTERVAL_S", "600"))  # 10 min
 
 
 async def _proactive_local_llm(prompt: str, max_tokens: int = 200) -> Optional[str]:
     """Local-only LLM call for background agent work -- see the module-level
     note above for why this deliberately does NOT fall back to any cloud
     backend. Returns None (never raises) if Ollama isn't reachable or has no
-    models pulled; the caller just skips that cycle."""
+    models pulled; the caller just skips that cycle. Used both by the
+    proactive loop below and directly by TaskOrchestratorAgent."""
     try:
         from llm import OllamaAutoModelsLLM
         ollama = OllamaAutoModelsLLM()
@@ -8363,55 +8391,37 @@ async def _proactive_local_llm(prompt: str, max_tokens: int = 200) -> Optional[s
         return None
 
 
-async def _run_proactive_check(key: str) -> None:
-    """One agent's real proactive check-in, written to the same memory graph
-    the chat pipeline's get_memory_context_string reads from -- so anything
-    genuinely found here is already there the next time the user asks about
-    it, not just a log line nobody sees."""
-    agent = agent_service._agents.get(key)
-    if agent is None:
-        return
-    prompt = (
-        f"You are {agent.agent_name}, a specialist in {agent.domain.replace('-', ' ')}. "
-        "Take a moment to proactively reflect on your area of expertise right now: is there "
-        "anything genuinely noteworthy, newly relevant, or worth flagging? If honestly nothing "
-        "new, reply with exactly: NOTHING_NEW. Otherwise give ONE real, concrete, specific "
-        "insight in 1-2 sentences -- not a generic description of what you do."
-    )
-    answer = await _proactive_local_llm(prompt)
-    if not answer or "NOTHING_NEW" in answer.upper() or not answer.strip():
-        return
-    try:
-        memory_manager.graph.add_or_merge_memory(
-            f"[{agent.agent_name}] {answer.strip()}",
-            MemoryType.INSIGHT,
-            {"source": "proactive_agent", "agent_key": key},
-            importance=0.4,
-        )
-        logger.info("Proactive check-in from %s recorded to memory", agent.agent_name)
-    except Exception:
-        logger.exception("Failed to record proactive insight from %s", key)
-
-
 async def _proactive_agent_loop() -> None:
-    """Rotates through the whole agent roster, one per cycle -- at the
-    default 20-minute interval, a full rotation through ~46 agents takes
-    roughly 15 hours. That's the honest tradeoff for "every agent eventually
-    does real background work" without pegging the CPU or exhausting quota
-    around the clock; see the module-level note above for the full
-    reasoning. PROACTIVE_AGENT_INTERVAL_S can be shortened for a machine
-    with headroom to spare, or the loop disabled entirely by setting it to
-    a very large number."""
-    global _proactive_agent_index
+    """Runs TaskOrchestratorAgent's real generate-and-delegate cycle on a
+    schedule: it proposes concrete tasks against the real agent roster,
+    validates each against real agent keys, and runs them concurrently.
+    Every genuinely useful finding gets written to the same memory graph
+    the chat pipeline's get_memory_context_string reads from, so it's
+    already there the next time the user asks about it -- not just a log
+    line nobody sees."""
     await asyncio.sleep(120)  # let the rest of startup (agent init, etc.) settle first
     while True:
         try:
             if agent_service.is_ready():
-                keys = list(agent_service._agents.keys())
-                if keys:
-                    key = keys[_proactive_agent_index % len(keys)]
-                    _proactive_agent_index += 1
-                    await _run_proactive_check(key)
+                result = await agent_service.run(
+                    "task_orchestration", {"type": "generate_and_delegate"}, timeout=180.0,
+                )
+                if result.get("success"):
+                    for item in result.get("results", []):
+                        if not (item.get("success") and item.get("result")):
+                            continue
+                        try:
+                            memory_manager.graph.add_or_merge_memory(
+                                f"[{item['agent_key']}] {item['result']}",
+                                MemoryType.INSIGHT,
+                                {"source": "proactive_orchestrator", "agent_key": item["agent_key"]},
+                                importance=0.4,
+                            )
+                        except Exception:
+                            logger.exception("Failed to record proactive finding from %s", item.get("agent_key"))
+                    logger.info("Proactive orchestrator cycle: %d task(s) run", result.get("tasks_run", 0))
+                else:
+                    logger.debug("Proactive orchestrator cycle produced nothing usable: %s", result.get("error"))
         except Exception:
             logger.exception("Proactive agent cycle failed")
         await asyncio.sleep(PROACTIVE_AGENT_INTERVAL_S)
