@@ -81,6 +81,11 @@ from .task_orchestrator_agent import TaskOrchestratorAgent
 from .crypto_intelligence_agent import CryptoIntelligenceAgent
 from .mining_profitability_agent import MiningProfitabilityAgent
 from .ecommerce_research_agent import EcommerceResearchAgent
+# Real TLS inspection, hypothesis testing, and loan amortization -- each a
+# distinct real-computation vertical not covered by any existing agent.
+from .ssl_certificate_agent import SslCertificateAgent
+from .statistical_testing_agent import StatisticalTestingAgent
+from .loan_calculator_agent import LoanCalculatorAgent
 
 # Registry of all available specialized agents
 SPECIALIZED_AGENTS = {
@@ -161,6 +166,10 @@ SPECIALIZED_AGENTS = {
     "crypto_intelligence":      CryptoIntelligenceAgent,
     "mining_profitability":     MiningProfitabilityAgent,
     "ecommerce_research":       EcommerceResearchAgent,
+    # ---- Additional real-computation domain agents ----
+    "ssl_certificate":          SslCertificateAgent,
+    "statistical_testing":      StatisticalTestingAgent,
+    "loan_calculator":          LoanCalculatorAgent,
 }
 
 def get_available_agents():

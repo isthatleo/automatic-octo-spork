@@ -90,6 +90,9 @@ _ROUTE_RULES: List[tuple[list[str], str]] = [
     (["crypto market", "top movers", "crypto snapshot", "crypto news", "altcoin"],        "crypto_intelligence"),
     (["mining profitab", "worth mining", "is mining", "hash rate", "mining rig"],         "mining_profitability"),
     (["trending product", "sell online", "product listing", "draft an ad", "etsy", "shopify", "dropship"], "ecommerce_research"),
+    (["ssl certificate", "tls certificate", "cert expir", "certificate expir"], "ssl_certificate"),
+    (["t-test", "chi-square", "statistical significance", "a/b test", "sample size"], "statistical_testing"),
+    (["mortgage", "loan payment", "amortization", "amortize", "loan payoff", "monthly payment"], "loan_calculator"),
 ]
 
 
