@@ -1232,6 +1232,21 @@ if _FURY_AVAILABLE:
             persist_to_disk=True,
             agent=agent,
             session_id=os.getenv("HISTORY_SESSION_ID", "nancybillion"),
+            # Confirmed live: auto-compaction's HTTP client (fury's own
+            # transport layer, routed through the Agent's configured GGUF
+            # "model") still fails to connect even with a real, existing
+            # local model file path -- and because that failure now goes
+            # through several retries with backoff before giving up, every
+            # single chat/Telegram reply was paying an extra ~20+ seconds
+            # (3.5s -> 26s+, confirmed live) waiting on a call to a feature
+            # nothing in the real chat pipeline actually depends on: real
+            # replies come from llm_backend's own fallback chain, and
+            # history sent to that chain is already capped to the most
+            # recent messages by _history_to_text(), never the full
+            # transcript this compaction step exists to shrink. Disabling
+            # it removes both the error and the delay with no loss of real
+            # functionality for the product's actual chat path.
+            auto_compact=False,
         )
     except Exception as e:
         logger.warning("Fury agent init failed (non-fatal): %s", e)
