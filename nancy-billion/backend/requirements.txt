@@ -87,6 +87,7 @@ httpx==0.28.1
 psutil>=5.9.0
 scipy>=1.11.0
 scikit-learn>=1.3.0
+joblib>=1.3.0
 nltk>=3.8.0
 
 # Windows COM, for pythoncom (tts.py's Pyttsx3TTS -- SAPI5 is COM-based and
