@@ -7688,6 +7688,70 @@ async def websocket_endpoint(websocket: WebSocket):
 # Startup / Shutdown
 # ---------------------------------------------------------------------------
 
+async def _telegram_status_command() -> str:
+    """Real /status command reply -- reuses the exact same agent-fleet and
+    open-trade data as the personalized greeting's system_status/
+    active_trades fields (see _build_real_personal_context), just formatted
+    as its own HTML message instead of woven into greeting prose."""
+    from telegram_bot import _escape_html
+
+    lines = ["\U0001f4cb <b>System status</b>", ""]
+    try:
+        if agent_service.is_ready():
+            stats = agent_service.get_service_stats()
+            lines.append(
+                f"\U0001f7e2 {stats['agents_online']} agents online, "
+                f"{stats['total_tasks']} tasks completed at a {stats['success_rate'] * 100:.0f}% success rate"
+            )
+            if stats.get("queued_tasks"):
+                lines.append(f"⏳ {stats['queued_tasks']} tasks queued")
+        else:
+            lines.append("\U0001f7e1 Agent fleet still starting up")
+    except Exception as e:
+        lines.append(f"⚠️ Agent status unavailable: {_escape_html(str(e))}")
+
+    try:
+        open_trades = [t for t in trading_manager.trades if t.status == "open"]
+        if open_trades:
+            lines.append("")
+            lines.append("<b>Open trades</b>")
+            for t in open_trades:
+                lines.append(f"• {_escape_html(t.pair)} {_escape_html(t.direction)} @ {t.entry_price}")
+    except Exception as e:
+        logger.debug("Telegram /status: trade data unavailable: %s", e)
+
+    return "\n".join(lines)
+
+
+async def _telegram_markets_command() -> str:
+    """Real /markets command reply -- concurrently fetches live prices for
+    every pair the user actually trades/watches (trading_manager.get_relevant_pairs()),
+    same real data source and the same concurrency fix as
+    _build_real_personal_context's market_alerts section."""
+    from telegram_bot import _escape_html
+
+    pairs = trading_manager.get_relevant_pairs()
+    if not pairs:
+        return "\U0001f4ca <b>Markets</b>\n\nNo pairs configured to watch yet, Sir."
+
+    async def _one(pair: str) -> Optional[str]:
+        try:
+            snapshot = await forex_aggregator.get_price(pair)
+            if not snapshot:
+                return None
+            arrow = "\U0001f4c8" if snapshot.change_24h > 0 else "\U0001f4c9" if snapshot.change_24h < 0 else "➡️"
+            return f"{arrow} <b>{_escape_html(pair)}</b> {snapshot.price:.4f} ({snapshot.change_24h:+.2f}%)"
+        except Exception as e:
+            logger.debug("Telegram /markets: unavailable for %s: %s", pair, e)
+            return None
+
+    results = await asyncio.gather(*(_one(p) for p in pairs))
+    lines = [r for r in results if r]
+    if not lines:
+        return "\U0001f4ca <b>Markets</b>\n\nLive prices aren't reachable right now, Sir."
+    return "\U0001f4ca <b>Markets</b>\n\n" + "\n".join(lines)
+
+
 async def _telegram_chat_handler(text: str) -> str:
     """Routes a Telegram message through the same chat pipeline the voice/web
     UI uses, so 'chat with Billion from Telegram' means the same Billion --
@@ -7712,6 +7776,8 @@ async def startup_event():
     # Initialise all 29 specialized agents in background so startup is fast
     asyncio.create_task(_init_agents())
     telegram_notifier.set_chat_handler(_telegram_chat_handler)
+    telegram_notifier.set_command_handler("status", _telegram_status_command)
+    telegram_notifier.set_command_handler("markets", _telegram_markets_command)
     telegram_notifier.set_image_broadcaster(
         lambda image_bytes, caption: _broadcast_reply_to_web("", [image_bytes], source="telegram")
     )
