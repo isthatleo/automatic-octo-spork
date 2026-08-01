@@ -72,6 +72,38 @@ def _timeout_for(text: str) -> float:
     return max(NEUTTS_TIMEOUT_S, len(text) * NEUTTS_TIMEOUT_S_PER_CHAR)
 
 
+# NeuTTS's underlying phonemizer silently produces empty/near-empty audio
+# (no exception, no timeout -- completes in well under a second) for text
+# containing certain "smart"/extended punctuation that plain espeak-derived
+# phonemizer symbol tables don't map: confirmed live, an em dash, en dash, or
+# ellipsis anywhere in the text reliably reduced the whole synthesis to a
+# 48-byte (header-only) WAV, and curly double quotes to a near-silent one --
+# regardless of how much real text surrounded it. Since that "successful"
+# empty result then gets cached forever under the original text (see
+# NeuTTSBackend._cache), a single LLM-generated sentence using an em dash
+# would stay silently broken for the rest of the process's life. LLM output
+# (Claude, GPT, Gemini) uses exactly this punctuation constantly, so this was
+# a real, frequent cause of Nancy's reported "stops after a few words" and
+# "long pauses" mid-reply. Normalizing to plain ASCII equivalents before
+# synthesis (and before the cache key is computed) sidesteps the phonemizer
+# gap entirely rather than trying to patch it upstream in fury-sdk/espeak.
+_PUNCTUATION_NORMALIZE = {
+    "—": ", ",   # em dash —
+    "–": "-",    # en dash –
+    "…": "...",  # ellipsis …
+    "“": '"',    # left curly double quote "
+    "”": '"',    # right curly double quote "
+    "‘": "'",    # left curly single quote '
+    "’": "'",    # right curly single quote '
+}
+
+
+def _sanitize_for_neutts(text: str) -> str:
+    for bad, good in _PUNCTUATION_NORMALIZE.items():
+        text = text.replace(bad, good)
+    return text
+
+
 class NeuTTSBackend(TTSBackend):
     """Voice-cloned neural TTS with a small text->WAV cache and an honest
     fallback to Pyttsx3TTS if the neural model or a reference clip can't load."""
@@ -251,6 +283,7 @@ class NeuTTSBackend(TTSBackend):
         return _encode_wav(audio, NEUTTS_SAMPLE_RATE)
 
     async def synthesize(self, text: str) -> bytes:
+        text = _sanitize_for_neutts(text)
         if text in self._cache:
             return self._cache[text]
 
@@ -276,6 +309,23 @@ class NeuTTSBackend(TTSBackend):
             return await self._fallback.synthesize(text)
         except Exception as e:
             logger.error("NeuTTS synthesis failed, falling back to Pyttsx3: %s", e)
+            return await self._fallback.synthesize(text)
+
+        # Defense in depth against the same failure class as the em-dash/en-
+        # dash/ellipsis bug _sanitize_for_neutts patches: the phonemizer can
+        # in principle choke silently on some OTHER character this codebase
+        # hasn't hit yet, returning a "successful" (no exception, no timeout)
+        # but near-empty WAV. A real sentence of any real length produces far
+        # more than this many bytes of 24kHz 16-bit audio; below it almost
+        # certainly means silence, not a hyper-fast synthesis. Caching that
+        # silence forever under this text (see _cache_put) would be worse
+        # than the extra Pyttsx3 fallback latency here.
+        if len(wav_bytes) < 2_000 and len(text.strip()) > 3:
+            logger.warning(
+                "NeuTTS returned suspiciously small output (%d bytes) for %d chars, "
+                "treating as a silent failure and falling back to Pyttsx3",
+                len(wav_bytes), len(text),
+            )
             return await self._fallback.synthesize(text)
 
         self._warm = True

@@ -69,6 +69,33 @@ export interface TurnHandlers {
 interface ActiveTurn extends TurnHandlers {
   turnId: number
   timer: ReturnType<typeof setTimeout>
+  timeoutMs: number
+}
+
+/** Real per-sentence NeuTTS synthesis can, in a worst case, take tens of
+ *  seconds for a single sentence before falling back to Pyttsx3 (see
+ *  neu_tts.py's scaled per-character timeout) -- a *fixed* deadline from
+ *  turn start could therefore fire mid-reply even though the backend is
+ *  still making real progress (confirmed live: a 2-3 sentence reply gave up
+ *  client-side and showed the "trouble reaching my backend" fallback while
+ *  the backend kept going and the real answer still reached Telegram a few
+ *  seconds later). Resetting the deadline on every progress signal (a tool
+ *  starting, the reply text arriving, each sentence's audio) means we only
+ *  truly give up if nothing happens for a full timeoutMs stretch, not just
+ *  because the whole turn took a while. */
+function scheduleTurnTimeout(turnId: number, timeoutMs: number): ReturnType<typeof setTimeout> {
+  return setTimeout(() => {
+    if (activeTurn?.turnId === turnId) {
+      const { onError } = activeTurn
+      activeTurn = null
+      onError?.(new Error('Nancy did not respond in time'))
+    }
+  }, timeoutMs)
+}
+
+function bumpTurnTimeout(turn: ActiveTurn): void {
+  clearTimeout(turn.timer)
+  turn.timer = scheduleTurnTimeout(turn.turnId, turn.timeoutMs)
 }
 
 /** Real server-pushed alert (see manager.broadcast(...) in main_new.py's
@@ -249,10 +276,13 @@ function connect(): Promise<WebSocket> {
       const msgTurnId = msg.turn_id as number | undefined
       if (activeTurn && msgTurnId === activeTurn.turnId) {
         if (msg.type === 'tts_audio_chunk') {
+          bumpTurnTimeout(activeTurn)
           activeTurn.onAudioChunk?.((msg.data as string) ?? '', (msg.seq as number) ?? 0)
         } else if (msg.type === 'tool_progress') {
+          bumpTurnTimeout(activeTurn)
           activeTurn.onToolProgress?.((msg.tool as string) ?? '')
         } else if (msg.type === 'agent_response') {
+          bumpTurnTimeout(activeTurn)
           activeTurn.onText?.((msg.data as string) ?? '', msg.debug)
         } else if (msg.type === 'tts_done') {
           clearTimeout(activeTurn.timer)
@@ -442,17 +472,11 @@ export function askNancyStreaming(
 
   if (activeTurn) clearTimeout(activeTurn.timer)
 
-  const timer = setTimeout(() => {
-    if (activeTurn?.turnId === turnId) {
-      const { onError } = activeTurn
-      activeTurn = null
-      onError?.(new Error('Nancy did not respond in time'))
-    }
-  }, timeoutMs)
+  const timer = scheduleTurnTimeout(turnId, timeoutMs)
 
   // Claim the slot synchronously (before the first await below) so this
   // turn is recognized as "active" even before the socket send resolves.
-  activeTurn = { turnId, timer, ...handlers }
+  activeTurn = { turnId, timer, timeoutMs, ...handlers }
 
   // audioBase64 is only ever set for a voice-originated command (see
   // use-voice.ts's real capture) -- the backend's voice_id.verify() check

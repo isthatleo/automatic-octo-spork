@@ -94,9 +94,21 @@ class ContextualGreetingEngine:
             "below -- never invent or add anything not listed. Always address the user "
             "as \"Sir\" (capitalized). Vary your sentence structure and word choice "
             "each time you're asked -- do not fall into a fixed template or recite the "
-            "facts as a flat list; weave them into 2-4 conversational sentences the way "
+            "facts as a flat list; weave them into 3-5 conversational sentences the way "
             "a real person would. The time-appropriate opening tone is: "
             f"\"{time_greeting}\" -- use it or a natural variant of it as your opening. "
+            # This greeting is spoken sentence-by-sentence as each one finishes
+            # synthesizing (not all at once), so how long the FIRST sentence
+            # is directly controls how long the user waits before hearing
+            # anything at all -- confirmed live, an opening sentence that
+            # wandered into a full clause before its full stop added several
+            # extra real seconds of neural TTS synthesis time before any
+            # audio played. Keeping it to just the address + time-of-day
+            # keeps that wait short regardless of how much else the greeting
+            # goes on to say.
+            "Your FIRST sentence must be SHORT -- 6 words or fewer, just the address "
+            "and time-of-day greeting (e.g. \"Good evening, Sir.\") with nothing else "
+            "in it; save every fact for the sentences that follow. "
             "ALWAYS end on a short closing line that invites the user to engage (e.g. "
             "an offer to help, a question about what to focus on first, or a simple "
             "'ready when you are') -- the greeting should feel complete and rounded "
@@ -105,14 +117,21 @@ class ContextualGreetingEngine:
             "Write only the greeting itself -- no preamble, no quotation marks, no "
             "explanation of what you're doing."
         )
-        # Generous headroom above what a 2-4 sentence greeting + closing line
-        # actually needs -- confirmed live that a tighter cap could truncate
-        # the response mid-sentence right before its closing line, which is
-        # exactly what made a genuinely good greeting feel like it stopped
-        # abruptly instead of winding down naturally.
+        # Generous token headroom above what a 2-4 sentence greeting + closing
+        # line actually needs -- confirmed live that a tighter cap could
+        # truncate the response mid-sentence right before its closing line
+        # (the real fix for that turned out to be llm.py's GeminiLLM
+        # disabling "thinking" tokens, which were eating the budget before
+        # any of it reached visible text -- max_tokens alone wasn't the
+        # cause). The WALL-CLOCK timeout here is deliberately tight, though:
+        # this fires on every boot for a voice-first product where "how long
+        # until I hear her say anything" matters more than word-choice
+        # variety, and _combine_greeting's template below is a real,
+        # complete, good-sounding greeting on its own -- worth falling back
+        # to quickly rather than making the user wait out a slow LLM call.
         text = await asyncio.wait_for(
             llm_backend.generate(prompt, max_tokens=350, temperature=0.9),
-            timeout=15.0,
+            timeout=5.0,
         )
         return text.strip()
 

@@ -167,6 +167,17 @@ export default function Page() {
   const audioQueueRef = useRef<HTMLAudioElement[]>([])
   const isPlayingQueueRef = useRef(false)
   const currentTurnIdRef = useRef<number | null>(null)
+  // Set true once the source of queued audio (WS tts_done, or the chunked
+  // greeting's own fetch loop) has finished producing chunks -- distinct from
+  // the queue being empty, since chunks can arrive with gaps while more are
+  // still being synthesized. Only once BOTH this is true AND the queue has
+  // actually finished playing do we know Nancy is really done talking.
+  const ttsDoneRef = useRef(false)
+  // Bumped on every new speech attempt (chunked greeting, streamed chat turn,
+  // or an interrupt) so a slow in-flight fetch from an already-superseded
+  // speech attempt can detect it's stale and discard its result instead of
+  // resurrecting audio for something that was already cut off.
+  const speechGenRef = useRef(0)
 
   // ── Context bridge: report live UI state to /api/context so the backend
   // can inject it into Nancy's system prompt (_live_context_bridge_context
@@ -215,28 +226,98 @@ export default function Page() {
     })
   }, [])
 
-  const enqueueAudioChunk = useCallback((base64: string) => {
-    // No turn-id check needed here: ws-client.ts's askNancyStreaming already
-    // only invokes onAudioChunk for the currently-active turn (it drops any
-    // frame whose turn_id doesn't match before calling out to us at all).
-    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-    const blob = new Blob([bytes], { type: 'audio/wav' })
-    const url = URL.createObjectURL(blob)
+  // Only once the producer says it's done (ttsDoneRef) AND the queue has
+  // actually finished playing do we flip `speaking` back to false -- this is
+  // what lets the mic auto-resume effect (below) fire after a real streamed/
+  // chunked reply, not just after the single-blob nancySay() path.
+  const checkSpeechDrained = useCallback(() => {
+    if (ttsDoneRef.current && audioQueueRef.current.length === 0 && !isPlayingQueueRef.current) {
+      setSpeaking(false)
+      setWordIndex(-1)
+    }
+  }, [])
+
+  const enqueueAudioUrl = useCallback((url: string) => {
     const audio = new Audio(url)
     audio.addEventListener('ended', () => {
       URL.revokeObjectURL(url)
       isPlayingQueueRef.current = false
       if (currentAudioRef.current === audio) currentAudioRef.current = null
       playNextQueuedAudio()
+      checkSpeechDrained()
     })
     audio.addEventListener('error', () => {
       URL.revokeObjectURL(url)
       isPlayingQueueRef.current = false
       playNextQueuedAudio()
+      checkSpeechDrained()
     })
     audioQueueRef.current.push(audio)
     playNextQueuedAudio()
-  }, [playNextQueuedAudio])
+  }, [playNextQueuedAudio, checkSpeechDrained])
+
+  const enqueueAudioChunk = useCallback((base64: string) => {
+    // No turn-id check needed here: ws-client.ts's askNancyStreaming already
+    // only invokes onAudioChunk for the currently-active turn (it drops any
+    // frame whose turn_id doesn't match before calling out to us at all).
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+    const blob = new Blob([bytes], { type: 'audio/wav' })
+    enqueueAudioUrl(URL.createObjectURL(blob))
+  }, [enqueueAudioUrl])
+
+  /** Splits arbitrary text into sentences and speaks it via the same queued-
+   *  playback pipeline as streamed chat, fetching each sentence's audio from
+   *  the REST /tts/synthesize endpoint in turn. Unlike nancySay() (one call
+   *  for the whole text), this gets the FIRST sentence playing as soon as
+   *  ITS synthesis completes instead of waiting for the entire text -- for a
+   *  long personalized greeting under NeuTTS's real per-character synthesis
+   *  cost (confirmed live: ~60s for a ~300-char greeting synthesized whole),
+   *  that's the difference between hearing Nancy in ~7-8s vs ~60s. */
+  const nancySayChunked = useCallback((text: string) => {
+    cancelSpeech()
+    currentAudioRef.current?.pause()
+    currentAudioRef.current = null
+    audioQueueRef.current.forEach((a) => a.pause())
+    audioQueueRef.current = []
+    isPlayingQueueRef.current = false
+    setSpeakingAudioEl(null)
+    if (wordTimerRef.current) {
+      clearInterval(wordTimerRef.current)
+      wordTimerRef.current = null
+    }
+    ttsDoneRef.current = false
+    const myGen = ++speechGenRef.current
+    log('nancy', text)
+    sfx.confirm()
+    // Same reasoning as streamed chat's onText: show the full transcript
+    // immediately rather than waiting for every sentence's audio, since
+    // there's no per-word timing data for audio that hasn't synthesized yet.
+    setCurrentUtterance(text)
+    setSpeaking(true)
+    setWordIndex(-1)
+
+    const sentences = text.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g)?.map((s) => s.trim()).filter(Boolean) ?? [text]
+
+    ;(async () => {
+      for (const sentence of sentences) {
+        if (speechGenRef.current !== myGen) return // superseded (interrupted or a newer utterance started)
+        try {
+          const { audioUrl } = await synthesizeSpeech(sentence)
+          if (speechGenRef.current !== myGen) {
+            URL.revokeObjectURL(audioUrl)
+            return
+          }
+          if (audioUrl) enqueueAudioUrl(audioUrl)
+        } catch {
+          // Best-effort: skip this sentence's audio and keep going with the rest.
+        }
+      }
+      if (speechGenRef.current === myGen) {
+        ttsDoneRef.current = true
+        checkSpeechDrained()
+      }
+    })()
+  }, [log, enqueueAudioUrl, checkSpeechDrained])
 
   /** Interrupts whatever's currently speaking/queued and claims playback for
    *  a new turn -- combined with the backend cancelling the old turn's
@@ -257,6 +338,8 @@ export default function Page() {
       clearInterval(wordTimerRef.current)
       wordTimerRef.current = null
     }
+    ttsDoneRef.current = false
+    speechGenRef.current++ // invalidate any still-in-flight chunked greeting fetch loop
     currentTurnIdRef.current = turnId
     setSpeaking(true)
     setWordIndex(-1)
@@ -283,6 +366,8 @@ export default function Page() {
     // Invalidate the in-flight turn so any late streamed audio chunks from
     // it are discarded instead of resurrecting the interrupted speech.
     currentTurnIdRef.current = null
+    ttsDoneRef.current = false
+    speechGenRef.current++ // discard any in-flight chunked-fetch loop's late result
     setSpeaking(false)
     setThinking(false)
     setWordIndex(-1)
@@ -559,7 +644,14 @@ export default function Page() {
                 log('nancy', finalText)
                 setCurrentUtterance(finalText)
               },
-              onDone: () => setThinking(false),
+              onDone: () => {
+                setThinking(false)
+                // All chunks have been SENT (not necessarily played yet --
+                // checkSpeechDrained only actually flips `speaking` false
+                // once the queue has also finished playing them).
+                ttsDoneRef.current = true
+                checkSpeechDrained()
+              },
               onError: () => {
                 sfx.error()
                 setThinking(false)
@@ -576,7 +668,7 @@ export default function Page() {
         }
       }
     },
-    [doLaunch, locate, nancySay, log, enqueueAudioChunk, beginStreamedTurn],
+    [doLaunch, locate, nancySay, log, enqueueAudioChunk, beginStreamedTurn, checkSpeechDrained],
   )
 
   const onUserInput = useCallback(
@@ -645,18 +737,34 @@ export default function Page() {
       // Real personalized greeting (live forex rates, memory/projects, open
       // trades, pending self-improvement proposals -- see
       // backend/main_new.py's _build_real_personal_context). Falls back to
-      // the plain boot line if the backend's unreachable or has nothing to say.
+      // the plain boot line if the backend's unreachable, slow, or has
+      // nothing to say -- for a voice-first product, how long until the
+      // user hears ANYTHING matters more than the richer phrasing, and the
+      // backend's own LLM-composition step already has a tight 5s timeout
+      // of its own (see intelligent_greeting.py) before it falls back to a
+      // real, complete templated greeting -- this client-side race is
+      // defense in depth against slow network, not the primary guard.
+      // Spoken via nancySayChunked (not nancySay): a full greeting is
+      // synthesized sentence-by-sentence and played as each one finishes,
+      // so the target of hearing Nancy within ~10-15s of bootup holds
+      // regardless of the greeting's total length (confirmed live: whole-
+      // greeting NeuTTS synthesis alone can take ~60s for a long greeting,
+      // vs ~7-8s for just its first sentence).
+      const ctl = new AbortController()
+      const raceTimer = setTimeout(() => ctl.abort(), 8_000)
       fetch('/api/greeting/personalized', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
+        signal: ctl.signal,
       })
         .then((res) => (res.ok ? res.json() : Promise.reject(res)))
-        .then((json) => nancySay(json?.greeting || fallback))
-        .catch(() => nancySay(fallback))
-    }, 1400)
+        .then((json) => nancySayChunked(json?.greeting || fallback))
+        .catch(() => nancySayChunked(fallback))
+        .finally(() => clearTimeout(raceTimer))
+    }, 300)
     return () => clearTimeout(t)
-  }, [booting, nancySay])
+  }, [booting, nancySayChunked])
 
   const toggleMic = useCallback(() => {
     unlockSfx()

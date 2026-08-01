@@ -1354,12 +1354,31 @@ def on_wake_word():
             main_loop,
         )
 
-try:
-    wake_word_detector = get_wake_word_detector()
-    threading.Thread(target=lambda: wake_word_detector.start(on_wake_word), daemon=True).start()
-    logger.info("Wake word detector started.")
-except Exception as e:
-    logger.warning("Wake word detector unavailable: %s", e)
+_wake_word_default = "false" if os.getenv("WAKE_WORD_ENABLED") is None else os.getenv("WAKE_WORD_ENABLED")
+if _wake_word_default.strip().lower() in ("1", "true", "yes"):
+    try:
+        wake_word_detector = get_wake_word_detector()
+        threading.Thread(target=lambda: wake_word_detector.start(on_wake_word), daemon=True).start()
+        logger.info("Wake word detector started.")
+    except Exception as e:
+        logger.warning("Wake word detector unavailable: %s", e)
+else:
+    # Opt-in, default off. This is the backend's OWN native microphone
+    # capture (sounddevice.InputStream, real hardware, running a real
+    # faster-whisper pass every ~3s continuously) -- a separate thing from
+    # the browser's own Web Speech API wake-word/voice capture that already
+    # covers the actual product's real usage (a user talking to the web
+    # app). Confirmed live: this container never had a real audio device at
+    # all, so it silently no-op'd in every Docker deployment this session --
+    # the first time this backend ran natively with a real microphone
+    # attached, it started continuously listening with no one having asked
+    # for that, and the resulting constant CPU load was directly
+    # responsible for real, measured NeuTTS synthesis slowdowns (the same
+    # short phrase went from ~8s to ~27s with this running). Set
+    # WAKE_WORD_ENABLED=true if you specifically want hands-free wake-word
+    # detection from this machine's own hardware mic (e.g. a dedicated
+    # always-on box), independent of any browser tab being open.
+    logger.info("Wake word detector not started (WAKE_WORD_ENABLED is not set/true) -- browser voice input is unaffected.")
 
 
 # ---------------------------------------------------------------------------
@@ -4171,36 +4190,72 @@ async def _build_real_personal_context() -> "PersonalContext":
     # configured (GOOGLE_CALENDAR_REFRESH_TOKEN etc.), and honestly empty --
     # never fabricated -- when it isn't. Every other field is best-effort:
     # any source that errors has nothing to report is just omitted, not faked.
-    meetings_today: list = []
-    if google_calendar.is_configured():
+    # The three I/O-bound sections below (calendar, per-pair forex, self-
+    # improvement status) used to run one after another -- confirmed live,
+    # that sequential chain was the real reason the whole "personalized
+    # greeting" endpoint could take 25-30+ seconds, well past the frontend's
+    # own abort timer for it, meaning the user essentially never actually
+    # heard the real personalized greeting and always got the generic
+    # fallback line instead. Each section already degrades independently on
+    # its own failure (empty result, not raised), so running them
+    # concurrently via asyncio.gather changes total wall-clock time from
+    # "sum of every section" to "the slowest single section" with no change
+    # in what gets reported.
+    async def _get_meetings() -> list:
+        if not google_calendar.is_configured():
+            return []
         try:
             now = datetime.now(timezone.utc)
             end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
             cal_result = await google_calendar.list_events(
                 time_min=now.isoformat(), time_max=end_of_day.isoformat(), max_results=10,
             )
+            out = []
             if cal_result.get("success"):
                 for event in cal_result.get("events", []):
                     start = event.get("start") or ""
                     time_part = start[11:16] if len(start) >= 16 else start
-                    meetings_today.append(f"{event.get('summary', 'Untitled event')} at {time_part}")
+                    out.append(f"{event.get('summary', 'Untitled event')} at {time_part}")
+            return out
         except Exception as e:
             logger.debug("Greeting: calendar data unavailable: %s", e)
-    # Real pairs the user actually trades/watches -- trading_manager.watched_pairs
-    # (explicit) unioned with whatever pairs appear in real trade history, never
-    # a hardcoded pair list. Confirmed live: this used to always report EUR/USD
-    # and GBP/USD regardless of what the user actually trades.
-    market_alerts: list = []
-    for pair in trading_manager.get_relevant_pairs():
+            return []
+
+    async def _get_one_pair_alert(pair: str) -> Optional[str]:
         try:
             snapshot = await forex_aggregator.get_price(pair)
-            if snapshot:
-                direction = "up" if snapshot.change_24h > 0 else "down" if snapshot.change_24h < 0 else "flat"
-                market_alerts.append(
-                    f"{pair} is trading at {snapshot.price:.4f}, {direction} {abs(snapshot.change_24h):.2f}% on the day"
-                )
+            if not snapshot:
+                return None
+            direction = "up" if snapshot.change_24h > 0 else "down" if snapshot.change_24h < 0 else "flat"
+            return f"{pair} is trading at {snapshot.price:.4f}, {direction} {abs(snapshot.change_24h):.2f}% on the day"
         except Exception as e:
             logger.debug("Greeting: market data unavailable for %s: %s", pair, e)
+            return None
+
+    async def _get_market_alerts() -> list:
+        # Real pairs the user actually trades/watches --
+        # trading_manager.watched_pairs (explicit) unioned with whatever
+        # pairs appear in real trade history, never a hardcoded pair list.
+        # Confirmed live: this used to always report EUR/USD and GBP/USD
+        # regardless of what the user actually trades.
+        pairs = trading_manager.get_relevant_pairs()
+        results = await asyncio.gather(*(_get_one_pair_alert(p) for p in pairs))
+        return [r for r in results if r]
+
+    async def _get_tasks_due() -> list:
+        try:
+            si_result = await agent_service.run("self_improvement", {"type": "status"}, timeout=5.0)
+            pending = si_result.get("pending_proposals", 0)
+            if pending:
+                return [f"{pending} self-improvement proposal{'s' if pending != 1 else ''} awaiting your approval"]
+            return []
+        except Exception as e:
+            logger.debug("Greeting: self-improvement status unavailable: %s", e)
+            return []
+
+    meetings_today, market_alerts, tasks_due = await asyncio.gather(
+        _get_meetings(), _get_market_alerts(), _get_tasks_due(),
+    )
 
     project_updates: list = []
     try:
@@ -4216,15 +4271,6 @@ async def _build_real_personal_context() -> "PersonalContext":
         active_trades = [f"{t.pair} {t.direction} @ {t.entry_price}" for t in open_trades]
     except Exception as e:
         logger.debug("Greeting: trade data unavailable: %s", e)
-
-    tasks_due: list = []
-    try:
-        si_result = await agent_service.run("self_improvement", {"type": "status"}, timeout=5.0)
-        pending = si_result.get("pending_proposals", 0)
-        if pending:
-            tasks_due.append(f"{pending} self-improvement proposal{'s' if pending != 1 else ''} awaiting your approval")
-    except Exception as e:
-        logger.debug("Greeting: self-improvement status unavailable: %s", e)
 
     # Real agent-fleet status -- always available once the agent service is
     # ready, so the greeting has substance even when there's nothing else

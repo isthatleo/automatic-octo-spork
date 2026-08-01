@@ -113,6 +113,13 @@ class SystemMonitor:
     
     def get_temperature_info(self) -> Dict[str, Any]:
         """Get system temperature information (if available)."""
+        # psutil.sensors_temperatures doesn't exist at all on Windows builds
+        # (not just an empty result -- the attribute itself is undefined),
+        # confirmed live running this backend natively on Windows for the
+        # first time. hasattr() avoids logging a real ERROR on every single
+        # health check for a platform limitation, not an actual failure.
+        if not hasattr(psutil, "sensors_temperatures"):
+            return {'status': 'unavailable', 'message': 'Temperature sensors not available on this platform'}
         try:
             temps = psutil.sensors_temperatures()
             if not temps:

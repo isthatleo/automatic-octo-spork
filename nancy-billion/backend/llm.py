@@ -703,21 +703,36 @@ class GeminiLLM(LLMBackend):
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
         import aiohttp
-        import json
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt}
-                    ]
-                }
-            ],
-            "generationConfig": {
+
+        def _build_payload(with_thinking_config: bool) -> dict:
+            generation_config = {
                 "maxOutputTokens": max_tokens,
-                "temperature": temperature
+                "temperature": temperature,
             }
-        }
+            if with_thinking_config:
+                # Gemini's "thinking" models (2.5+/flash-latest included) spend
+                # part of maxOutputTokens on invisible internal reasoning
+                # tokens unless this is set -- confirmed live: a 350-token
+                # budget for a short greeting came back cut off mid-sentence
+                # after ~12 visible words, because most of the budget was
+                # silently consumed by thinking. 0 disables it; this codebase
+                # doesn't ask Gemini to do multi-step reasoning anywhere it
+                # calls .generate() directly (that's what the tool-use loop
+                # is for), so there's no real work this ever needed to do.
+                # NOT every configured model accepts this field though --
+                # confirmed live, GEMINI_MODEL pointed at one that rejected it
+                # outright with a generic 400 "invalid argument" (no
+                # field-level detail), which took the entire backend out of
+                # the fallback chain on every call. Rather than guess which
+                # model names support it, the 400 handler below retries once
+                # without it before giving up.
+                generation_config["thinkingConfig"] = {"thinkingBudget": 0}
+            return {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": generation_config,
+            }
+
         # Accept-Encoding: identity -- confirmed live that at least Groq's
         # API can respond with brotli (Content-Encoding: br), which aiohttp
         # advertises support for whenever a brotli decoder happens to be
@@ -726,19 +741,62 @@ class GeminiLLM(LLMBackend):
         # entire backend out of the fallback chain on every real call.
         # Requesting no compression sidesteps it without a new dependency.
         async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
-            async with session.post(url, json=payload) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    usage = result.get("usageMetadata")
-                    if usage:
-                        self._last_usage = {
-                            "prompt_tokens": usage.get("promptTokenCount"),
-                            "completion_tokens": usage.get("candidatesTokenCount"),
-                        }
-                    return result["candidates"][0]["content"]["parts"][0]["text"]
-                else:
-                    text = await resp.text()
-                    raise Exception(f"Gemini error: {resp.status} - {text}")
+            for with_thinking_config in (True, False):
+                payload = _build_payload(with_thinking_config)
+                async with session.post(url, json=payload) as resp:
+                    if resp.status == 400 and with_thinking_config:
+                        text = await resp.text()
+                        logger.warning(
+                            "Gemini rejected thinkingConfig for model=%s (%s); retrying without it",
+                            self.model, text[:200],
+                        )
+                        continue
+                    if resp.status == 200:
+                        result = await resp.json()
+                        usage = result.get("usageMetadata")
+                        if usage:
+                            self._last_usage = {
+                                "prompt_tokens": usage.get("promptTokenCount"),
+                                "completion_tokens": usage.get("candidatesTokenCount"),
+                            }
+                        candidates = result.get("candidates") or []
+                        if not candidates:
+                            raise Exception(f"Gemini returned no candidates: {result}")
+                        finish_reason = candidates[0].get("finishReason", "unknown")
+                        parts = candidates[0].get("content", {}).get("parts") or []
+                        if not parts:
+                            # A real, observed shape: finishReason == "MAX_TOKENS"
+                            # with an empty parts list when the whole budget went
+                            # to thinking before this fix -- surface the real
+                            # reason instead of a bare KeyError.
+                            raise Exception(f"Gemini returned no text (finishReason={finish_reason})")
+                        if finish_reason == "MAX_TOKENS":
+                            # thinkingConfig can't be disabled for every model
+                            # (see the 400-retry above) and at least one --
+                            # confirmed live, gemini-flash-latest resolving to
+                            # gemini-3.6-flash -- reserves ~90%+ of whatever
+                            # maxOutputTokens is given for invisible "thinking"
+                            # regardless of prompt complexity, and that share
+                            # scales UP with the budget rather than being a
+                            # fixed overhead (confirmed live: raising the
+                            # budget 350->1200 raised thinking tokens
+                            # 335->1151, same cut-off-mid-sentence result
+                            # either way). There's no token budget that
+                            # reliably outruns this, so a MAX_TOKENS finish is
+                            # treated as a hard failure -- letting the
+                            # FallbackLLM chain move on to the next real
+                            # backend -- rather than returning the genuinely
+                            # truncated (garbled-sounding, mid-clause) text as
+                            # if it were a complete, valid reply.
+                            raise Exception(
+                                f"Gemini truncated by MAX_TOKENS with {usage.get('thoughtsTokenCount', '?') if usage else '?'} "
+                                f"thinking tokens consumed (model={self.model} doesn't allow disabling thinking)"
+                            )
+                        return parts[0].get("text", "")
+                    else:
+                        text = await resp.text()
+                        raise Exception(f"Gemini error: {resp.status} - {text}")
+        raise Exception("Gemini error: exhausted retries")
 
 class OpenRouterLLM(LLMBackend):
     def __init__(self):
