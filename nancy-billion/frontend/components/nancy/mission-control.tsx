@@ -233,15 +233,33 @@ function AgentGlassCard({ agent, onOpen }: { agent: AgentInfo; onOpen: () => voi
       whileHover={{ y: -4, scale: 1.02 }}
       whileTap={{ scale: 0.99 }}
       transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+      // A genuinely running task gets a real pulsing border+glow around the
+      // WHOLE card (not just the left accent bar) -- a live signal for
+      // "this agent is doing real work right now", driven directly by
+      // agent.status === 'executing', never a decorative default. The
+      // border/glow pulse carries its own embedded transition (targeted
+      // per-property override) so it runs on its own 2.2s breathing loop
+      // independently of the spring above, which stays reserved for the
+      // hover/tap y-and-scale lift.
+      animate={isExecuting
+        ? {
+            borderColor: [BORDER_HOVER, ACCENT2, BORDER_HOVER],
+            boxShadow: [`0 0 14px ${GLOW_SOFT}`, `0 0 30px ${GLOW_STRONG}`, `0 0 14px ${GLOW_SOFT}`],
+            transition: { duration: 2.2, repeat: Infinity, ease: 'easeInOut' },
+          }
+        : {
+            borderColor: hovered ? BORDER_HOVER : BORDER_IDLE,
+            boxShadow: hovered ? `0 0 30px ${GLOW_SOFT}` : '0 0 0px transparent',
+            transition: { duration: 0.25, ease: 'easeOut' },
+          }}
       className={cn('relative flex h-[230px] w-[270px] shrink-0 flex-col overflow-hidden p-[18px] text-left', isOffline && 'opacity-50')}
       style={{
         borderRadius: 16,
         background: GLASS_BG,
         backdropFilter: 'blur(22px)',
         WebkitBackdropFilter: 'blur(22px)',
-        border: `1px solid ${hovered || isExecuting ? BORDER_HOVER : BORDER_IDLE}`,
-        boxShadow: hovered ? `0 0 30px ${GLOW_SOFT}` : isExecuting ? `0 0 18px ${GLOW_SOFT}` : 'none',
-        transition: 'border-color 0.25s ease, box-shadow 0.25s ease',
+        borderWidth: 1,
+        borderStyle: 'solid',
       }}
     >
       {/* left accent bar — breathes for a genuinely executing agent */}
