@@ -77,6 +77,8 @@ _BUILTIN_COMMANDS = [
     ("recall", "Search your memory -- /recall a topic"),
     ("coworkers", "See what background tasks are being worked on"),
     ("tasks", "See the last proactive agent task batch"),
+    ("crypto", "Real crypto market snapshot, ranked by momentum"),
+    ("drafts", "See pending product/ad drafts awaiting your approval"),
 ]
 
 

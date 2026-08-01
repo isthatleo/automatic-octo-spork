@@ -87,6 +87,9 @@ _ROUTE_RULES: List[tuple[list[str], str]] = [
     (["convert.*time zone", "timezone", "meeting overlap", "working hours overlap"], "timezone_scheduling"),
     (["cyclomatic complexity", "code complexity", "analyze this code"],         "code_complexity"),
     (["spawn tasks", "delegate to agents", "generate and delegate", "orchestrate tasks"], "task_orchestration"),
+    (["crypto market", "top movers", "crypto snapshot", "crypto news", "altcoin"],        "crypto_intelligence"),
+    (["mining profitab", "worth mining", "is mining", "hash rate", "mining rig"],         "mining_profitability"),
+    (["trending product", "sell online", "product listing", "draft an ad", "etsy", "shopify", "dropship"], "ecommerce_research"),
 ]
 
 

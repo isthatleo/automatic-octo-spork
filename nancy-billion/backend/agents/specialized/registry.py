@@ -75,6 +75,12 @@ from .code_complexity_agent import CodeComplexityAgent
 # reactive DispatcherAgent above) -- the real engine behind "every agent is
 # always doing something" (see main_new.py's proactive-agent scheduling).
 from .task_orchestrator_agent import TaskOrchestratorAgent
+# Real income-research agents: crypto market intelligence, an honest mining-
+# profitability calculator, and e-commerce trend research/drafting (never
+# auto-publishing or auto-spending -- see ecommerce_research_agent.py).
+from .crypto_intelligence_agent import CryptoIntelligenceAgent
+from .mining_profitability_agent import MiningProfitabilityAgent
+from .ecommerce_research_agent import EcommerceResearchAgent
 
 # Registry of all available specialized agents
 SPECIALIZED_AGENTS = {
@@ -151,6 +157,10 @@ SPECIALIZED_AGENTS = {
     "code_complexity":          CodeComplexityAgent,
     # ---- Proactive task generation + delegation ----
     "task_orchestration":       TaskOrchestratorAgent,
+    # ---- Real income-research agents ----
+    "crypto_intelligence":      CryptoIntelligenceAgent,
+    "mining_profitability":     MiningProfitabilityAgent,
+    "ecommerce_research":       EcommerceResearchAgent,
 }
 
 def get_available_agents():

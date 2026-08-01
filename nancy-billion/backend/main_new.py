@@ -7934,6 +7934,39 @@ async def _telegram_coworkers_command(args: str = "") -> str:
     return "\n".join(lines)
 
 
+async def _telegram_crypto_command(args: str = "") -> str:
+    """/crypto -- real multi-coin market snapshot ranked by real 24h
+    momentum (CryptoIntelligenceAgent), distinct from /markets (forex)."""
+    from telegram_bot import _escape_html
+
+    result = await agent_service.run("crypto_intelligence", {"type": "top_movers"}, timeout=20.0)
+    if not result.get("success"):
+        return f"\U0001f4b0 <b>Crypto</b>\n\nCouldn't fetch live data right now: {_escape_html(result.get('error', 'unknown error'))}"
+    lines = ["\U0001f4b0 <b>Crypto snapshot</b>", ""]
+    for s in result.get("all_ranked", []):
+        arrow = "\U0001f4c8" if s["change_24h_pct"] > 0 else "\U0001f4c9" if s["change_24h_pct"] < 0 else "➡️"
+        lines.append(f"{arrow} <b>{_escape_html(s['symbol'])}</b> ${s['price_usd']:,.2f} ({s['change_24h_pct']:+.2f}%)")
+    return "\n".join(lines)
+
+
+async def _telegram_drafts_command(args: str = "") -> str:
+    """/drafts -- real pending product/ad-copy drafts from EcommerceResearchAgent,
+    never auto-published (see product_drafts_store.py)."""
+    from telegram_bot import _escape_html
+    from product_drafts_store import product_drafts_store
+
+    drafts = product_drafts_store.list()
+    if not drafts:
+        return "\U0001f4e6 No product drafts yet, Sir. Ask me to research trending products or draft a listing."
+    lines = ["\U0001f4e6 <b>Product drafts</b>", ""]
+    icons = {"draft": "\U0001f4dd", "pending_approval": "⏳", "approved": "✅", "rejected": "❌"}
+    for d in drafts[:10]:
+        icon = icons.get(d.status, "❔")
+        price = f"${d.suggested_price_usd:.2f}" if d.suggested_price_usd else "no price yet"
+        lines.append(f"{icon} <b>{_escape_html(d.title)}</b> ({price}) -- <code>{d.id}</code>")
+    return "\n".join(lines)
+
+
 async def _telegram_tasks_command(args: str = "") -> str:
     """/tasks -- real visibility into the last proactive orchestrator batch,
     so "every agent is always doing something" is checkable, not a claim
@@ -8058,6 +8091,8 @@ async def startup_event():
     telegram_notifier.set_command_handler("recall", _telegram_recall_command)
     telegram_notifier.set_command_handler("coworkers", _telegram_coworkers_command)
     telegram_notifier.set_command_handler("tasks", _telegram_tasks_command)
+    telegram_notifier.set_command_handler("crypto", _telegram_crypto_command)
+    telegram_notifier.set_command_handler("drafts", _telegram_drafts_command)
     telegram_notifier.set_image_broadcaster(
         lambda image_bytes, caption: _broadcast_reply_to_web("", [image_bytes], source="telegram")
     )
