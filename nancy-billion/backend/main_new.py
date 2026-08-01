@@ -1171,13 +1171,18 @@ logger.info("=" * 70)
 # ---------------------------------------------------------------------------
 # Base system prompt
 # ---------------------------------------------------------------------------
-BASE_SYSTEM_PROMPT = """
+_CORE_IDENTITY_PROMPT = """
 You are Nancy/Billion, a highly intelligent, versatile, and sovereign AI operating system. You are an expert general-purpose assistant capable of reasoning through complex problems, answering a wide range of questions, and controlling the user's computer through voice commands.
 
 CRITICAL: Do NOT assume that a user's query is a map location, address, or city name unless it is explicitly framed as one. Treat every request with a general-purpose intelligence first. If the user asks a basic question, answer it directly and intelligently.
 
 You have access to a variety of tools for system control, coding, web search, media generation, and more. You speak in a clear, confident, and helpful tone. You can spawn specialized agents to handle complex tasks. Always aim to assist the user efficiently and safely.
+"""
 
+# Voice/web: replies are spoken aloud via NeuTTS, so length directly costs
+# real wait time before the user hears anything -- brevity is the right
+# default here.
+_VOICE_STYLE_ADDENDUM = """
 Always address the user as "Sir" (always capitalized, even mid-sentence) -- naturally, the way a butler-style assistant (JARVIS) would, not stiffly or in every single sentence. Never use their name or any other title.
 
 Calibrate the length and depth of every response to what was actually asked -- this matters doubly here since your replies are spoken aloud, and a long answer means a long wait before the user hears anything useful:
@@ -1186,6 +1191,28 @@ Calibrate the length and depth of every response to what was actually asked -- t
 - A request for a definition or "what is X" gets a brief, precise explanation -- a paragraph at most, not an essay, unless asked to go deeper.
 - Only give a longer, structured, multi-part answer when the user's request actually calls for it: they asked for a deep dive, a thorough explanation, a comparison, a plan, or explicitly asked for detail/an essay/"tell me everything about". If genuinely unsure whether they want brief or thorough, default to brief and offer to expand -- don't pre-emptively over-explain.
 """
+
+# Telegram: pure text, no TTS in the loop, and the user has explicitly said
+# they want real depth here and don't want "Sir" on every message -- a
+# genuinely different register from the voice-first default above, not just
+# a shorter/longer knob.
+_TELEGRAM_STYLE_ADDENDUM = """
+This conversation is happening over Telegram text chat, not voice -- there is no text-to-speech involved, so there is no reason to shorten answers to save speaking time. Address the user as "Sir" only occasionally and naturally, the way a colleague might use someone's name once in a while for warmth -- most replies don't need it at all, and never more than once per reply. Write like a sharp, well-read friend or colleague having a real conversation over text, not a formal report reciting facts.
+
+Calibrate depth to what was actually asked, but lean toward genuine thoroughness for anything informational:
+- A quick factual lookup ("what's the price of X", "is Y online") still gets a direct, short answer.
+- Casual conversation (greetings, small talk, banter) gets a short, natural reply.
+- Anything that asks you to explain, describe, or give the history or background of a topic deserves real depth: write at least 3-4 well-developed paragraphs with genuine detail and substance, not a clipped summary -- the user is reading at their own pace, not waiting on you to stop talking.
+- Give a longer, structured answer whenever the request calls for real depth (a deep dive, a comparison, a plan, "tell me everything about").
+"""
+
+BASE_SYSTEM_PROMPT = _CORE_IDENTITY_PROMPT + _VOICE_STYLE_ADDENDUM
+
+
+def _system_prompt_for_channel(channel: str) -> str:
+    if channel == "telegram":
+        return _CORE_IDENTITY_PROMPT + _TELEGRAM_STYLE_ADDENDUM
+    return BASE_SYSTEM_PROMPT
 
 # ---------------------------------------------------------------------------
 # Fury agent (optional)
@@ -1466,11 +1493,29 @@ def _maybe_gate_self_improvement(agent_key: str, result: Dict[str, Any]) -> None
     asyncio.create_task(_gate())
 
 
+_HISTORY_WINDOW_MESSAGES = 12
+
+
 def _history_to_text() -> str:
+    """Only the most recent turns, not the entire conversation.
+
+    history_manager.history grows without bound for the life of the process
+    (fury's HistoryManager also persists it to disk across restarts -- see
+    persist_to_disk=True above), so replaying it in full on every single
+    call was a real, severe bug: confirmed live, weeks of accumulated
+    history ballooned the chat prompt to ~20-24K tokens, blowing straight
+    past Groq's 12K TPM limit and OpenRouter's free-credit budget on every
+    message, forcing every single chat turn through 2-4 guaranteed-failing
+    backends before reaching one that tolerated the size -- the dominant
+    cause of Telegram/chat replies taking 12+ seconds. Real continuity
+    beyond this recent window already comes from memory_manager's semantic
+    retrieval (see get_memory_context_string in _build_chat_parts), not
+    from replaying the entire raw transcript every turn."""
     if history_manager is None:
         return ""
+    recent = history_manager.history[-_HISTORY_WINDOW_MESSAGES:]
     history_lines = []
-    for msg in history_manager.history:
+    for msg in recent:
         history_lines.append(f"{msg.get('role','?')}: {msg.get('content','')}")
     return "\n".join(history_lines)
 
@@ -3271,13 +3316,15 @@ def _enforce_sir(text: str) -> str:
     return _SIR_RE.sub("Sir", text)
 
 
-def _build_chat_parts(user_text: str, history_text: str) -> tuple[str, str, str]:
+def _build_chat_parts(user_text: str, history_text: str, channel: str = "voice") -> tuple[str, str, str]:
     """Shared prompt assembly, split into (static_system, dynamic_context,
     user_turn) so backends that support a real system role can use it:
 
-    - static_system: BASE_SYSTEM_PROMPT alone -- byte-identical every turn,
-      which is exactly what makes Anthropic prompt caching effective (the
-      cache key is a prefix match; see llm.py's _anthropic_system_blocks).
+    - static_system: _system_prompt_for_channel(channel) -- byte-identical
+      every turn FOR A GIVEN CHANNEL, which is exactly what makes Anthropic
+      prompt caching effective (the cache key is a prefix match; see
+      llm.py's _anthropic_system_blocks) -- caching still applies per-channel,
+      just as two distinct cached prefixes instead of one.
     - dynamic_context: live system/UI context, matched skills, detected
       links, retrieved memories -- changes turn to turn, still system-role
       material rather than something the "user said".
@@ -3305,7 +3352,7 @@ def _build_chat_parts(user_text: str, history_text: str) -> tuple[str, str, str]
         f"{skills_block}\n\n{links_block}\n\n{memory_block}"
     )
     user_turn = f"{history_text}\nuser: {user_text}\nassistant:"
-    return BASE_SYSTEM_PROMPT, dynamic_context, user_turn
+    return _system_prompt_for_channel(channel), dynamic_context, user_turn
 
 
 def _chat_system_blocks(static_system: str, dynamic_context: str) -> list:
@@ -3317,14 +3364,14 @@ def _chat_system_blocks(static_system: str, dynamic_context: str) -> list:
     return blocks
 
 
-def _build_chat_prompt(user_text: str, history_text: str) -> str:
+def _build_chat_prompt(user_text: str, history_text: str, channel: str = "voice") -> str:
     """Single-string prompt for backends without a usable system role --
     identical content to _build_chat_parts, just joined."""
-    static_system, dynamic_context, user_turn = _build_chat_parts(user_text, history_text)
+    static_system, dynamic_context, user_turn = _build_chat_parts(user_text, history_text, channel)
     return f"{static_system}\n\n{dynamic_context}\n\n{user_turn}"
 
 
-async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
+async def _generate_response_via_hierarchy(user_text: str, channel: str = "voice") -> tuple[str, dict]:
     """Thin wrapper around _generate_response_via_hierarchy_impl that adds
     real memory population -- this function (not the impl) is the single
     chokepoint every real caller actually uses (WS chat/voice turns,
@@ -3338,7 +3385,7 @@ async def _generate_response_via_hierarchy(user_text: str) -> tuple[str, dict]:
     (works directly off this turn's real text) rather than the original
     extract_memories_from_conversation (depends on nancy_brain.context,
     which the real path never populates either)."""
-    response_text, debug = await _generate_response_via_hierarchy_impl(user_text)
+    response_text, debug = await _generate_response_via_hierarchy_impl(user_text, channel)
     try:
         active_manager = _active_memory_manager()
         active_manager.extract_memories_from_message(user_text, role="user")
@@ -3458,7 +3505,7 @@ async def _maybe_distill_skill(user_text: str, response_text: str, tool_trace: L
         logger.exception("Skill distillation failed (reply was unaffected)")
 
 
-async def _generate_response_via_hierarchy_impl(user_text: str) -> tuple[str, dict]:
+async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "voice") -> tuple[str, dict]:
     """Route a chat message to Claude's real tool-use loop when it clearly
     wants a real action, to a real specialized agent when the text clearly
     matches one of the 29 registered domains, or otherwise to the
@@ -3493,7 +3540,7 @@ async def _generate_response_via_hierarchy_impl(user_text: str) -> tuple[str, di
     fallback does.
     """
     history_text = _history_to_text()
-    static_system, dynamic_context, user_turn = _build_chat_parts(user_text, history_text)
+    static_system, dynamic_context, user_turn = _build_chat_parts(user_text, history_text, channel)
     # Single-string shape for backends without a usable system role
     # (OpenAI-compat tool fallbacks, plain-chat fallback chain) -- same
     # content, just joined.
@@ -3662,8 +3709,13 @@ async def _generate_response_via_hierarchy_impl(user_text: str) -> tuple[str, di
                 logger.warning("Specialized agent '%s' failed, falling back to LLM: %s", routed_key, e)
 
     try:
+        # Telegram gets real headroom for the "4 well-developed paragraphs"
+        # depth its style addendum asks for -- 512 tokens (the voice/web
+        # default, sized for short spoken replies) would cut a genuinely
+        # thorough answer off mid-thought.
+        max_tokens = 1600 if channel == "telegram" else 512
         resp = await asyncio.wait_for(
-            llm_backend.generate(prompt, max_tokens=512, temperature=0.7),
+            llm_backend.generate(prompt, max_tokens=max_tokens, temperature=0.7),
             timeout=30.0,
         )
         resp = _enforce_sir(resp)
@@ -7688,7 +7740,50 @@ async def websocket_endpoint(websocket: WebSocket):
 # Startup / Shutdown
 # ---------------------------------------------------------------------------
 
-async def _telegram_status_command() -> str:
+async def _telegram_image_command(args: str) -> str:
+    """/image <description> -- real image generation (media_tools.generate_image,
+    same provider registry the chat tool-use path uses), sent back to this
+    Telegram chat as a real photo/document instead of only ever landing on
+    the web dashboard's canvas."""
+    prompt = args.strip()
+    if not prompt:
+        return "Usage: /image a description of what you want, e.g. <code>/image a golden retriever wearing sunglasses</code>"
+
+    result = await generate_image(prompt)
+    if not result.get("success"):
+        from telegram_bot import _escape_html
+        return f"⚠️ Image generation failed: {_escape_html(result.get('error', 'unknown error'))}"
+
+    image_b64 = result.get("_image_base64")
+    if image_b64:
+        await telegram_notifier.send_document(base64.b64decode(image_b64), filename="generated.png", caption=prompt[:200])
+        return "\U0001f3a8 Done."
+    if result.get("url"):
+        from telegram_bot import _escape_html
+        return f"\U0001f3a8 Generated: {_escape_html(result['url'])}"
+    return "\U0001f3a8 Generated, but couldn't retrieve the image data."
+
+
+async def _telegram_recall_command(args: str) -> str:
+    """/recall <topic> -- real semantic memory search (the same
+    get_memory_context_string retrieval the chat pipeline uses to ground its
+    own answers), surfaced directly instead of only ever being invisible
+    context behind an LLM call."""
+    from telegram_bot import _escape_html
+
+    query = args.strip()
+    if not query:
+        return "Usage: /recall a topic or keyword, e.g. <code>/recall project roxan</code>"
+    try:
+        block = _active_memory_manager().get_memory_context_string(query, max_memories=6)
+    except Exception as e:
+        return f"⚠️ Memory search failed: {_escape_html(str(e))}"
+    if not block.strip():
+        return f"Nothing in memory matches “{_escape_html(query)}”, Sir."
+    return f"\U0001f9e0 <b>Memory recall</b>\n\n{_escape_html(block)}"
+
+
+async def _telegram_status_command(args: str = "") -> str:
     """Real /status command reply -- reuses the exact same agent-fleet and
     open-trade data as the personalized greeting's system_status/
     active_trades fields (see _build_real_personal_context), just formatted
@@ -7723,7 +7818,7 @@ async def _telegram_status_command() -> str:
     return "\n".join(lines)
 
 
-async def _telegram_markets_command() -> str:
+async def _telegram_markets_command(args: str = "") -> str:
     """Real /markets command reply -- concurrently fetches live prices for
     every pair the user actually trades/watches (trading_manager.get_relevant_pairs()),
     same real data source and the same concurrency fix as
@@ -7755,8 +7850,11 @@ async def _telegram_markets_command() -> str:
 async def _telegram_chat_handler(text: str) -> str:
     """Routes a Telegram message through the same chat pipeline the voice/web
     UI uses, so 'chat with Billion from Telegram' means the same Billion --
-    same context history, same agent routing, same LLM fallback chain."""
-    response, debug = await _generate_response_via_hierarchy(text)
+    same context history, same agent routing, same LLM fallback chain.
+    channel="telegram" gets it the text-chat system-prompt style (real depth
+    on informational questions, "Sir" used sparingly rather than constantly)
+    instead of the voice-first brevity default."""
+    response, debug = await _generate_response_via_hierarchy(text, channel="telegram")
     if history_manager:
         await history_manager.add({"role": "user", "content": f"[telegram] {text}"})
         await history_manager.add({"role": "assistant", "content": response})
@@ -7765,6 +7863,16 @@ async def _telegram_chat_handler(text: str) -> str:
     # channel happened to receive the message. Fire-and-forget: this must
     # never delay or break the reply Telegram itself is about to send.
     asyncio.create_task(_broadcast_reply_to_web(response, debug.get("images"), source="telegram"))
+    # A screenshot/generated image a tool call produced during THIS Telegram
+    # conversation used to only ever reach the web dashboard (via the
+    # broadcast above), never the Telegram chat that actually asked for it --
+    # confirmed live, a computer-use screenshot or an image-generation tool
+    # call from Telegram produced a real image nobody on Telegram ever saw.
+    # Sent as its own message after the text reply (Telegram's caption limit
+    # is much shorter than a real detailed reply can run).
+    images = debug.get("images") or []
+    for image_bytes in images:
+        asyncio.create_task(telegram_notifier.send_document(image_bytes, filename="capture.png"))
     return response
 
 
@@ -7778,6 +7886,8 @@ async def startup_event():
     telegram_notifier.set_chat_handler(_telegram_chat_handler)
     telegram_notifier.set_command_handler("status", _telegram_status_command)
     telegram_notifier.set_command_handler("markets", _telegram_markets_command)
+    telegram_notifier.set_command_handler("image", _telegram_image_command)
+    telegram_notifier.set_command_handler("recall", _telegram_recall_command)
     telegram_notifier.set_image_broadcaster(
         lambda image_bytes, caption: _broadcast_reply_to_web("", [image_bytes], source="telegram")
     )

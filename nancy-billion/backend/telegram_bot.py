@@ -47,11 +47,16 @@ logger = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org"
 
 ChatHandler = Callable[[str], Awaitable[str]]
-# A registered /command's handler returns HTML-ready text (Telegram's HTML
-# parse_mode) -- the caller (main_new.py) is responsible for escaping any
-# dynamic substring that could contain "<", ">", or "&" via _escape_html,
-# same contract as the rest of this module's internally-built messages.
-CommandHandler = Callable[[], Awaitable[str]]
+# A registered /command's handler takes the raw text after the command name
+# (e.g. "a golden retriever wearing sunglasses" for "/image a golden
+# retriever wearing sunglasses", "" if no args were given) and returns
+# HTML-ready text (Telegram's HTML parse_mode) -- the caller (main_new.py)
+# is responsible for escaping any dynamic substring that could contain "<",
+# ">", or "&" via _escape_html, same contract as the rest of this module's
+# internally-built messages. A handler that needs to send more than text
+# (e.g. a generated image) sends it directly via telegram_notifier and
+# returns a short confirmation string.
+CommandHandler = Callable[[str], Awaitable[str]]
 
 _LOCATION_RE = re.compile(
     r"\b(?:locate|find|show me|show|go to|where(?:'s| is)|directions? to|map of|navigate to|take me to)\s+(.+)",
@@ -68,6 +73,8 @@ _BUILTIN_COMMANDS = [
     ("status", "Real-time agent & system status"),
     ("markets", "Live snapshot of your watched pairs"),
     ("approvals", "See what's waiting on your approval"),
+    ("image", "Generate an image -- /image a description"),
+    ("recall", "Search your memory -- /recall a topic"),
 ]
 
 
@@ -450,7 +457,7 @@ class TelegramNotifier:
             await self.send(f"Unknown command: /{command}. Try /help.")
             return
         try:
-            reply_html = await self._with_typing(handler())
+            reply_html = await self._with_typing(handler(args))
         except Exception as e:
             logger.error("Telegram command /%s failed: %s", command, e)
             await self.send(f"Sorry, I hit an error running /{command}.")
@@ -465,6 +472,7 @@ class TelegramNotifier:
         )
         keyboard = {"inline_keyboard": [
             [{"text": "\U0001f4ca Markets", "callback_data": "cmd:markets"}, {"text": "\U0001f4cb Status", "callback_data": "cmd:status"}],
+            [{"text": "\U0001f3a8 Image", "callback_data": "cmd:image"}, {"text": "\U0001f9e0 Recall", "callback_data": "cmd:recall"}],
             [{"text": "\U0001f510 Approvals", "callback_data": "cmd:approvals"}, {"text": "❓ Help", "callback_data": "cmd:help"}],
         ]}
         await self._send_html(text, reply_markup=keyboard)
