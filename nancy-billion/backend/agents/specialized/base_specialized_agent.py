@@ -13,7 +13,7 @@ from abc import abstractmethod
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from ..base import BaseAgent
+from ..base import BaseAgent, _current_conversation_context
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,14 @@ class SpecializedAgent(BaseAgent):
         ad-hoc question actually gets answered instead of only returning a
         static capabilities blurb that ignores what was asked.
 
+        Includes real recent conversation history when main_new.py's
+        keyword router (_auto_route) sent this turn here -- see
+        _current_conversation_context in agents/base.py. Confirmed live:
+        without this, a message that happened to match this agent's
+        routing keywords got answered in total isolation from whatever the
+        user had just been talking about, reading as Nancy abruptly
+        changing the subject mid-conversation.
+
         Returns None (never raises) on failure so callers can fall back to
         their existing static response rather than surfacing an error for
         what should be a soft-fail enhancement.
@@ -104,9 +112,13 @@ class SpecializedAgent(BaseAgent):
                 f"You are {self.agent_name}, a specialist in {self.domain.replace('-', ' ')}. "
                 f"{self.capabilities.get('description', '')} "
                 "Answer the user's specific question or request directly and concretely, "
-                "drawing on your domain expertise. Do not just list your capabilities."
+                "drawing on your domain expertise. Do not just list your capabilities. If recent "
+                "conversation history is given below, treat this as a continuation of that same "
+                "conversation, not a fresh, unrelated question."
             )
-            prompt = f"{system}\n\nUser: {query}\n\nResponse:"
+            history = _current_conversation_context.get()
+            history_block = f"\n\nRecent conversation so far:\n{history}" if history.strip() else ""
+            prompt = f"{system}{history_block}\n\nUser: {query}\n\nResponse:"
             return await asyncio.wait_for(
                 llm_backend.generate(prompt, max_tokens=max_tokens, temperature=temperature),
                 timeout=20.0,

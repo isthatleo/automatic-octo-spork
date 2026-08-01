@@ -3864,6 +3864,17 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
 
         if routed_key:
             try:
+                # See agents/base.py's _current_conversation_context: the
+                # "context" key in task_data below is passed through, but
+                # confirmed live that individual agents' generic/_llm_answer
+                # fallbacks never actually read it -- a message that
+                # happened to match this agent's routing keywords got
+                # answered in total isolation from the conversation so far,
+                # reading as an abrupt topic change. The ContextVar reaches
+                # _llm_answer directly without needing every specialized
+                # agent file to thread task_data["context"] through itself.
+                from agents.base import _current_conversation_context
+                _current_conversation_context.set(history_text)
                 result = await agent_service.run(
                     routed_key,
                     {"type": "query", "query": user_text, "context": history_text},
