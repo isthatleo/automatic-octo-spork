@@ -1522,6 +1522,30 @@ def _history_to_text() -> str:
     return "\n".join(history_lines)
 
 
+async def _history_add(message: Dict[str, Any]) -> None:
+    """Best-effort append to the Fury HistoryManager -- never raises.
+
+    This is bookkeeping for the optional local Fury agent, not the reply
+    itself. Confirmed live: HistoryManager.add() auto-compacts once real
+    history crosses its token threshold, which calls out to the Fury
+    Agent's OWN configured model (LLM_MODEL_PATH) -- while that still
+    pointed at a Docker-container-only path after this session's native
+    migration, that call failed with "All connection attempts failed" and
+    the exception propagated all the way up through _telegram_chat_handler,
+    discarding an ALREADY-SUCCESSFUL chat reply (Groq had answered and
+    memory had already been updated) in favor of the generic "Sorry, I hit
+    an error working on that." A background bookkeeping step must never be
+    able to do that again, regardless of what specifically breaks inside it
+    next time -- same principle conversation_log.log_turn already follows
+    ("a logging failure must never break the chat turn it was recording")."""
+    if history_manager is None:
+        return
+    try:
+        await history_manager.add(message)
+    except Exception:
+        logger.exception("history_manager.add failed (chat reply unaffected)")
+
+
 def _live_system_context() -> str:
     """A compact, real snapshot of backend state, injected into every chat
     prompt so meta-questions ('how many agents are running?') get grounded
@@ -4105,8 +4129,7 @@ async def _run_chat_turn(
     _current_voice_match.set(voice_match)
     _current_speaker_profile_id.set(speaker_profile_id)
     _current_turn_audio.set(turn_audio)
-    if history_manager:
-        await history_manager.add({"role": "user", "content": user_text})
+    await _history_add({"role": "user", "content": user_text})
 
     full_text = ""
     sentence_buffer = ""
@@ -4128,8 +4151,7 @@ async def _run_chat_turn(
 
         full_text = _enforce_sir(full_text.strip()) or "I'm not sure how to respond to that, Sir."
 
-        if history_manager:
-            await history_manager.add({"role": "assistant", "content": full_text})
+        await _history_add({"role": "assistant", "content": full_text})
 
         # Real commitment extraction (memory/commitments.py) -- fire-and-
         # forget so it never adds latency to the reply already sent above;
@@ -5008,9 +5030,8 @@ async def chat_endpoint(payload: ChatRequest):
         # maintains, so a terminal conversation and a web conversation are
         # ONE continuous conversation with follow-up context, not two
         # parallel amnesiacs.
-        if history_manager:
-            await history_manager.add({"role": "user", "content": text})
-            await history_manager.add({"role": "assistant", "content": response})
+        await _history_add({"role": "user", "content": text})
+        await _history_add({"role": "assistant", "content": response})
 
     except Exception as e:
         logger.exception("LLM generation failed: %s", e)
@@ -8056,9 +8077,8 @@ async def _telegram_chat_handler(text: str) -> str:
     on informational questions, "Sir" used sparingly rather than constantly)
     instead of the voice-first brevity default."""
     response, debug = await _generate_response_via_hierarchy(text, channel="telegram")
-    if history_manager:
-        await history_manager.add({"role": "user", "content": f"[telegram] {text}"})
-        await history_manager.add({"role": "assistant", "content": response})
+    await _history_add({"role": "user", "content": f"[telegram] {text}"})
+    await _history_add({"role": "assistant", "content": response})
     # Real conversation sync -- the web/voice UI sees this reply too
     # (including any real image a tool call produced), not just whichever
     # channel happened to receive the message. Fire-and-forget: this must
