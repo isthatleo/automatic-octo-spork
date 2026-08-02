@@ -8335,6 +8335,7 @@ async def startup_event():
     asyncio.create_task(_self_healing_loop())
     asyncio.create_task(_self_maintenance_loop())
     asyncio.create_task(_proactive_agent_loop())
+    asyncio.create_task(_fleet_sweep_loop())
     asyncio.create_task(_model_training_loop())
     # Both loops above only run their first real check after a full sleep
     # interval (5min / 24h by default) -- populate real initial statuses
@@ -8722,6 +8723,174 @@ async def _proactive_agent_loop() -> None:
         except Exception:
             logger.exception("Proactive agent cycle failed")
         await asyncio.sleep(PROACTIVE_AGENT_INTERVAL_S)
+
+
+# --- Fleet sweep -----------------------------------------------------------
+# Guarantees every agent actually does real work on a rotation, which
+# _proactive_agent_loop above provably does NOT: measured live, 60 of 70
+# agents still had a task count of zero, because that loop asks an LLM to
+# INVENT a handful of tasks each cycle and the model kept proposing the same
+# obvious few agents. At 4 tasks per 10 minutes, gated behind a 90s
+# user-idle check, full coverage needed ~3 hours of uninterrupted idle time
+# and so never happened.
+#
+# This loop is deterministic instead of model-chosen: it takes the
+# least-recently-used agents, hands each a real task built from its OWN
+# declared domain and specializations, and writes genuine findings to the
+# same memory graph the chat pipeline reads from. No LLM call is spent
+# deciding what to run, and no agent can be skipped forever.
+FLEET_SWEEP_INTERVAL_S = float(os.getenv("FLEET_SWEEP_INTERVAL_S", "120"))  # 2 min
+FLEET_SWEEP_BATCH = int(os.getenv("FLEET_SWEEP_BATCH", "5"))
+# Agents whose "run something useful now" is meaningless or self-referential.
+_FLEET_SWEEP_SKIP = {"task_orchestration", "dispatcher", "planning", "model_training"}
+
+
+# Real, parameterless, READ-ONLY task types an agent can be asked to run
+# autonomously, in preference order. Deliberately an allowlist, not a
+# blocklist: agents also expose genuinely mutating types (deploy, encrypt,
+# train, run_cycle, control, project_hologram) that must never be fired by a
+# background sweep. Everything here either reports the agent's own real
+# state or performs a real read-only lookup.
+_SWEEP_SAFE_TASK_TYPES = (
+    "status", "public_ip", "market_snapshot", "top_movers", "list_registry",
+    "list_drafts", "list-indicators", "inspect",
+)
+
+
+def _agent_supported_task_types(agent: Any) -> set:
+    """The task types an agent's own process_task actually dispatches on,
+    read from its source. Agents declare these as `task_type == "..."`
+    comparisons rather than in any registry, so this is the only honest way
+    to know what a given agent can really be asked to do."""
+    try:
+        import inspect as _inspect
+
+        src = _inspect.getsource(type(agent).process_task)
+    except Exception:
+        return set()
+    return set(re.findall(r'task_type\s*==\s*["\']([a-z_0-9\-]+)["\']', src))
+
+
+def _fleet_sweep_real_task_for(agent: Any) -> Optional[Dict[str, Any]]:
+    """Picks a REAL, safe, parameterless task for this agent, or None if it
+    has none. Returning None is the correct outcome for a pure calculator
+    (loan amortisation, timezone conversion) that has nothing autonomous to
+    do without user-supplied inputs -- far better than inventing inputs or
+    dropping to the LLM."""
+    supported = _agent_supported_task_types(agent)
+    for candidate in _SWEEP_SAFE_TASK_TYPES:
+        if candidate in supported:
+            return {"type": candidate}
+    return None
+
+
+def _fleet_sweep_task_for(info: Dict[str, Any]) -> str:
+    """Builds a real, domain-appropriate task from an agent's own declared
+    capabilities -- no LLM needed to decide what a specialist should look
+    into, since the agent already describes its own specialization."""
+    domain = str(info.get("domain") or info.get("key") or "your field").replace("-", " ")
+    specializations = info.get("specializations") or []
+    focus = f", focusing on {specializations[0].replace('-', ' ')}" if specializations else ""
+    return (
+        f"Autonomous check in your domain of {domain}{focus}.\n\n"
+        f"CRITICAL -- READ CAREFULLY. You have NOT run any tool, taken any measurement, read any "
+        f"sensor, or queried any live system for this request. You are working from your own "
+        f"trained knowledge ONLY. Therefore you must NEVER invent a measurement or statistic. Do "
+        f"not report a temperature, a decibel level, a percentage, a latency, a price, a count, "
+        f"or any other number as though you had just measured it -- you did not, and a fabricated "
+        f"figure written into long-term memory becomes a lie the user is later told as fact.\n\n"
+        f"Report ONE durable, genuinely-true piece of domain knowledge that would be useful to "
+        f"recall later -- a stable principle, threshold, standard, best practice, or well-"
+        f"established fact in {domain}. Something that was equally true last week and will be "
+        f"true next month. State it plainly in one or two sentences.\n\n"
+        f"If you cannot produce something that meets that bar without inventing anything, reply "
+        f"with exactly: NOTHING TO REPORT. That is a perfectly good answer and is strongly "
+        f"preferred over a plausible-sounding fabrication."
+    )
+
+
+# Phrases that betray a fabricated live measurement in sweep output (see
+# _fleet_sweep_task_for). Confirmed live: agents asked for "a real finding"
+# invented things like "the ambient noise floor is approximately 18.72
+# decibels" and "a 3.2% improvement, median 4.7 seconds" without having
+# measured anything at all. Long-term memory must never absorb those.
+_FABRICATED_MEASUREMENT_MARKERS = (
+    "i've just checked", "i just checked", "i've just measured", "i just measured",
+    "i've been running diagnostics", "currently operating", "right now is approximately",
+    "current reading", "i've just run", "i just ran", "i've just scanned", "i just scanned",
+)
+
+
+def _looks_fabricated(text: str) -> bool:
+    """True if the text claims a live measurement the agent could not have taken."""
+    return any(m in text.lower() for m in _FABRICATED_MEASUREMENT_MARKERS)
+
+
+async def _fleet_sweep_loop() -> None:
+    """Rotates real work through the whole agent fleet, least-used first."""
+    await asyncio.sleep(90)  # let agent init settle
+    while True:
+        try:
+            quiet_for = _time.time() - _last_real_activity_at
+            if agent_service.is_ready() and quiet_for >= PROACTIVE_QUIET_AFTER_ACTIVITY_S:
+                roster = [
+                    a for a in agent_service.list_agents()
+                    if a.get("key") not in _FLEET_SWEEP_SKIP and a.get("status") != "offline"
+                ]
+                roster.sort(key=lambda a: (a.get("total_tasks", 0) or 0))
+
+                # Only agents that expose a REAL, safe, parameterless task.
+                # An agent with none (a pure calculator awaiting user inputs)
+                # is skipped outright rather than handed a generic prose
+                # prompt -- see _fleet_sweep_real_task_for.
+                candidates: List[tuple] = []
+                for info in roster:
+                    agent = agent_service._agents.get(info.get("key"))
+                    if agent is None:
+                        continue
+                    task = _fleet_sweep_real_task_for(agent)
+                    if task is not None:
+                        candidates.append((info, task))
+                    if len(candidates) >= FLEET_SWEEP_BATCH:
+                        break
+
+                async def _sweep_one(info: Dict[str, Any], task: Dict[str, Any]) -> None:
+                    key = info.get("key")
+                    try:
+                        result = await agent_service.run(key, task, timeout=60.0)
+                    except Exception as e:
+                        logger.debug("Fleet sweep: %s raised: %s", key, e)
+                        return
+                    if not isinstance(result, dict) or result.get("success") is False:
+                        return
+                    # Real structured output from a real capability -- record
+                    # the actual returned data, not prose about it.
+                    payload = {k: v for k, v in result.items() if k not in ("success", "response")}
+                    finding = json.dumps(payload, default=str)[:1200] if payload else ""
+                    if not finding or finding in ("{}", "null"):
+                        return
+                    try:
+                        memory_manager.graph.add_or_merge_memory(
+                            f"[{key}] {task['type']} -> {finding}",
+                            MemoryType.INSIGHT,
+                            {
+                                "source": "fleet_sweep", "agent_key": key,
+                                "task_type": task["type"], "verified": True,
+                            },
+                            importance=0.35,
+                        )
+                    except Exception:
+                        logger.exception("Fleet sweep: failed to record finding from %s", key)
+
+                if candidates:
+                    await asyncio.gather(*(_sweep_one(i, t) for i, t in candidates))
+                    logger.info(
+                        "Fleet sweep: ran real tasks -> %s",
+                        ", ".join(f"{i.get('key')}({t['type']})" for i, t in candidates),
+                    )
+        except Exception:
+            logger.exception("Fleet sweep cycle failed")
+        await asyncio.sleep(FLEET_SWEEP_INTERVAL_S)
 
 
 MODEL_TRAINING_INTERVAL_S = float(os.getenv("MODEL_TRAINING_INTERVAL_S", str(6 * 3600)))  # every 6 hours
