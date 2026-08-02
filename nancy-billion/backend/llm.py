@@ -928,11 +928,15 @@ class OmniRouteLLM(LLMBackend):
 
 
 class GroqLLM(LLMBackend):
-    def __init__(self):
+    def __init__(self, model: str | None = None):
         self.api_key = os.getenv("GROQ_API_KEY")
         if not self.api_key:
             logger.warning("GROQ_API_KEY not set; Groq LLM will not function")
-        self.model = os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
+        # `model` lets get_llm_backends() register a SECOND Groq entry on a
+        # different model as a real same-vendor fallback -- Groq's rate
+        # limits are per-model, so a 429 on the big model doesn't mean the
+        # smaller one is unavailable. See GROQ_FALLBACK_MODEL below.
+        self.model = model or os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
         self._last_usage: dict | None = None
         logger.info(f"GroqLLM initialized with model={self.model}")
 
@@ -1332,7 +1336,15 @@ class FallbackLLM(LLMBackend):
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
         last_exception = None
         for backend in self.backends:
-            name = backend.__class__.__name__
+            # Cooldown/skip key includes the MODEL, not just the class.
+            # Two instances of the same backend class on different models are
+            # now genuinely independent (see GROQ_FALLBACK_MODEL in
+            # get_llm_backends): Groq rate-limits per model, so a 429 on
+            # llama-3.3-70b says nothing about llama-3.1-8b. Keying the
+            # cooldown by class name alone made the 70b failure suppress its
+            # own healthy 8b sibling for the full 5-minute window, which
+            # defeated the entire point of having a same-vendor fallback.
+            name = f"{backend.__class__.__name__}:{getattr(backend, 'model', '')}"
             # Cloud backends set self.api_key from an env var and always fail
             # the same way when it's missing -- skip immediately instead of
             # burning up to BACKEND_TIMEOUT_S waiting on a call that can never
@@ -1350,7 +1362,7 @@ class FallbackLLM(LLMBackend):
                 continue
             call_start = time.monotonic()
             try:
-                logger.info(f"Trying LLM backend: {backend.__class__.__name__}")
+                logger.info(f"Trying LLM backend: {name}")
                 # One real, fast retry for a genuinely transient failure
                 # (timeout/connection reset) before conceding this backend --
                 # never for a credit/auth/quota error, which won't succeed on
@@ -1511,6 +1523,21 @@ def get_llm_backends():
                     logger.info(f"Adding GeminiLLM as free-tier fallback (model={free_model})")
                     backends.append(GeminiLLM(model=free_model))
 
+            # Same idea for Groq, and confirmed live as a real need: Groq
+            # enforces its token-per-day limit PER MODEL, and a day of heavy
+            # use exhausted llama-3.3-70b-versatile ("Limit 100000, Used
+            # 98817") while every other Groq model still had full quota. With
+            # no same-vendor fallback, that 429 dropped the whole chain down
+            # to a much slower backend and reply latency went from ~1s to
+            # 3-9s. llama-3.1-8b-instant has its own separate (far larger)
+            # allowance and is faster still, so it's a genuinely good
+            # next-best rather than a token gesture.
+            if backend_cls is GroqLLM:
+                groq_fallback = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
+                if groq_fallback and groq_fallback != backends[-1].model:
+                    logger.info(f"Adding GroqLLM as same-vendor fallback (model={groq_fallback})")
+                    backends.append(GroqLLM(model=groq_fallback))
+
     # Ollama Cloud via the OLLAMA_API_KEY spelling (the one Ollama's own
     # tooling uses) -- the catalog entry above only checks
     # OLLAMA_CLOUD_API_KEY, so this catches the other real way people set
@@ -1616,6 +1643,25 @@ def apply_primary_preference(backends: list) -> list:
             if i:
                 backends.insert(0, backends.pop(i))
                 logger.info("LLM_PRIMARY=%s honoured; %s leads the chain", want, b.__class__.__name__)
+            # Keep same-vendor siblings directly behind the primary. Without
+            # this, promoting one backend strands its own alternate-model
+            # fallback behind unrelated providers -- confirmed live: with
+            # LLM_PRIMARY=groq the chain became [Groq-70b, OmniRoute,
+            # Groq-8b, ...], so a 70b rate-limit fell through to a much
+            # slower provider even though the 8b sibling (separate quota,
+            # faster) was sitting right there. A vendor's own second model is
+            # nearly always the best next try after its first one fails.
+            primary_cls = backends[0].__class__
+            insert_at = 1
+            for j in range(1, len(backends)):
+                if backends[j].__class__ is primary_cls:
+                    if j != insert_at:
+                        backends.insert(insert_at, backends.pop(j))
+                        logger.info(
+                            "Moved same-vendor fallback %s(model=%s) directly behind the primary",
+                            primary_cls.__name__, getattr(backends[insert_at], "model", "?"),
+                        )
+                    insert_at += 1
             return backends
     logger.warning("LLM_PRIMARY=%s is not in the live chain (%s); leaving default order",
                    want, [b.__class__.__name__ for b in backends])

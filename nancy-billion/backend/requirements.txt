@@ -73,6 +73,15 @@ beautifulsoup4>=4.12.0
 # capability with no safe-by-default subset.
 pyautogui>=0.9.54
 
+# Piper -- the DEFAULT local neural TTS (piper_tts.py). Chosen over
+# NeuTTS-nano purely on measured speed on this hardware: same 73-char text,
+# NeuTTS 18.8s vs Piper 0.53s (~3x slower than realtime vs ~8x faster).
+# That ratio is what makes a voice-first <6s reply target achievable at all.
+# The voice model itself is a separate ~63MB download (not pip-installable),
+# fetched once into data/piper_voices/ with:
+#   python -m piper.download_voices en_GB-jenny_dioco-medium --data-dir data/piper_voices
+piper-tts>=1.6.0
+
 faster-whisper>=0.9.0
 pyttsx3>=2.90
 python-socketio>=5.9.0

@@ -29,7 +29,12 @@ from .base_specialized_agent import SpecializedAgent
 
 logger = logging.getLogger(__name__)
 
-MAX_TASKS_PER_BATCH = 12
+# Kept deliberately small. Raising this to 12 (to get the 70-agent fleet
+# exercised faster) was a real, measured regression: each task is a full LLM
+# call, and a dozen concurrent ones starved the CPU that Piper TTS needs,
+# degrading the same synthesis from ~1s to 47s. Fleet coverage is a
+# nice-to-have; the assistant answering quickly is the product.
+MAX_TASKS_PER_BATCH = 4
 
 
 class TaskOrchestratorAgent(SpecializedAgent):

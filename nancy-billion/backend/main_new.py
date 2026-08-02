@@ -8328,11 +8328,12 @@ async def startup_event():
 
 
 async def _prewarm_tts() -> None:
-    """NeuTTS's first-ever synthesis call constructs the GGUF backbone +
-    ONNX codec from scratch (cold model load), which can take a long time and
-    holds NeuTTSBackend._model_lock for its entire duration -- confirmed live
-    to exceed even a 60s timeout on this hardware. Paying that cost here,
-    once, at startup means a user's actual first message doesn't have to."""
+    """Every local TTS engine here pays a real one-time cold-start on its
+    first synthesis, and it's large enough to matter: Piper's first call
+    pays ONNX Runtime warmup (measured ~13s, vs ~0.5s for every call after);
+    NeuTTS's constructs a GGUF backbone + ONNX codec from scratch and has
+    been measured past 60s on this hardware. Paying that once here, at
+    startup, means the user's actual first message doesn't have to."""
     try:
         await tts_backend.synthesize("Systems online.")
         logger.info("TTS backend pre-warmed.")
@@ -8612,16 +8613,15 @@ async def _update_system_health_status() -> str:
 # acceptable trade for background work that isn't blocking a live
 # conversation.
 # ---------------------------------------------------------------------------
-PROACTIVE_AGENT_INTERVAL_S = float(os.getenv("PROACTIVE_AGENT_INTERVAL_S", "240"))  # 4 min
-# Confirmed live: at the old 600s interval with only 4 tasks/cycle (see
-# task_orchestrator_agent.py's MAX_TASKS_PER_BATCH), it would take dozens of
-# cycles -- hours of real idle time -- to give every one of the 70 agents
-# even a single task, which is what "almost all agents show 0 completed
-# tasks" actually was. This only affects how often a cycle CAN run during a
-# genuinely idle stretch -- PROACTIVE_QUIET_AFTER_ACTIVITY_S below still
-# skips every cycle entirely while the user is actively chatting, so this
-# doesn't add CPU competition with live voice replies, only with idle time
-# that was otherwise unused.
+PROACTIVE_AGENT_INTERVAL_S = float(os.getenv("PROACTIVE_AGENT_INTERVAL_S", "600"))  # 10 min
+# Briefly lowered to 240s (with a 12-task batch) to get the 70-agent fleet
+# exercised faster after "almost all agents show 0 completed tasks". That
+# was reverted: the combination measurably starved Piper TTS of CPU (same
+# text: ~1s idle vs 47s under proactive load). The quiet gate below only
+# checks BEFORE a cycle starts, so a cycle that begins just before the user
+# speaks still competes with them for the whole batch -- which makes an
+# aggressive interval genuinely costly, not free. Slower fleet coverage is
+# the right trade for a voice-first assistant.
 # How recently the user must have been genuinely chatting (any channel --
 # see _generate_response_via_hierarchy, the real chokepoint every chat
 # caller goes through) before a proactive cycle backs off instead of
@@ -8637,19 +8637,26 @@ _last_real_activity_at: float = 0.0
 
 
 async def _proactive_local_llm(prompt: str, max_tokens: int = 200) -> Optional[str]:
-    """Local-only LLM call for background agent work -- see the module-level
-    note above for why this deliberately does NOT fall back to any cloud
-    backend. Returns None (never raises) if Ollama isn't reachable or has no
-    models pulled; the caller just skips that cycle. Used both by the
-    proactive loop below and directly by TaskOrchestratorAgent."""
+    """LLM call for background agent work. Goes through the normal
+    llm_backend chain (Groq-first cloud, with local Ollama still present as
+    its own last-resort link) rather than pinning to local Ollama directly.
+
+    This deliberately REVERSES the original design, which forced local-only
+    inference to avoid competing with the user's chat for cloud API quota.
+    Confirmed live on this machine that the trade was backwards: local
+    inference spawns llama-server, which saturates every core (measured at
+    300+ CPU-seconds), and CPU is exactly what Piper TTS needs to speak. The
+    effect was measured directly -- with llama-server ramping up, the SAME
+    TTS text degraded 15s -> 19s -> 36s -> 47s across four consecutive
+    calls, against ~1s on an idle CPU. Cloud quota is replaceable; the
+    responsiveness of a voice-first assistant is the product. Returns None
+    (never raises) if every backend fails; the caller just skips that cycle."""
     try:
-        from llm import OllamaAutoModelsLLM
-        ollama = OllamaAutoModelsLLM()
         return await asyncio.wait_for(
-            ollama.generate(prompt, max_tokens=max_tokens, temperature=0.4), timeout=90.0,
+            llm_backend.generate(prompt, max_tokens=max_tokens, temperature=0.4), timeout=90.0,
         )
     except Exception as e:
-        logger.debug("Proactive local LLM call unavailable (Ollama not reachable?): %s", e)
+        logger.debug("Proactive LLM call unavailable: %s", e)
         return None
 
 

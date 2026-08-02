@@ -232,7 +232,21 @@ class Pyttsx3TTS(TTSBackend):
 
 
 def get_tts_backend():
-    backend_type = os.getenv("TTS_BACKEND", "neutts").lower()
+    # Default is piper, not neutts: benchmarked live on this machine, NeuTTS
+    # synthesizes ~3x SLOWER than realtime (73 chars -> 18.8s) while Piper
+    # runs ~8x FASTER than realtime (same text -> 0.53s). See piper_tts.py's
+    # module docstring for the full comparison and why that ratio, not any
+    # chunking strategy, was the real cause of multi-minute waits before
+    # Billion started speaking.
+    backend_type = os.getenv("TTS_BACKEND", "piper").lower()
+    if backend_type == "piper":
+        try:
+            from piper_tts import PiperTTSBackend
+
+            return PiperTTSBackend()
+        except Exception as e:
+            logger.warning(f"Piper backend unavailable ({e}), falling back to pyttsx3")
+            return Pyttsx3TTS()
     if backend_type == "neutts":
         try:
             from neu_tts import NeuTTSBackend
