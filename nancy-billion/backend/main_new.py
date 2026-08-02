@@ -8162,11 +8162,91 @@ async def _telegram_chat_handler(text: str) -> str:
     return response
 
 
+def _omniroute_host_port() -> tuple[str, int]:
+    from urllib.parse import urlparse
+    parsed = urlparse(os.getenv("OMNIROUTE_URL", "http://localhost:20128"))
+    return parsed.hostname or "localhost", parsed.port or 20128
+
+
+async def _ensure_omniroute_running() -> None:
+    """Auto-launches the OmniRoute gateway (see OmniRouteLLM in llm.py) as
+    its own independent background process if it isn't already listening,
+    so starting THIS backend is enough on its own -- no separate manual
+    `omniroute` terminal needed every time.
+
+    On Windows this goes through WMI (Win32_Process.Create) rather than a
+    plain subprocess.Popen, however "detached" -- confirmed live, in order,
+    that (1) `omniroute serve --daemon`'s own internal fork-and-detach
+    didn't survive being spawned from Python at all, and (2) even a plain
+    `omniroute serve --no-open` spawned with BOTH DETACHED_PROCESS and
+    CREATE_BREAKAWAY_FROM_JOB still got killed the moment the spawning
+    shell's own job closed, because this backend runs under Git Bash/MSYS2,
+    which assigns every child it spawns to a Windows Job Object -- and
+    CREATE_BREAKAWAY_FROM_JOB only works if THAT job explicitly allows
+    breakaway, which MSYS2's doesn't. WMI's Win32_Process.Create asks the
+    WMI provider host service (a completely separate OS process, outside
+    any job this backend belongs to) to create the process instead, so the
+    result has no job-object relationship to this backend at all -- verified
+    live to survive independently and answer real requests. Falls back to a
+    plain detached Popen on non-Windows (no Job Object concept there).
+    Best-effort and non-blocking either way: a failure here just means the
+    LLM chain falls through to the backends below OmniRoute, exactly as if
+    DISABLE_OMNIROUTE=1 were set -- never raises."""
+    if os.getenv("DISABLE_OMNIROUTE", "0").strip() == "1":
+        return
+    import shutil
+    import socket
+    import subprocess
+
+    host, port = _omniroute_host_port()
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            logger.info("OmniRoute already running at %s:%d", host, port)
+            return
+    except OSError:
+        pass  # not reachable yet -- launch it below
+
+    omniroute_cmd = shutil.which("omniroute")
+    if not omniroute_cmd:
+        logger.warning(
+            "OmniRoute not found on PATH (npm install -g omniroute) -- "
+            "the LLM chain will skip it and fall through to the backends below."
+        )
+        return
+
+    loop = asyncio.get_event_loop()
+    try:
+        if os.name == "nt":
+            def _launch_via_wmi():
+                cmd_line = f'cmd /c "{omniroute_cmd}" serve --no-open'
+                ps_script = (
+                    "Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
+                    f"-Arguments @{{CommandLine='{cmd_line}'}}"
+                )
+                subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-Command", ps_script],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                    timeout=15,
+                )
+            await loop.run_in_executor(None, _launch_via_wmi)
+            logger.info("Launched OmniRoute gateway via WMI process creation")
+        else:
+            subprocess.Popen(
+                [omniroute_cmd, "serve", "--no-open"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            logger.info("Launched OmniRoute gateway as a detached background process")
+    except Exception as e:
+        logger.warning("Failed to auto-launch OmniRoute: %s", e)
+
+
 @app.on_event("startup")
 async def startup_event():
     global main_loop
     main_loop = asyncio.get_running_loop()
     logger.info("Nancy/Billion backend starting up...")
+    asyncio.create_task(_ensure_omniroute_running())
     # Initialise all 29 specialized agents in background so startup is fast
     asyncio.create_task(_init_agents())
     telegram_notifier.set_chat_handler(_telegram_chat_handler)
@@ -8467,7 +8547,7 @@ async def _update_system_health_status() -> str:
     backend_severity = "green" if backend_healthy else "yellow"
     _update_alert_status(
         key="llm_backend", category="system",
-        title=f"Primary reasoning backend ({self_healing.PRIMARY_BACKEND_NAME})",
+        title=f"Primary reasoning backend ({self_healing._primary_backend_name()})",
         severity=backend_severity,
         detail="Operating normally." if backend_healthy else f"Down, running on a fallback backend instead. {last_error or ''}".strip(),
     )

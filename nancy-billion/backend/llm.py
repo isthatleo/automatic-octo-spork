@@ -842,6 +842,91 @@ class OpenRouterLLM(LLMBackend):
                     text = await resp.text()
                     raise Exception(f"OpenRouter error: {resp.status} - {text}")
 
+class OmniRouteLLM(LLMBackend):
+    """Local OmniRoute gateway (github.com/diegosouzapw/OmniRoute) --
+    aggregates 290+ providers (90+ free, keyless) behind one OpenAI-
+    compatible local endpoint with its own real circuit-breaker/cooldown
+    resilience layers. Added ahead of every single-vendor cloud backend in
+    get_llm_backends() specifically because a single exhausted quota
+    (Gemini's real 20/day cap, Anthropic's exhausted credit balance -- both
+    hit live, repeatedly, this session) used to take the whole chain down to
+    slow local Ollama/llama.cpp inference, which directly competes with
+    NeuTTS for the same CPU. Runs entirely on this machine
+    (`npm install -g omniroute && omniroute`), no API key required for its
+    default keyless "auto" combo -- has no `api_key` attribute so
+    FallbackLLM's no-key skip never applies to it, same as the other local
+    backends (Ollama/Fury/llama.cpp): OMNIROUTE_API_KEY (below) is a
+    GATEWAY auth token, not a "this backend can't work without it" key, so
+    it's deliberately named `_gateway_key` instead to keep that skip logic
+    from ever applying here. If the gateway process isn't running, the
+    connection simply fails fast (a genuinely transient error per
+    is_transient_llm_error) and the chain falls through to the cloud
+    backends below exactly as it did before this existed."""
+
+    def __init__(self):
+        self.base_url = os.getenv("OMNIROUTE_URL", "http://localhost:20128").rstrip("/")
+        # "auto/best-chat" (a curated, quality-filtered combo), not bare
+        # "auto" -- confirmed live that plain "auto" can round-robin onto a
+        # genuinely broken free provider (repeatedly observed "felo-chat"
+        # returning a single punctuation character -- "!", ".", "?" -- as
+        # its entire reply, 3/3 times, for an ordinary conversational
+        # prompt). "auto/best-chat" gave 3/3 real, coherent answers on the
+        # same prompt in the same live test.
+        self.model = os.getenv("OMNIROUTE_MODEL", "auto/best-chat")
+        # Gateway-level auth (generated via the OmniRoute dashboard, protects
+        # the local endpoint from anything else on the machine) -- optional:
+        # the gateway works fine unauthenticated too, so an unset key here
+        # just means no Authorization header is sent, not a skipped backend.
+        self._gateway_key = os.getenv("OMNIROUTE_API_KEY")
+        self._last_usage: dict | None = None
+        logger.info(f"OmniRouteLLM initialized (url={self.base_url}, model={self.model})")
+
+    async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+        import aiohttp
+        url = f"{self.base_url}/v1/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+        headers = {"Accept-Encoding": "identity"}
+        if self._gateway_key:
+            headers["Authorization"] = f"Bearer {self._gateway_key}"
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.post(
+                url, json=payload, timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    usage = result.get("usage")
+                    if usage:
+                        self._last_usage = {
+                            "prompt_tokens": usage.get("prompt_tokens"),
+                            "completion_tokens": usage.get("completion_tokens"),
+                        }
+                    content = result["choices"][0]["message"]["content"] or ""
+                    # Confirmed live: a broken free provider behind "auto"-
+                    # style routing can return a "successful" 200 whose
+                    # content is pure punctuation (observed "!", ".", "?"
+                    # verbatim, repeatedly, from one specific provider)
+                    # instead of a real answer -- not empty, so FallbackLLM's
+                    # own empty-response check doesn't catch it. Rejecting
+                    # content with no alphanumeric characters at all lets the
+                    # chain's normal retry/next-backend logic recover instead
+                    # of silently accepting one-character garbage as the
+                    # reply (a real short answer like "144" or "Yes" still
+                    # has alnum characters, so this doesn't false-positive on
+                    # genuinely terse real answers).
+                    if not any(ch.isalnum() for ch in content):
+                        raise Exception(f"OmniRoute returned no substantive content: {content!r}")
+                    return content
+                else:
+                    text = await resp.text()
+                    raise Exception(f"OmniRoute error: {resp.status} - {text}")
+
+
 class GroqLLM(LLMBackend):
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
@@ -1345,8 +1430,16 @@ class FallbackLLM(LLMBackend):
 # credential in the UI, with real live status -- no separate list to keep in
 # sync by hand.
 LLM_PROVIDER_CATALOG: list[tuple[str, str, type, str]] = [
-    ("ANTHROPIC_API_KEY", "Anthropic (Claude)", AnthropicLLM, "primary backend (best quality)"),
+    # Groq ahead of Anthropic: confirmed live this session that Anthropic's
+    # credit balance is exhausted (guaranteed 400 on every call) while Groq
+    # has worked reliably throughout. This tier is now only reached when
+    # OmniRoute (Phase 0, above everything here) is itself unavailable, so
+    # the cost of the old order was small, but non-zero -- a guaranteed-fail
+    # attempt before ever reaching a backend that works. Move Anthropic back
+    # above Groq once real credits exist again, if its quality edge is worth
+    # it for this rarely-reached tier.
     ("GROQ_API_KEY", "Groq", GroqLLM, "fast cloud backend"),
+    ("ANTHROPIC_API_KEY", "Anthropic (Claude)", AnthropicLLM, "primary backend (best quality)"),
     ("OPENAI_API_KEY", "OpenAI", OpenAILLM, "general-purpose cloud backend"),
     ("GEMINI_API_KEY", "Gemini", GeminiLLM, "multimodal cloud backend"),
     ("OPENROUTER_API_KEY", "OpenRouter", OpenRouterLLM, "aggregator backend"),
@@ -1365,8 +1458,11 @@ def get_llm_backends():
     """Build backend chain in priority order.
 
     Default chain (quality-first; local Ollama is the offline fallback, not primary):
-    1) Anthropic: Claude for complex/coding tasks (if ANTHROPIC_API_KEY set)
-    2) Groq: Fast cloud inference (if GROQ_API_KEY set)
+    0) OmniRoute: local free 290+-provider gateway with its own real
+       fallback/circuit-breaking (unless DISABLE_OMNIROUTE=1)
+    1) Groq: Fast cloud inference (if GROQ_API_KEY set) -- ahead of Anthropic
+       while its credit balance is exhausted (see LLM_PROVIDER_CATALOG)
+    2) Anthropic: Claude for complex/coding tasks (if ANTHROPIC_API_KEY set)
     3) OpenAI: GPT for general tasks (if OPENAI_API_KEY set)
     4) Gemini: Google's LLM (if GEMINI_API_KEY set)
     5) OpenRouter: Multi-model aggregator (if OPENROUTER_API_KEY set)
@@ -1380,6 +1476,17 @@ def get_llm_backends():
     """
 
     backends: list[LLMBackend] = []
+
+    # ---- PHASE 0: OmniRoute (local free multi-provider gateway) ----
+    # Tried before every single-vendor cloud backend below: it already does
+    # its own internal fallback across 290+ providers (90+ free, keyless)
+    # with real circuit breakers, so one exhausted quota doesn't take the
+    # whole chain down to slow local inference the way a single dead cloud
+    # backend used to. See OmniRouteLLM's docstring for the live incidents
+    # that motivated this.
+    if os.getenv("DISABLE_OMNIROUTE", "0").strip() != "1":
+        logger.info("Adding OmniRouteLLM as first-priority backend (local multi-provider gateway)")
+        backends.append(OmniRouteLLM())
 
     # ---- PHASE 1: Cloud (best quality first, in LLM_PROVIDER_CATALOG order) ----
     for env_var, _label, backend_cls, role in LLM_PROVIDER_CATALOG:

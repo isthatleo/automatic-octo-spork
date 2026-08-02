@@ -97,4 +97,12 @@ def is_transient_llm_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     if any(marker in msg for marker in _NON_TRANSIENT_MARKERS):
         return False
-    return "timeout" in msg or "connection" in msg or "temporarily" in msg or " 503" in msg or " 502" in msg
+    # OmniRoute's "no substantive content" (see OmniRouteLLM in llm.py) means
+    # ONE randomly-picked underlying free provider returned garbage, not that
+    # OmniRoute itself is down -- worth an immediate retry (a different
+    # provider is likely to get picked) rather than a hard fail + 5-minute
+    # cooldown on the whole backend over one bad pick.
+    return (
+        "timeout" in msg or "connection" in msg or "temporarily" in msg
+        or " 503" in msg or " 502" in msg or "no substantive content" in msg
+    )

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import disk_cleanup
 import usage_analytics
+from llm import llm_backend
 from system_monitor import SystemMonitor
 
 logger = logging.getLogger(__name__)
@@ -31,10 +32,18 @@ _monitor = SystemMonitor()
 # rather than replaying whatever was wrong in a previous run.
 _last_state: Dict[str, bool] = {}
 
-# The backend Billion is meant to run on by default -- flagged specifically
-# (not "any backend down") since a non-primary backend being unconfigured is
-# normal, not a problem worth a proactive alert.
-PRIMARY_BACKEND_NAME = "AnthropicLLM"
+
+def _primary_backend_name() -> str:
+    """The backend actually leading the live chain right now (honours
+    LLM_PRIMARY and get_llm_backends()'s catalog order) -- NOT a hardcoded
+    guess. Confirmed live as a real bug: this used to be a fixed
+    PRIMARY_BACKEND_NAME = "AnthropicLLM" constant, so once OmniRouteLLM
+    became the actual primary, this check kept watching Anthropic's
+    permanently-exhausted credit balance and proactively telling the user
+    "my primary reasoning backend appears to be down" -- alarming and just
+    plain wrong, since Anthropic wasn't primary anymore and whatever
+    genuinely was primary could have been working fine the whole time."""
+    return llm_backend.backends[0].__class__.__name__ if llm_backend.backends else "none"
 
 
 def _transitioned(check_key: str, healthy_now: bool) -> bool:
@@ -68,13 +77,14 @@ def check_resources() -> Dict[str, Any]:
 
 
 def check_primary_backend() -> Tuple[bool, Optional[str]]:
-    """Real read of usage_analytics.json -- flags the primary backend as
-    degraded only when it has actually been called and never once
-    succeeded (an auth/credit/quota failure looks exactly like this).
-    Returns (is_healthy, last_error_text_if_not)."""
+    """Real read of usage_analytics.json -- flags the CURRENT primary
+    backend (see _primary_backend_name) as degraded only when it has
+    actually been called and never once succeeded (an auth/credit/quota
+    failure looks exactly like this). Returns (is_healthy, last_error_text_if_not)."""
+    primary = _primary_backend_name()
     summary = usage_analytics.get_usage_summary()
     for entry in summary.get("per_backend", []):
-        if entry.get("backend") == PRIMARY_BACKEND_NAME:
+        if entry.get("backend") == primary:
             if entry.get("call_count", 0) > 0 and entry.get("success_count", 0) == 0:
                 return False, entry.get("last_error")
             return True, None
@@ -100,11 +110,12 @@ async def run_check_cycle() -> List[str]:
 
     backend_healthy, last_error = check_primary_backend()
     if _transitioned("primary_backend", backend_healthy):
+        primary = _primary_backend_name()
         if backend_healthy:
-            messages.append(f"{PRIMARY_BACKEND_NAME} (my primary reasoning backend) is back online, Sir.")
+            messages.append(f"{primary} (my primary reasoning backend) is back online, Sir.")
         else:
             messages.append(
-                f"Sir, my primary reasoning backend ({PRIMARY_BACKEND_NAME}) appears to be down"
+                f"Sir, my primary reasoning backend ({primary}) appears to be down"
                 + (f": {last_error}" if last_error else "")
                 + ". I'm currently running on a fallback backend instead."
             )

@@ -6,6 +6,17 @@
 # requirements-lock.txt (auto-generated, regenerate it after installing
 # anything new with `powershell -File sync_requirements_lock.ps1`).
 #
+# --- Non-pip system prerequisite: OmniRoute -------------------------------
+# llm.py's OmniRouteLLM (first-priority LLM backend, see get_llm_backends())
+# talks to a local OmniRoute gateway (github.com/diegosouzapw/OmniRoute) over
+# plain HTTP -- it's a separate Node.js/npm tool, not a Python package, so it
+# can't live in this file as a real dependency line. Install once with
+# `npm install -g omniroute`; this backend auto-launches it as a background
+# daemon on its own startup if it isn't already running (see
+# _ensure_omniroute_running in main_new.py), so no separate manual
+# `omniroute` terminal is needed day to day. Set DISABLE_OMNIROUTE=1 to skip
+# it entirely and go straight to the pip-installed backends below.
+#
 # --- Extra package indexes -------------------------------------------------
 # torch: PyPI's default wheel pulls in CUDA libraries even on a CPU-only box
 # (multi-GB of unnecessary bloat); the official CPU-only index avoids that.
