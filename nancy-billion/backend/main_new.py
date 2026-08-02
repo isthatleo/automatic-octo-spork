@@ -3914,31 +3914,50 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
 
 
 # ---------------------------------------------------------------------------
-# Streaming chat turn -- real token streaming (Claude) + per-sentence TTS, so
-# Nancy starts speaking sentence 1 while sentence 2+ is still being generated
-# instead of waiting for the entire reply and then the entire audio clip.
-# Agent-routed and tool-use replies aren't incremental at the source, but they
-# still flow through the same per-sentence TTS chunking below so the first
-# chunk of audio is available as soon as the first sentence is, not the whole
-# response.
+# Streaming chat turn -- real token streaming (Claude) accumulates the full
+# reply text (agent-routed and tool-use replies arrive as one block anyway),
+# then synthesizes it in a SMALL number of multi-sentence batches rather than
+# either extreme: one call per sentence (confirmed live as the cause of a
+# fresh ~15-20s dead-air gap before EVERY sentence on this CPU-only NeuTTS
+# hardware, which read as broken/out-of-sync mid-reply), or one call for the
+# whole reply (tried first -- confirmed live to blow straight through the
+# WebSocket's 10MB frame limit for a real ~2400-char detailed answer, whose
+# ~195s of 24kHz WAV audio base64-encodes to ~12MB and drops the connection
+# outright). Batching a few sentences per call keeps the per-call audio small
+# enough to always fit in one frame while cutting the number of inter-chunk
+# gaps to 2-4 for a long reply instead of 6-10.
 # ---------------------------------------------------------------------------
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# Sized from the actual failure: a 2437-char reply's audio exceeded the 10MB
+# WS frame limit (base64), i.e. over ~3080 bytes of raw 24kHz/16-bit WAV per
+# source character. 1500 chars stays comfortably under that limit (~6MB
+# base64 even at that same density) while meaning most real replies --
+# including a genuinely detailed multi-paragraph one -- still fit in a
+# single batch, matching the smooth one-shot playback the user confirmed
+# they preferred; only unusually long replies ever split into more than one.
+_TTS_BATCH_TARGET_CHARS = 1500
 
 
-def _extract_ready_sentences(buffer: str) -> tuple[list[str], str]:
-    """Split off sentences that are definitely complete (end in . ! or ? and
-    are followed by whitespace, or -- for the last piece -- just end in one of
-    those, meaning only the trailing whitespace hasn't streamed in yet).
-    Returns (ready_sentences, remainder_still_pending)."""
-    if not buffer:
-        return [], buffer
-    parts = _SENTENCE_SPLIT_RE.split(buffer)
-    complete = [p for p in parts[:-1] if p.strip()]
-    tail = parts[-1]
-    if tail and tail.rstrip()[-1:] in (".", "!", "?"):
-        complete.append(tail)
-        tail = ""
-    return complete, tail
+def _batch_sentences_for_tts(text: str, target_chars: int = _TTS_BATCH_TARGET_CHARS) -> list[str]:
+    """Groups sentences into batches up to ~target_chars each. A short reply
+    (the common case) naturally becomes a single batch, unchanged from
+    speaking it in one shot; a long detailed reply becomes a handful of
+    batches instead of one-per-sentence or one giant blob."""
+    sentences = [s for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
+    if not sentences:
+        return []
+    batches: list[str] = []
+    current = ""
+    for sentence in sentences:
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if current and len(candidate) > target_chars:
+            batches.append(current)
+            current = sentence
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+    return batches
 
 
 async def _generate_response_stream(user_text: str):
@@ -4036,6 +4055,17 @@ async def _synthesize_and_send_chunk(websocket: WebSocket, turn_id: int, seq: in
     text = text.strip()
     if not text:
         return
+    # _last_real_activity_at is otherwise only set once, at the START of
+    # _generate_response_via_hierarchy -- fine when a whole turn used to
+    # finish in a couple seconds, but a real multi-sentence reply now
+    # legitimately spends 15-20s of NeuTTS synthesis PER sentence, so a
+    # 5-6-sentence reply already runs past the proactive/training loops'
+    # 90s quiet window while still genuinely mid-turn. Without refreshing
+    # here, those loops see a stale timestamp and conclude the user's gone
+    # quiet, firing a real background LLM/agent cycle that competes for the
+    # exact same CPU this synthesis call is still using.
+    global _last_real_activity_at
+    _last_real_activity_at = _time.time()
     try:
         audio_wav = await tts_backend.synthesize(text)
     except Exception as e:
@@ -4169,20 +4199,12 @@ async def _run_chat_turn(
     await _history_add({"role": "user", "content": user_text})
 
     full_text = ""
-    sentence_buffer = ""
     debug_payload: Dict[str, Any] = {}
-    seq = 0
 
     try:
         async for item in _generate_response_stream(user_text):
             if item["kind"] == "delta":
-                delta = item["text"]
-                full_text += delta
-                sentence_buffer += delta
-                ready, sentence_buffer = _extract_ready_sentences(sentence_buffer)
-                for sentence in ready:
-                    seq += 1
-                    await _synthesize_and_send_chunk(websocket, turn_id, seq, sentence)
+                full_text += item["text"]
             elif item["kind"] == "meta":
                 debug_payload = item.get("debug", {})
 
@@ -4214,9 +4236,15 @@ async def _run_chat_turn(
         # reply already delivered above.
         asyncio.create_task(_push_reply_to_telegram(full_text, debug_payload.get("images")))
 
-        if sentence_buffer.strip():
-            seq += 1
-            await _synthesize_and_send_chunk(websocket, turn_id, seq, sentence_buffer)
+        # A small number of multi-sentence batches, not one call per sentence
+        # and not one call for the whole reply -- see the module-level note
+        # above _batch_sentences_for_tts for why both extremes were tried and
+        # rejected. A short reply (most of them) collapses to a single batch,
+        # i.e. behaves exactly like the one-shot design the user confirmed
+        # played back smoothly; only a genuinely long reply ever splits into
+        # more than one, and even then it's 2-4 gaps instead of 6-10.
+        for i, batch in enumerate(_batch_sentences_for_tts(full_text)):
+            await _synthesize_and_send_chunk(websocket, turn_id, i + 1, batch)
 
         await manager.send(json.dumps({"type": "tts_done", "turn_id": turn_id}), websocket)
 
