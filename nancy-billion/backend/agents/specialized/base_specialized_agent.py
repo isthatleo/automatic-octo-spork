@@ -85,7 +85,7 @@ class SpecializedAgent(BaseAgent):
                 "error":       str(exc),
             }
 
-    async def _llm_answer(self, query: str, *, max_tokens: int = 500, temperature: float = 0.5) -> Optional[str]:
+    async def _llm_answer(self, query: str, *, max_tokens: int = 900, temperature: float = 0.5) -> Optional[str]:
         """
         Real LLM-backed answer to a free-text query, scoped to this agent's
         domain. Used by subclasses' generic/fallback task handlers so an
@@ -108,9 +108,28 @@ class SpecializedAgent(BaseAgent):
             return None
         try:
             from llm import llm_backend  # deferred: avoid import-order coupling with the registry
+            # Confirmed live as a real, separate bug from the conversation-
+            # continuity one above: this system prompt used to be ONLY the
+            # bare specialization framing below, with none of Nancy's core
+            # identity, "Sir" address, personality, or (critically) the
+            # brief-for-casual/deep-for-real-questions calibration guidance
+            # every other reply path gets -- so any message that happened to
+            # match a specialized agent's routing keywords came back
+            # clinical and generically short, reading as "gone back to being
+            # short and boring" even though the main conversational path was
+            # working fine. _system_prompt_for_channel("voice")'s brevity
+            # calibration is a genuine calibration (short for small talk,
+            # real depth for real questions), not a length cap, so reusing
+            # it here doesn't cost anything for questions that deserve depth.
+            try:
+                from main_new import _system_prompt_for_channel
+                base_prompt = _system_prompt_for_channel("voice")
+            except Exception:
+                base_prompt = ""  # main_new not importable in this context (e.g. a standalone test) -- degrade to the bare framing below rather than failing the whole answer
             system = (
-                f"You are {self.agent_name}, a specialist in {self.domain.replace('-', ' ')}. "
-                f"{self.capabilities.get('description', '')} "
+                f"{base_prompt}\n\n"
+                f"For this reply specifically, you're drawing on your specialization as {self.agent_name}, "
+                f"an expert in {self.domain.replace('-', ' ')}. {self.capabilities.get('description', '')} "
                 "Answer the user's specific question or request directly and concretely, "
                 "drawing on your domain expertise. Do not just list your capabilities. If recent "
                 "conversation history is given below, treat this as a continuation of that same "

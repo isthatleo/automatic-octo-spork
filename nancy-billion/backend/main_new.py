@@ -1961,9 +1961,18 @@ _WANTS_TOOLS_RE = re.compile(
     # Real GUI application launching (open_application) -- distinct from the
     # existing "open ... url/link/page" pattern above, which is about
     # fetching a webpage's text, not launching a real desktop app.
+    # "docker" added after a real live miss: "open/launch docker on my
+    # machine" matched no keyword here at all (docker wasn't in the explicit
+    # list, and the request didn't literally say "app"/"application"), so it
+    # fell through to _auto_route's keyword match on "docker" instead --
+    # which sent it to DevOpsAgent, a git/CI/CD/infra consultant with no
+    # actual app-launching capability, whose own unrecognized-query fallback
+    # then silently ran `git status` and returned that raw output as if it
+    # had answered the request.
     r"(open|launch|start) (chrome|firefox|edge|safari|notepad|spotify|discord|slack|steam|"
-    r"vs ?code|vscode|explorer|file explorer|calculator|word|excel|outlook|"
+    r"vs ?code|vscode|explorer|file explorer|calculator|word|excel|outlook|docker|teams|zoom|"
     r"(the |an? )?(app|application|program|software))|"
+    r"(open|launch|start|run) .+ on my (machine|computer|pc|system)\b|"
     # Real on-demand webcam capture (look_at_camera) -- deliberately narrow:
     # only phrasing that clearly asks Nancy to visually look at something
     # right now, not generic uses of "look"/"camera" in conversation.
@@ -3899,10 +3908,17 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
 
     try:
         # Telegram gets real headroom for the "4 well-developed paragraphs"
-        # depth its style addendum asks for -- 512 tokens (the voice/web
-        # default, sized for short spoken replies) would cut a genuinely
-        # thorough answer off mid-thought.
-        max_tokens = 1600 if channel == "telegram" else 512
+        # depth its style addendum asks for. Voice/web used to cap at 512,
+        # sized for short spoken replies -- but the voice style prompt
+        # explicitly asks for real depth on genuine depth-worthy questions
+        # (not just short casual replies), and 512 tokens confirmed live cut
+        # a real, in-progress, substantive answer off mid-sentence ("...not
+        # even neutron degeneracy pressure can" -- nothing after it). 900
+        # gives a real depth answer room to actually finish while still
+        # being far short of Telegram's budget; a genuinely short/casual
+        # reply stays short on its own from the prompt's own calibration,
+        # not because the ceiling forces it to.
+        max_tokens = 1600 if channel == "telegram" else 900
         resp = await asyncio.wait_for(
             llm_backend.generate(prompt, max_tokens=max_tokens, temperature=0.7),
             timeout=30.0,
@@ -4018,7 +4034,7 @@ async def _generate_response_stream(user_text: str):
             got_any = False
             full_text = ""
             async for delta in claude.generate_stream(
-                user_turn, max_tokens=512, temperature=0.7,
+                user_turn, max_tokens=900, temperature=0.7,
                 system=_chat_system_blocks(static_system, dynamic_context),
             ):
                 got_any = True
@@ -4605,6 +4621,19 @@ async def get_personalized_greeting(payload: Dict = None):
     logger.info(f"Generated personalized greeting for {len(context.meetings_today)} "
                f"meetings, {len(context.market_alerts)} market alerts, "
                f"{len(context.project_updates)} project updates")
+
+    # Nancy actually SAYS this out loud (see page.tsx's boot flow) -- without
+    # recording it as a real assistant turn, the very next thing the user
+    # says arrives with no record that Nancy ever spoke, let alone asked
+    # anything. Confirmed live: the greeting often ends on its own question
+    # ("Shall I run through the task highlights first?"), and replying "yes"
+    # to it got a context-free non-sequitur back instead of Nancy actually
+    # running through the highlights, because _history_to_text() (what every
+    # chat prompt is built from) had zero record this greeting ever happened.
+    greeting_text = startup_data.get("greeting")
+    if greeting_text:
+        await _history_add({"role": "assistant", "content": greeting_text})
+        conversation_log.log_turn("assistant", greeting_text)
 
     return {
         "success": True,
@@ -8583,7 +8612,16 @@ async def _update_system_health_status() -> str:
 # acceptable trade for background work that isn't blocking a live
 # conversation.
 # ---------------------------------------------------------------------------
-PROACTIVE_AGENT_INTERVAL_S = float(os.getenv("PROACTIVE_AGENT_INTERVAL_S", "600"))  # 10 min
+PROACTIVE_AGENT_INTERVAL_S = float(os.getenv("PROACTIVE_AGENT_INTERVAL_S", "240"))  # 4 min
+# Confirmed live: at the old 600s interval with only 4 tasks/cycle (see
+# task_orchestrator_agent.py's MAX_TASKS_PER_BATCH), it would take dozens of
+# cycles -- hours of real idle time -- to give every one of the 70 agents
+# even a single task, which is what "almost all agents show 0 completed
+# tasks" actually was. This only affects how often a cycle CAN run during a
+# genuinely idle stretch -- PROACTIVE_QUIET_AFTER_ACTIVITY_S below still
+# skips every cycle entirely while the user is actively chatting, so this
+# doesn't add CPU competition with live voice replies, only with idle time
+# that was otherwise unused.
 # How recently the user must have been genuinely chatting (any channel --
 # see _generate_response_via_hierarchy, the real chokepoint every chat
 # caller goes through) before a proactive cycle backs off instead of

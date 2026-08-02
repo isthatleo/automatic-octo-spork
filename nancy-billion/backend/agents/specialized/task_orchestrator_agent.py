@@ -29,7 +29,7 @@ from .base_specialized_agent import SpecializedAgent
 
 logger = logging.getLogger(__name__)
 
-MAX_TASKS_PER_BATCH = 4
+MAX_TASKS_PER_BATCH = 12
 
 
 class TaskOrchestratorAgent(SpecializedAgent):
@@ -66,15 +66,32 @@ class TaskOrchestratorAgent(SpecializedAgent):
         if not real_agents:
             return {"success": False, "error": "No agents available to delegate to yet"}
 
-        roster_block = "\n".join(f"- {a['key']}: {a.get('description', a.get('domain', ''))}" for a in real_agents[:40])
+        # Least-used agents first, not registration order -- confirmed live
+        # as the actual cause of "almost all agents show 0 completed tasks":
+        # with no ordering signal, the model kept proposing the same handful
+        # of "obviously useful" agents every cycle, so the other ~60 never
+        # got picked even after many real cycles. Sorting by total_tasks
+        # ascending and saying so explicitly in the prompt biases genuinely
+        # idle agents to the front of what the model sees, so the fleet
+        # actually rotates through everyone over time instead of a fixed set.
+        real_agents.sort(key=lambda a: a.get("total_tasks", 0))
+        roster_block = "\n".join(
+            f"- {a['key']}: {a.get('description', a.get('domain', ''))} "
+            f"(completed {a.get('total_tasks', 0)} tasks so far)"
+            for a in real_agents[:40]
+        )
         prompt = (
-            "You coordinate a team of specialist AI agents. Here is the real roster (key: description):\n\n"
+            "You coordinate a team of specialist AI agents. Here is the real roster (key: description "
+            "(tasks completed so far)), listed LEAST-USED FIRST:\n\n"
             f"{roster_block}\n\n"
             f"Propose up to {max_tasks} concrete, genuinely useful tasks to run right now, each assigned to "
-            "ONE agent key from the list above that's actually well-suited to it. Prefer tasks that produce a "
-            "real, checkable finding (a specific real-world fact, a real computation, a real check) over vague "
-            "reflection. Respond with ONLY a JSON array, no prose, no markdown fences, in this exact shape:\n"
-            '[{"agent_key": "...", "task": "..."}]'
+            "ONE agent key from the list above that's actually well-suited to it. All else equal, prefer an "
+            "agent with fewer completed tasks over one that's already been used many times, so the whole "
+            "roster gets real, genuine use over time rather than the same few agents repeatedly -- but never "
+            "force a task onto an agent it's a poor fit for just because it's idle. Prefer tasks that produce "
+            "a real, checkable finding (a specific real-world fact, a real computation, a real check) over "
+            "vague reflection. Respond with ONLY a JSON array, no prose, no markdown fences, in this exact "
+            'shape:\n[{"agent_key": "...", "task": "..."}]'
         )
 
         from main_new import _proactive_local_llm

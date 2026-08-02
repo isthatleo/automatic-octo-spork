@@ -12,8 +12,23 @@ here); macOS uses `open -a`; Linux uses `xdg-open`.
 from __future__ import annotations
 
 import asyncio
+import os
 import platform
 from typing import Any, Dict, List, Optional
+
+# Real, confirmed-live ambiguity: "docker" resolves via PATH/App Paths to the
+# Docker CLI (docker.exe), not the GUI app -- running it bare just prints
+# help text and exits almost instantly, which `start ""` reports as a clean
+# success (exit code 0) even though nothing was actually launched. The real
+# GUI app is "Docker Desktop.exe", which has no short PATH alias at all, so
+# generic name resolution can never find it on its own. Checked at call time
+# (not import time) since Docker may be installed after this module loads.
+_WINDOWS_APP_OVERRIDES = {
+    "docker": [
+        r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        r"C:\Program Files (x86)\Docker\Docker\Docker Desktop.exe",
+    ],
+}
 
 
 async def open_application(target: str, args: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -22,6 +37,12 @@ async def open_application(target: str, args: Optional[List[str]] = None) -> Dic
         return {"success": False, "error": "target is required"}
     args = args or []
     system = platform.system()
+
+    if system == "Windows":
+        for candidate in _WINDOWS_APP_OVERRIDES.get(target.lower(), []):
+            if os.path.isfile(candidate):
+                target = candidate
+                break
 
     if system == "Windows":
         # The empty "" after `start` is a deliberate placeholder for the

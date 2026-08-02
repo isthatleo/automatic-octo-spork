@@ -224,22 +224,22 @@ export default function Page() {
   const audioQueueRef = useRef<HTMLAudioElement[]>([])
   const isPlayingQueueRef = useRef(false)
   const currentTurnIdRef = useRef<number | null>(null)
-  // Set true once the source of queued audio (WS tts_done, or the chunked
-  // greeting's own fetch loop) has finished producing chunks -- distinct from
-  // the queue being empty, since chunks can arrive with gaps while more are
-  // still being synthesized. Only once BOTH this is true AND the queue has
-  // actually finished playing do we know Nancy is really done talking.
+  // Set true once the source of queued audio (WS tts_done) has finished
+  // producing chunks -- distinct from the queue being empty, since chunks
+  // can arrive with gaps while more are still being synthesized. Only once
+  // BOTH this is true AND the queue has actually finished playing do we
+  // know Nancy is really done talking.
   const ttsDoneRef = useRef(false)
-  // Bumped on every new speech attempt (chunked greeting, streamed chat turn,
-  // or an interrupt) so a slow in-flight fetch from an already-superseded
-  // speech attempt can detect it's stale and discard its result instead of
-  // resurrecting audio for something that was already cut off.
+  // Bumped on every new speech attempt (streamed chat turn or an interrupt)
+  // so a slow in-flight fetch from an already-superseded speech attempt can
+  // detect it's stale and discard its result instead of resurrecting audio
+  // for something that was already cut off.
   const speechGenRef = useRef(0)
   // Cumulative word count of every chunk enqueued so far THIS utterance --
   // lets each new chunk know its own starting position in the full
   // transcript without needing the whole text up front (chat's onText can
   // arrive after audio chunks already have). Reset at the start of every
-  // new utterance (beginStreamedTurn, nancySayChunked, interruptSpeech).
+  // new utterance (beginStreamedTurn, interruptSpeech).
   const chunkWordOffsetRef = useRef(0)
 
   // ── Context bridge: report live UI state to /api/context so the backend
@@ -368,66 +368,6 @@ export default function Page() {
     enqueueAudioUrl(URL.createObjectURL(blob), words, baseIdx)
   }, [enqueueAudioUrl])
 
-  /** Splits arbitrary text into sentences and speaks it via the same queued-
-   *  playback pipeline as streamed chat, fetching each sentence's audio from
-   *  the REST /tts/synthesize endpoint in turn. Unlike nancySay() (one call
-   *  for the whole text), this gets the FIRST sentence playing as soon as
-   *  ITS synthesis completes instead of waiting for the entire text -- for a
-   *  long personalized greeting under NeuTTS's real per-character synthesis
-   *  cost (confirmed live: ~60s for a ~300-char greeting synthesized whole),
-   *  that's the difference between hearing Nancy in ~7-8s vs ~60s. */
-  const nancySayChunked = useCallback((text: string) => {
-    cancelSpeech()
-    currentAudioRef.current?.pause()
-    currentAudioRef.current = null
-    audioQueueRef.current.forEach((a) => a.pause())
-    audioQueueRef.current = []
-    isPlayingQueueRef.current = false
-    setSpeakingAudioEl(null)
-    if (wordTimerRef.current) {
-      clearInterval(wordTimerRef.current)
-      wordTimerRef.current = null
-    }
-    ttsDoneRef.current = false
-    chunkWordOffsetRef.current = 0
-    const myGen = ++speechGenRef.current
-    log('nancy', text)
-    sfx.confirm()
-    // Same reasoning as streamed chat's onText: show the full transcript
-    // immediately rather than waiting for every sentence's audio, since
-    // there's no per-word timing data for audio that hasn't synthesized yet
-    // -- the real per-word highlight is driven per-chunk below instead, via
-    // the same startChunkWordTimer streamed chat uses.
-    setCurrentUtterance(text)
-    setSpeaking(true)
-    setWordIndex(-1)
-
-    const sentences = text.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g)?.map((s) => s.trim()).filter(Boolean) ?? [text]
-
-    ;(async () => {
-      for (const sentence of sentences) {
-        if (speechGenRef.current !== myGen) return // superseded (interrupted or a newer utterance started)
-        const words = sentence.split(/\s+/).filter(Boolean)
-        const baseIdx = chunkWordOffsetRef.current
-        chunkWordOffsetRef.current += words.length
-        try {
-          const { audioUrl } = await synthesizeSpeech(sentence)
-          if (speechGenRef.current !== myGen) {
-            URL.revokeObjectURL(audioUrl)
-            return
-          }
-          if (audioUrl) enqueueAudioUrl(audioUrl, words, baseIdx)
-        } catch {
-          // Best-effort: skip this sentence's audio and keep going with the rest.
-        }
-      }
-      if (speechGenRef.current === myGen) {
-        ttsDoneRef.current = true
-        checkSpeechDrained()
-      }
-    })()
-  }, [log, enqueueAudioUrl, checkSpeechDrained])
-
   /** Interrupts whatever's currently speaking/queued and claims playback for
    *  a new turn -- combined with the backend cancelling the old turn's
    *  generation, this is the full fix for Nancy finishing an old reply
@@ -522,32 +462,12 @@ export default function Page() {
         setWordIndex(-1)
       }
 
-      // Compute word start-char offsets so boundary/timing → word index maps cleanly.
-      const starts: number[] = []
-      let cursor = 0
-      const words = text.split(/(\s+)/) // keep whitespace tokens
-      for (const tok of words) {
-        if (tok.trim()) starts.push(cursor)
-        cursor += tok.length
-      }
-
-      // Per-word timing weights for the estimated-pace fallback below: a real
-      // word's speaking time tracks its length (and a longer pause after
-      // punctuation), not a uniform per-word slice -- weighting by these
-      // keeps the estimate visibly closer to the real audio's cadence
-      // instead of drifting on longer sentences.
-      const wordWeights: number[] = starts.map((_, i) => {
-        const tok = words.filter((w) => w.trim())[i] ?? ''
-        const pause = /[.,!?;:]$/.test(tok) ? 3.5 : 0
-        return Math.max(2, tok.length) + pause
-      })
-      const totalWeight = wordWeights.reduce((a, b) => a + b, 0) || 1
-      const cumWeights: number[] = []
-      wordWeights.reduce((acc, w) => {
-        const next = acc + w
-        cumWeights.push(next)
-        return next
-      }, 0)
+      // Word list for the shared per-word timer below -- same helper the
+      // chat-streaming path uses (computeWordWeights/startChunkWordTimer),
+      // rather than re-deriving weighted timing inline here as this used to:
+      // one implementation for both speech paths means a future timing fix
+      // only has to happen once.
+      const words = text.split(/\s+/).filter(Boolean)
 
       // Degrade silently if the backend's real neural voice — neu_tts.py —
       // is unreachable or synthesis fails: show the text (already logged
@@ -581,21 +501,13 @@ export default function Page() {
             setSpeakingAudioEl(audio)
             setWordIndex(0)
             // NeuTTS doesn't emit per-word boundary events like the Web Speech
-            // API does — approximate by spreading words evenly across the
-            // real decoded audio duration instead of fabricating exact timing.
-            if (durationMs > 0 && starts.length > 0) {
-              const startedAt = Date.now()
-              wordTimerRef.current = setInterval(() => {
-                const elapsed = Date.now() - startedAt
-                const targetWeight = (elapsed / durationMs) * totalWeight
-                let idx = 0
-                for (let i = 0; i < cumWeights.length; i++) {
-                  if (cumWeights[i] <= targetWeight) idx = i
-                  else break
-                }
-                setWordIndex(Math.min(starts.length - 1, idx))
-              }, 60)
-            }
+            // API does — approximate via the same weighted per-word timer the
+            // chat-streaming path uses, driven by this audio's real decoded
+            // duration (durationMs, resolved via tts-client.ts's own
+            // 'loadedmetadata' listener -- already robust against the
+            // NaN-at-play-time issue startChunkWordTimer itself also guards
+            // against for the chunked-chat path).
+            wordTimerRef.current = startChunkWordTimer(words, durationMs, 0, setWordIndex)
           })
           audio.addEventListener('ended', cleanup)
           audio.addEventListener('error', () => {
@@ -861,12 +773,19 @@ export default function Page() {
       // of its own (see intelligent_greeting.py) before it falls back to a
       // real, complete templated greeting -- this client-side race is
       // defense in depth against slow network, not the primary guard.
-      // Spoken via nancySayChunked (not nancySay): a full greeting is
-      // synthesized sentence-by-sentence and played as each one finishes,
-      // so the target of hearing Nancy within ~10-15s of bootup holds
-      // regardless of the greeting's total length (confirmed live: whole-
-      // greeting NeuTTS synthesis alone can take ~60s for a long greeting,
-      // vs ~7-8s for just its first sentence).
+      // Spoken via plain nancySay -- ONE call for the whole greeting, same
+      // as before nancySayChunked was introduced to work around NeuTTS
+      // seeming to take ~60s for a long greeting. That per-sentence chunked
+      // approach traded one long wait for a WORSE bug: it exposed NeuTTS-
+      // nano's real 2048-TOKEN context ceiling (see neu_tts.py's
+      // _looks_truncated) far more often, since splitting text also
+      // splits it unpredictably around numeral-heavy phrases that
+      // themselves already eat a disproportionate share of that budget --
+      // confirmed live as the actual cause of "speaks the first bit, goes
+      // quiet, jumps to a much later part of the reply." neu_tts.py now
+      // detects and transparently retries/stitches truncated output at the
+      // SOURCE, so a single whole-greeting call is both simpler and
+      // correct again, matching how this worked before that regression.
       const ctl = new AbortController()
       const raceTimer = setTimeout(() => ctl.abort(), 8_000)
       fetch('/api/greeting/personalized', {
@@ -876,12 +795,12 @@ export default function Page() {
         signal: ctl.signal,
       })
         .then((res) => (res.ok ? res.json() : Promise.reject(res)))
-        .then((json) => nancySayChunked(json?.greeting || fallback))
-        .catch(() => nancySayChunked(fallback))
+        .then((json) => nancySay(json?.greeting || fallback))
+        .catch(() => nancySay(fallback))
         .finally(() => clearTimeout(raceTimer))
     }, 300)
     return () => clearTimeout(t)
-  }, [booting, nancySayChunked])
+  }, [booting, nancySay])
 
   const toggleMic = useCallback(() => {
     unlockSfx()

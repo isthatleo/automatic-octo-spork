@@ -25,7 +25,7 @@ import os
 import threading
 import wave
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -113,6 +113,83 @@ def _sanitize_for_neutts(text: str) -> str:
     for bad, good in _PUNCTUATION_NORMALIZE.items():
         text = text.replace(bad, good)
     return text
+
+
+# NeuTTS-nano's backbone (see fury-main's NeuTTSMinimal) runs on a llama.cpp
+# model with a hard n_ctx=2048-TOKEN context window shared between the
+# reference-audio codes, the reference text, the phonemized INPUT text, and
+# the GENERATED speech tokens -- all in the same budget. Confirmed live: the
+# same ~280-char greeting sometimes produced a full, correct ~25s WAV and
+# other times a "successful" (no exception) but badly truncated ~9s WAV for
+# what should have been the same amount of speech -- non-deterministic
+# because token cost isn't a fixed function of character count (numeral-
+# heavy text like "4107.0000, down 1.29%" phonemizes into far more tokens
+# per character than plain prose, eating the shared budget faster). This is
+# the actual root cause of "she speaks the first bit, goes quiet, then jumps
+# to a much later part of the reply" for any sufficiently long or numeral-
+# dense reply -- a different failure class than the inter-chunk CPU-cost
+# gaps the batching in main_new.py/page.tsx addresses.
+#
+# Real speech for this voice measures ~11-17 chars/sec depending on content
+# (slower for numeral-heavy text, per live measurements this session) --
+# 25 chars/sec is a deliberately generous ceiling no real synthesis of this
+# voice should ever exceed, so anything faster than that is almost
+# certainly truncated output, not genuinely fast speech.
+_MIN_CHARS_PER_SEC = float(os.getenv("NEUTTS_MIN_CHARS_PER_SEC", "25.0"))
+_TRUNCATION_CHECK_MIN_CHARS = 60  # too short below this to reliably tell truncation from genuine brevity
+_MAX_SPLIT_DEPTH = 3  # bounds the recursion; also bounds it to at most 2**3 = 8 pieces for any one reply
+
+
+def _looks_truncated(text: str, wav_bytes: bytes) -> bool:
+    stripped = text.strip()
+    if len(stripped) < _TRUNCATION_CHECK_MIN_CHARS:
+        return False
+    audio_bytes = max(0, len(wav_bytes) - 44)  # 44-byte canonical PCM WAV header
+    duration_s = audio_bytes / 2 / NEUTTS_SAMPLE_RATE  # 16-bit mono
+    if duration_s <= 0:
+        return True
+    return (len(stripped) / duration_s) > _MIN_CHARS_PER_SEC
+
+
+def _split_text_at_midpoint(text: str) -> Tuple[str, str]:
+    """Splits text roughly in half at the nearest sentence, then clause,
+    then word boundary -- used to retry a truncated synthesis in two
+    smaller (and therefore token-budget-safer) pieces."""
+    text = text.strip()
+    mid = len(text) // 2
+    window = text[: mid + 200]
+    cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+    if cut < mid * 0.3:
+        cut = window.rfind(", ")
+    if cut < mid * 0.3:
+        cut = window.rfind(" ")
+    if cut <= 0:
+        cut = mid
+    else:
+        cut += 1
+    return text[:cut].strip(), text[cut:].strip()
+
+
+def _concat_wav_bytes(chunks: List[bytes]) -> bytes:
+    """Concatenates the raw PCM frames of several mono 16-bit WAVs into one
+    valid WAV, using the first chunk's own sample rate for the result --
+    used to stitch a truncation-triggered split-and-retry back into a
+    single audio blob for the caller, same as it would have gotten from one
+    successful call."""
+    frames: List[bytes] = []
+    rate = NEUTTS_SAMPLE_RATE
+    for i, chunk in enumerate(chunks):
+        with wave.open(io.BytesIO(chunk), "rb") as wf:
+            if i == 0:
+                rate = wf.getframerate()
+            frames.append(wf.readframes(wf.getnframes()))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(b"".join(frames))
+    return buf.getvalue()
 
 
 class NeuTTSBackend(TTSBackend):
@@ -293,17 +370,19 @@ class NeuTTSBackend(TTSBackend):
             self._model_lock.release()
         return _encode_wav(audio, NEUTTS_SAMPLE_RATE)
 
-    async def synthesize(self, text: str) -> bytes:
-        text = _sanitize_for_neutts(text)
-        if text in self._cache:
-            return self._cache[text]
-
+    async def _synthesize_one(self, text: str) -> Tuple[bytes, bool]:
+        """One real attempt at `text` via NeuTTS, falling back to Pyttsx3 on
+        any failure. Returns (wav_bytes, came_from_neutts) -- the caller
+        (_synthesize_guarded) needs to know whether the result is genuinely
+        subject to NeuTTS's context-window truncation risk at all, since a
+        Pyttsx3-origin WAV never is and checking it anyway would just be
+        comparing against the wrong voice's speaking rate."""
         try:
             async with self._ref_lock:
                 await self._ensure_reference_ready()
         except Exception as e:
             logger.error("Could not prepare reference voice, falling back to Pyttsx3: %s", e)
-            return await self._fallback.synthesize(text)
+            return await self._fallback.synthesize(text), False
 
         loop = asyncio.get_event_loop()
         timeout = _timeout_for(text) if self._warm else NEUTTS_COLD_START_TIMEOUT_S
@@ -317,10 +396,10 @@ class NeuTTSBackend(TTSBackend):
                 "NeuTTS synthesis exceeded %.0fs (%s) for %d chars, falling back to Pyttsx3",
                 timeout, "cold-start budget" if not self._warm else "scaled timeout", len(text),
             )
-            return await self._fallback.synthesize(text)
+            return await self._fallback.synthesize(text), False
         except Exception as e:
             logger.error("NeuTTS synthesis failed, falling back to Pyttsx3: %s", e)
-            return await self._fallback.synthesize(text)
+            return await self._fallback.synthesize(text), False
 
         # Defense in depth against the same failure class as the em-dash/en-
         # dash/ellipsis bug _sanitize_for_neutts patches: the phonemizer can
@@ -337,9 +416,38 @@ class NeuTTSBackend(TTSBackend):
                 "treating as a silent failure and falling back to Pyttsx3",
                 len(wav_bytes), len(text),
             )
-            return await self._fallback.synthesize(text)
+            return await self._fallback.synthesize(text), False
 
         self._warm = True
+        return wav_bytes, True
+
+    async def _synthesize_guarded(self, text: str, depth: int = 0) -> bytes:
+        """Wraps _synthesize_one with the context-window-truncation guard
+        (see _looks_truncated's module-level comment): if NeuTTS silently
+        cut generation short for this text, split it in half at a sentence
+        boundary and retry each half, recursively, then stitch the results
+        back into one WAV -- rather than accepting incomplete audio as if
+        it were a real, complete reply."""
+        wav_bytes, from_neutts = await self._synthesize_one(text)
+        if from_neutts and depth < _MAX_SPLIT_DEPTH and _looks_truncated(text, wav_bytes):
+            left, right = _split_text_at_midpoint(text)
+            if left and right and (left != text) and (right != text):
+                logger.warning(
+                    "NeuTTS output for %d chars looks truncated (implied speaking "
+                    "rate too fast for real speech) -- splitting and retrying in "
+                    "two halves (depth %d)",
+                    len(text), depth + 1,
+                )
+                left_bytes = await self._synthesize_guarded(left, depth + 1)
+                right_bytes = await self._synthesize_guarded(right, depth + 1)
+                return _concat_wav_bytes([left_bytes, right_bytes])
+        return wav_bytes
+
+    async def synthesize(self, text: str) -> bytes:
+        text = _sanitize_for_neutts(text)
+        if text in self._cache:
+            return self._cache[text]
+        wav_bytes = await self._synthesize_guarded(text)
         self._cache_put(text, wav_bytes)
         return wav_bytes
 

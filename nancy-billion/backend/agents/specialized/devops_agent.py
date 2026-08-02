@@ -292,7 +292,34 @@ class DevOpsAgent(SpecializedAgent):
             return await self._git_action({**params, "operation": op})
         if "github" in query or "issue" in query or "repo" in query:
             return await self._github_action({**params, "operation": "repo_view"})
-        return await self._git_action({**params, "operation": "status"})
+        if "docker" in query and any(kw in query for kw in ("container", "image", "running", "status", "info")):
+            docker_info = _get_docker_info()
+            if not docker_info["installed"]:
+                return {"success": True, "response": "Docker doesn't look installed (or isn't on PATH) from here, Sir."}
+            containers = docker_info["running_containers"]
+            return {"success": True, "response": (
+                f"Docker {docker_info['version']}, Sir -- {len(containers)} container(s) running"
+                + (f": {'; '.join(containers[:5])}" if containers else ", none currently running") + "."
+            )}
+        # Confirmed live as a real bug: this used to unconditionally default
+        # to `git status` for ANY unrecognized query -- including "open/
+        # launch docker on my machine", a GUI-app-launch request this agent
+        # has no real capability for at all (that's app_launcher.py's
+        # open_application, reached via Claude's tool-use loop, not this
+        # agent). Silently running an unrelated command and returning its
+        # raw output read as a bizarre non-answer (a literal git status
+        # dump with this session's own in-progress file edits) to a request
+        # about launching an application -- and that broken exchange then
+        # sat in conversation history, causing Nancy to keep bringing up a
+        # "Docker launch" that was never real in later, unrelated replies.
+        # An honest LLM answer about what this agent actually does is far
+        # better than silently guessing a specific git operation nobody asked for.
+        answer = await self._llm_answer(params.get("query") or "")
+        return {"success": True, "response": answer or (
+            "I handle git/GitHub operations, CI/CD, containerization, infrastructure, and monitoring, Sir -- "
+            "I don't have a way to launch a GUI application directly. Try asking me to check Docker's "
+            "status once it's running, or launch it yourself and let me know when you'd like me to take it from there."
+        )}
 
     async def _git_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Wraps _git_action_impl to add a "response" string -- the
