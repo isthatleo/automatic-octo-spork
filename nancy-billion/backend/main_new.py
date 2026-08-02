@@ -1193,7 +1193,7 @@ Calibrate the length and depth of every response to what was actually asked -- t
 - A request for a definition or "what is X" gets a brief, precise explanation -- a paragraph at most, not an essay, unless asked to go deeper.
 - Only give a longer, structured, multi-part answer when the user's request actually calls for it: they asked for a deep dive, a thorough explanation, a comparison, a plan, or explicitly asked for detail/an essay/"tell me everything about". If genuinely unsure whether they want brief or thorough, default to brief and offer to expand -- don't pre-emptively over-explain.
 
-Your reply is synthesized and spoken sentence-by-sentence as each one finishes (not all at once), so the length of your FIRST sentence directly controls how long the user waits before hearing anything at all. Keep your opening sentence short -- ideally under 12 words -- even when the full answer goes on longer; put the direct answer or the most important point first and let any elaboration follow in the sentences after it.
+Your reply is synthesized and spoken sentence-by-sentence as each one finishes (not all at once), so the length of your FIRST sentence directly controls how long the user waits before hearing anything at all. This affects ONLY how you open: start with a short sentence (ideally under 12 words) that gives the direct answer or most important point, THEN continue with as many further sentences as the answer actually needs -- the opening-sentence rule is not a length cap on the whole reply. A reply that is supposed to be one short sentence (a greeting, a yes/no, a quick fact) should still be just that one sentence; a reply that calls for real detail should still deliver that detail in full, it just has to start short. Never stop after only the opening sentence when the question called for more.
 """
 
 # Telegram: pure text, no TTS in the loop, and the user has explicitly said
@@ -8154,6 +8154,18 @@ async def startup_event():
         lambda image_bytes, caption: _broadcast_reply_to_web("", [image_bytes], source="telegram")
     )
     telegram_notifier.start_polling()
+    # _last_real_activity_at defaults to 0.0 at module load, which makes
+    # quiet_for (= now - _last_real_activity_at) a huge number until the
+    # first real chat turn ever sets it -- defeating the proactive/training
+    # loops' whole quiet-period check on the FIRST cycle after every restart.
+    # Confirmed live: a fresh restart's proactive_agent_loop cycle (fires at
+    # its fixed 120s post-boot delay regardless) landed squarely on top of a
+    # real live chat request, both competing for the same CPU NeuTTS needs --
+    # exactly the contention class this gate exists to prevent, just missed
+    # on cycle one. Seeding it to "now" at startup makes the first cycle
+    # respect real activity too, not just every cycle after it.
+    global _last_real_activity_at
+    _last_real_activity_at = _time.time()
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_cron_execution_loop())
     asyncio.create_task(_self_healing_loop())

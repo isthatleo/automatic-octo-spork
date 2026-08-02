@@ -310,7 +310,32 @@ export default function Page() {
     if (sentenceWords && sentenceWords.length > 0 && wordBaseIdx !== undefined) {
       audio.addEventListener('play', () => {
         if (wordTimerRef.current) clearInterval(wordTimerRef.current)
-        const durationMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0
+        // audio.duration is frequently still NaN/Infinity at the exact
+        // instant 'play' fires for a freshly-created Blob URL (metadata
+        // parsing hasn't caught up with playback starting) -- confirmed the
+        // actual cause of "only the first word highlights": durationMs fell
+        // through to 0, so startChunkWordTimer took its zero-duration branch
+        // (set the index once to wordBaseIdx, start no interval) instead of
+        // ever animating through the rest of the chunk's words. Falling back
+        // to a speaking-rate estimate from the chunk's own word weights keeps
+        // the highlight animating even when the real duration never arrives
+        // in time, and self-corrects once it does via 'durationchange'.
+        const estimateMs = () => {
+          const { totalWeight } = computeWordWeights(sentenceWords)
+          return Math.max(300, (totalWeight / 9) * 1000) // ~9 weight-units/sec of natural speech
+        }
+        let durationMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0
+        if (durationMs <= 0) {
+          durationMs = estimateMs()
+          const onDurationChange = () => {
+            if (Number.isFinite(audio.duration) && audio.duration > 0) {
+              audio.removeEventListener('durationchange', onDurationChange)
+              if (wordTimerRef.current) clearInterval(wordTimerRef.current)
+              wordTimerRef.current = startChunkWordTimer(sentenceWords, audio.duration * 1000, wordBaseIdx, setWordIndex)
+            }
+          }
+          audio.addEventListener('durationchange', onDurationChange)
+        }
         wordTimerRef.current = startChunkWordTimer(sentenceWords, durationMs, wordBaseIdx, setWordIndex)
       })
     }

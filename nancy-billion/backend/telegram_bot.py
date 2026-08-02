@@ -36,7 +36,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
@@ -127,6 +127,44 @@ def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+_TELEGRAM_SAFE_CHUNK = 3900  # margin under Telegram's hard 4096 for HTML-escaping expansion
+
+
+def _split_for_telegram(text: str, limit: int = _TELEGRAM_SAFE_CHUNK) -> List[str]:
+    """Splits `text` into Telegram-safe pieces on the nearest paragraph, then
+    sentence, then word boundary before the limit -- confirmed live as the
+    actual cause of a real reply (a multi-paragraph Telegram-style deep dive,
+    e.g. a world-wars history request) silently never arriving at all: send()
+    handed the whole string straight to sendMessage, Telegram's API 400'd on
+    anything over 4096 chars, and that failure was only ever logged, never
+    surfaced -- meanwhile the reply had already been written to conversation
+    history, so Nancy believed the user had seen it when they hadn't. Splits
+    on the UNESCAPED text so a boundary can never land inside an HTML entity
+    that escaping would later introduce (&amp; / &lt; / &gt;)."""
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    chunks: List[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        cut = window.rfind("\n\n")
+        if cut < limit * 0.4:
+            alt = window.rfind(". ")
+            cut = alt + 1 if alt >= 0 else cut
+        if cut < limit * 0.4:
+            cut = window.rfind(" ")
+        if cut <= 0:
+            cut = limit
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 @dataclass
 class _PendingApproval:
     future: "asyncio.Future[bool]"
@@ -194,13 +232,27 @@ class TelegramNotifier:
             self._client = httpx.AsyncClient(base_url=f"{TELEGRAM_API}/bot{self.token}", timeout=30.0)
         return self._client
 
-    async def send(self, text: str) -> None:
-        """Push a message to your Telegram. Best-effort: logs and returns on
-        failure rather than raising, since a notification failing shouldn't
-        break whatever triggered it. Sent as escaped HTML so it renders
-        identically to plain text for every existing caller, while this
-        module's own richly-formatted messages can use send_html directly."""
-        await self.send_html(_escape_html(text))
+    async def send(self, text: str) -> bool:
+        """Push a message to your Telegram, splitting into multiple messages
+        if it exceeds Telegram's 4096-char hard limit (see
+        _split_for_telegram) instead of a single oversized call silently
+        400ing and dropping the whole reply. Best-effort per chunk: a later
+        chunk still gets sent even if an earlier one failed. Sent as escaped
+        HTML so it renders identically to plain text for every existing
+        caller, while this module's own richly-formatted messages can use
+        send_html directly. Returns True only if every chunk actually sent --
+        callers that need to know a real reply reached the user (as opposed
+        to just being generated) should check this rather than assuming
+        fire-and-forget success."""
+        chunks = _split_for_telegram(text)
+        if not chunks:
+            return True
+        all_ok = True
+        for chunk in chunks:
+            message_id = await self.send_html(_escape_html(chunk))
+            if message_id is None:
+                all_ok = False
+        return all_ok
 
     async def send_html(self, html_text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
         """Send a pre-built HTML-formatted message -- the caller is
@@ -601,9 +653,14 @@ class TelegramNotifier:
             snapshot = await snapshot_for_query(place_query)
             if snapshot is not None:
                 image_bytes, display_name, was_night = snapshot
-                await self.send_html(
-                    f"\U0001f4d6 <b>{_escape_html(display_name)}</b>\n\n{_escape_html(reply)}"
-                )
+                # Same 4096-char limit and same silent-400-drop risk as
+                # send() -- a real 3-4+ paragraph place history (exactly what
+                # this channel's own style asks for) can easily exceed it, so
+                # this needs the same chunking rather than one oversized
+                # send_html call.
+                header = f"\U0001f4d6 <b>{_escape_html(display_name)}</b>\n\n"
+                for i, chunk in enumerate(_split_for_telegram(reply, limit=_TELEGRAM_SAFE_CHUNK - len(header))):
+                    await self.send_html((header if i == 0 else "") + _escape_html(chunk))
                 style = "\U0001f319 Night recon" if was_night else "\U0001f6f0 Satellite recon"
                 caption = f"{style} · <b>{_escape_html(display_name)}</b>"
                 await self.send_photo(image_bytes, caption=caption)

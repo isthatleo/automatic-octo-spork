@@ -69,7 +69,18 @@ NEUTTS_COLD_START_TIMEOUT_S = float(os.getenv("NEUTTS_COLD_START_TIMEOUT_S", "30
 
 
 def _timeout_for(text: str) -> float:
-    return max(NEUTTS_TIMEOUT_S, len(text) * NEUTTS_TIMEOUT_S_PER_CHAR)
+    # Must cover a worst-case queue behind another in-flight synthesis (up to
+    # NEUTTS_LOCK_WAIT_S, spent inside _synthesize_sync's model_lock.acquire
+    # before generation even starts) PLUS this text's own real generation
+    # budget. Confirmed live: with this outer timeout shorter than the lock-
+    # wait budget, any request that landed while another was still
+    # generating reliably blew the outer asyncio.wait_for while genuinely
+    # still queued for the lock (not stuck, not slow) -- every chunk of a
+    # multi-sentence reply fell back to Pyttsx3 in a row, which is the real
+    # cause of the reported "voice keeps changing" mid-reply, since the two
+    # timeouts were never actually composed the way the lock-wait's own
+    # "deliberately generous" design comment already assumed they would be.
+    return NEUTTS_LOCK_WAIT_S + max(NEUTTS_TIMEOUT_S, len(text) * NEUTTS_TIMEOUT_S_PER_CHAR)
 
 
 # NeuTTS's underlying phonemizer silently produces empty/near-empty audio
