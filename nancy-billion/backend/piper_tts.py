@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 PIPER_VOICE = os.getenv("PIPER_VOICE", "en_GB-jenny_dioco-medium")
 PIPER_VOICE_DIR = Path(os.getenv("PIPER_VOICE_DIR", "./data/piper_voices"))
+# Required for multi-speaker models. en_GB-vctk-medium carries 109 distinct
+# speakers with different regional accents, so the speaker id IS the voice.
+_raw_speaker = os.getenv("PIPER_SPEAKER", "").strip()
+PIPER_SPEAKER = int(_raw_speaker) if _raw_speaker else None
 _CACHE_MAX_ENTRIES = 200
 
 
@@ -94,7 +98,7 @@ class PiperTTSBackend(TTSBackend):
         # itself -- the worker is max_workers=1, so the pool already
         # serializes real synthesis for us).
         self._model_lock = threading.Lock()
-        logger.info("Initialized Piper TTS backend (voice=%s, dir=%s)", PIPER_VOICE, PIPER_VOICE_DIR)
+        logger.info("Initialized Piper TTS backend (voice=%s, speaker=%s, dir=%s)", PIPER_VOICE, PIPER_SPEAKER, PIPER_VOICE_DIR)
 
     # -- status ---------------------------------------------------------------
 
@@ -134,7 +138,8 @@ class PiperTTSBackend(TTSBackend):
                 import piper_worker
 
                 self._executor = ProcessPoolExecutor(
-                    max_workers=1, initializer=piper_worker.init, initargs=(str(model),),
+                    max_workers=1, initializer=piper_worker.init,
+                    initargs=(str(model), PIPER_SPEAKER),
                 )
                 logger.info("Piper synthesis worker process starting (voice=%s)", model)
                 return None

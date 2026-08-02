@@ -26,15 +26,17 @@ import io
 import wave
 
 _voice = None
+_speaker_id = None
 
 
-def init(model_path: str) -> None:
+def init(model_path: str, speaker_id=None) -> None:
     """ProcessPoolExecutor initializer -- loads the ONNX voice ONCE per
     worker process. Everything after this is a warm, sub-second call."""
-    global _voice
+    global _voice, _speaker_id
     from piper import PiperVoice
 
     _voice = PiperVoice.load(model_path)
+    _speaker_id = speaker_id
 
 
 def synthesize(text: str) -> bytes:
@@ -42,6 +44,17 @@ def synthesize(text: str) -> bytes:
     if _voice is None:
         raise RuntimeError("Piper worker voice was never initialised")
     buf = io.BytesIO()
+    # Multi-speaker models (e.g. en_GB-vctk-medium, 109 speakers) need an
+    # explicit speaker_id -- without one Piper silently uses speaker 0,
+    # which for VCTK is an arbitrary voice, not the intended accent.
+    syn_config = None
+    if _speaker_id is not None:
+        from piper import SynthesisConfig
+
+        syn_config = SynthesisConfig(speaker_id=int(_speaker_id))
     with wave.open(buf, "wb") as wav_file:
-        _voice.synthesize_wav(text, wav_file)
+        if syn_config is not None:
+            _voice.synthesize_wav(text, wav_file, syn_config=syn_config)
+        else:
+            _voice.synthesize_wav(text, wav_file)
     return buf.getvalue()
