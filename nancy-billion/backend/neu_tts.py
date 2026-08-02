@@ -24,6 +24,7 @@ import logging
 import os
 import threading
 import wave
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -210,6 +211,12 @@ class NeuTTSBackend(TTSBackend):
         # model that's still genuinely loading (not stuck) and falls back
         # to Pyttsx3 for no real reason.
         self._warm = False
+        # Dedicated synthesis process + its own failure latch. See
+        # neutts_worker.py: in-process synthesis is GIL-starved by this
+        # backend's many concurrent loops (~4.9x realtime vs ~1.7x
+        # standalone, measured on identical text).
+        self._executor: Optional[ProcessPoolExecutor] = None
+        self._worker_error: Optional[str] = None
         # Guards model construction and self._tts.speak() calls, which run on
         # ThreadPoolExecutor worker threads (not the event loop) and are not
         # safe to enter concurrently -- llama.cpp-backed contexts aren't
@@ -339,6 +346,33 @@ class NeuTTSBackend(TTSBackend):
 
     # -- synthesis ------------------------------------------------------------
 
+    def _ensure_worker(self) -> Optional[str]:
+        """Starts the dedicated synthesis PROCESS (see neutts_worker.py for
+        why a process and not a thread). Returns None on success."""
+        if self._executor is not None:
+            return None
+        if self._worker_error is not None:
+            return self._worker_error
+        with self._model_lock:
+            if self._executor is not None:
+                return None
+            if self._worker_error is not None:
+                return self._worker_error
+            try:
+                import neutts_worker
+
+                ref_path, ref_text, _src = self._resolve_reference()
+                self._executor = ProcessPoolExecutor(
+                    max_workers=1, initializer=neutts_worker.init,
+                    initargs=(ref_path, ref_text),
+                )
+                logger.info("NeuTTS synthesis worker process starting (ref=%s)", ref_path)
+                return None
+            except Exception as e:
+                logger.exception("Failed to start NeuTTS worker process")
+                self._worker_error = f"Failed to start NeuTTS worker: {e}"
+                return self._worker_error
+
     def _synthesize_sync(self, text: str) -> bytes:
         error = self._ensure_loaded()
         if error:
@@ -387,10 +421,21 @@ class NeuTTSBackend(TTSBackend):
         loop = asyncio.get_event_loop()
         timeout = _timeout_for(text) if self._warm else NEUTTS_COLD_START_TIMEOUT_S
         try:
-            wav_bytes = await asyncio.wait_for(
-                loop.run_in_executor(None, self._synthesize_sync, text),
-                timeout=timeout,
-            )
+            worker_error = self._ensure_worker()
+            if worker_error:
+                # Worker unavailable -- fall back to in-process synthesis
+                # rather than losing the voice entirely (slower, but real).
+                wav_bytes = await asyncio.wait_for(
+                    loop.run_in_executor(None, self._synthesize_sync, text),
+                    timeout=timeout,
+                )
+            else:
+                import neutts_worker
+
+                wav_bytes = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, neutts_worker.synthesize, text),
+                    timeout=timeout,
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 "NeuTTS synthesis exceeded %.0fs (%s) for %d chars, falling back to Pyttsx3",

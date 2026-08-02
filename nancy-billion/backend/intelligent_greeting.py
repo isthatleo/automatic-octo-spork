@@ -97,22 +97,20 @@ class ContextualGreetingEngine:
             "facts as a flat list; weave them into 3-5 conversational sentences the way "
             "a real person would. The time-appropriate opening tone is: "
             f"\"{time_greeting}\" -- use it or a natural variant of it as your opening. "
-            # This greeting is spoken sentence-by-sentence as each one finishes
-            # synthesizing (not all at once), so how long the FIRST sentence
-            # is directly controls how long the user waits before hearing
-            # anything at all -- confirmed live, an opening sentence that
-            # wandered into a full clause before its full stop added several
-            # extra real seconds of neural TTS synthesis time before any
-            # audio played. Keeping it to just the address + time-of-day
-            # keeps that wait short regardless of how much else the greeting
-            # goes on to say.
-            "Your FIRST sentence must be SHORT -- 6 words or fewer, just the address "
-            "and time-of-day greeting (e.g. \"Good evening, Sir.\") with nothing else "
-            "in it; save every fact for the sentences that follow. "
-            "ALWAYS end on a short closing line that invites the user to engage (e.g. "
-            "an offer to help, a question about what to focus on first, or a simple "
-            "'ready when you are') -- the greeting should feel complete and rounded "
-            "off, never trail off after the last fact with no sign-off.\n\n"
+            # The user asked explicitly for the COMPLETE brief and said he
+            # would rather wait than be short-changed. An earlier version
+            # capped this to one fact / 25 words purely to cut synthesis
+            # time; that traded away the thing he actually wanted, so
+            # completeness wins here over time-to-first-word.
+            "Open with the address and time-of-day (e.g. \"Good evening, Sir.\") as a "
+            "SHORT first sentence, then deliver his COMPLETE brief: every single real "
+            "fact listed below, none omitted or summarised away, woven into flowing "
+            "conversational prose rather than read out as a flat list. This is his "
+            "morning/evening briefing -- thoroughness is the point of it. "
+            "ALWAYS end on a short closing line that invites him to engage (an offer "
+            "to help, a question about what to focus on first, or a simple 'ready when "
+            "you are') -- it should feel complete and rounded off, never trail off "
+            "after the last fact with no sign-off.\n\n"
             f"Real facts to weave in:\n{facts_block}\n\n"
             "Write only the greeting itself -- no preamble, no quotation marks, no "
             "explanation of what you're doing."
@@ -217,15 +215,21 @@ class ContextualGreetingEngine:
     def _combine_greeting(self, time_greeting: str, items: List[str]) -> str:
         """Combine time greeting with context items into a fuller, warmer
         briefing -- a real paragraph rather than a single clipped clause,
-        closing with an invitation so it never just trails off."""
+        closing with an invitation so it never just trails off.
 
+        Deliberately reports EVERY real item, not a truncated subset: the
+        user wants the complete morning brief, and accepts that a longer
+        greeting takes proportionally longer to synthesize (see neu_tts.py
+        -- roughly 1.7x slower than realtime). Completeness is the explicit
+        priority here over time-to-first-word.
+        """
         if len(items) == 1:
             body = f"{items[0]}."
         elif len(items) == 2:
             body = f"{items[0]}, and {items[1]}."
         else:
             # Multiple items: join with commas, last with "and"
-            body = ", ".join(items[:-1]) + ", and " + items[-1] + "."
+            body = ", ".join(items[:-1]) + ", and " + items[-1] + "." if items else ""
 
         # Items are phrased to read naturally mid-sentence ("you have 2
         # meetings today"); as the first thing after the time greeting's
