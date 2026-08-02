@@ -51,8 +51,11 @@ async function wsUrlWithAuth(): Promise<string> {
 /** Callbacks for one streaming chat turn -- see askNancyStreaming(). */
 export interface TurnHandlers {
   /** Fired once per sentence as its audio becomes ready (NeuTTS synthesizes
-   *  per-sentence server-side, not the whole reply at once). */
-  onAudioChunk?: (audioBase64: string, seq: number) => void
+   *  per-sentence server-side, not the whole reply at once). `sentenceText`
+   *  is the exact text this chunk's audio speaks -- lets the caller time a
+   *  live word highlight against THIS chunk's real audio duration instead
+   *  of guessing from the whole reply's length. */
+  onAudioChunk?: (audioBase64: string, seq: number, sentenceText: string) => void
   /** Fired once, with the complete reply text, as soon as generation finishes
    *  (may arrive before the last sentence's audio does). */
   onText?: (text: string, debug?: unknown) => void
@@ -277,7 +280,7 @@ function connect(): Promise<WebSocket> {
       if (activeTurn && msgTurnId === activeTurn.turnId) {
         if (msg.type === 'tts_audio_chunk') {
           bumpTurnTimeout(activeTurn)
-          activeTurn.onAudioChunk?.((msg.data as string) ?? '', (msg.seq as number) ?? 0)
+          activeTurn.onAudioChunk?.((msg.data as string) ?? '', (msg.seq as number) ?? 0, (msg.text as string) ?? '')
         } else if (msg.type === 'tool_progress') {
           bumpTurnTimeout(activeTurn)
           activeTurn.onToolProgress?.((msg.tool as string) ?? '')

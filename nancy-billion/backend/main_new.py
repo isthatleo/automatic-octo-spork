@@ -1192,6 +1192,8 @@ Calibrate the length and depth of every response to what was actually asked -- t
 - Casual conversation (greetings, small talk, a quick check-in) gets a short, natural, conversational reply -- not a report.
 - A request for a definition or "what is X" gets a brief, precise explanation -- a paragraph at most, not an essay, unless asked to go deeper.
 - Only give a longer, structured, multi-part answer when the user's request actually calls for it: they asked for a deep dive, a thorough explanation, a comparison, a plan, or explicitly asked for detail/an essay/"tell me everything about". If genuinely unsure whether they want brief or thorough, default to brief and offer to expand -- don't pre-emptively over-explain.
+
+Your reply is synthesized and spoken sentence-by-sentence as each one finishes (not all at once), so the length of your FIRST sentence directly controls how long the user waits before hearing anything at all. Keep your opening sentence short -- ideally under 12 words -- even when the full answer goes on longer; put the direct answer or the most important point first and let any elaboration follow in the sentences after it.
 """
 
 # Telegram: pure text, no TTS in the loop, and the user has explicitly said
@@ -3559,6 +3561,8 @@ async def _generate_response_via_hierarchy(user_text: str, channel: str = "voice
     (works directly off this turn's real text) rather than the original
     extract_memories_from_conversation (depends on nancy_brain.context,
     which the real path never populates either)."""
+    global _last_real_activity_at
+    _last_real_activity_at = _time.time()
     response_text, debug = await _generate_response_via_hierarchy_impl(user_text, channel)
     try:
         active_manager = _active_memory_manager()
@@ -4046,6 +4050,13 @@ async def _synthesize_and_send_chunk(websocket: WebSocket, turn_id: int, seq: in
                 "turn_id": turn_id,
                 "seq": seq,
                 "data": base64.b64encode(audio_wav).decode(),
+                # The sentence this chunk's audio actually contains -- the
+                # frontend uses this to compute which words in the full
+                # transcript this specific chunk covers, so the live lyrics
+                # highlight can be timed against THIS chunk's real audio
+                # duration instead of a single whole-reply estimate that
+                # starts counting before any audio has even begun playing.
+                "text": text,
             }),
             websocket,
         )
@@ -8453,6 +8464,18 @@ async def _update_system_health_status() -> str:
 # conversation.
 # ---------------------------------------------------------------------------
 PROACTIVE_AGENT_INTERVAL_S = float(os.getenv("PROACTIVE_AGENT_INTERVAL_S", "600"))  # 10 min
+# How recently the user must have been genuinely chatting (any channel --
+# see _generate_response_via_hierarchy, the real chokepoint every chat
+# caller goes through) before a proactive cycle backs off instead of
+# running. Confirmed live: this system's own local-Ollama proactive work is
+# genuinely CPU-heavy, and running it while the user is actively talking to
+# Nancy competes for the exact same CPU NeuTTS needs to synthesize speech in
+# real time -- precisely the class of self-inflicted contention this
+# session spent hours fixing for Docker/wake-word. Skipping (not just
+# delaying) a cycle here means a burst of chat activity never gets queued
+# up behind it either.
+PROACTIVE_QUIET_AFTER_ACTIVITY_S = float(os.getenv("PROACTIVE_QUIET_AFTER_ACTIVITY_S", "90"))
+_last_real_activity_at: float = 0.0
 
 
 async def _proactive_local_llm(prompt: str, max_tokens: int = 200) -> Optional[str]:
@@ -8483,7 +8506,8 @@ async def _proactive_agent_loop() -> None:
     await asyncio.sleep(120)  # let the rest of startup (agent init, etc.) settle first
     while True:
         try:
-            if agent_service.is_ready():
+            quiet_for = _time.time() - _last_real_activity_at
+            if agent_service.is_ready() and quiet_for >= PROACTIVE_QUIET_AFTER_ACTIVITY_S:
                 result = await agent_service.run(
                     "task_orchestration", {"type": "generate_and_delegate"}, timeout=180.0,
                 )
@@ -8521,7 +8545,12 @@ async def _model_training_loop() -> None:
     await asyncio.sleep(300)  # let real conversation data accumulate before the first run
     while True:
         try:
-            if agent_service.is_ready():
+            quiet_for = _time.time() - _last_real_activity_at
+            # Same CPU-contention reasoning as _proactive_agent_loop -- this
+            # cycle is heavier (real classifier retraining + an Ollama
+            # /api/create call), so it's worth the same quiet-window check
+            # even though its own interval is already hours apart.
+            if agent_service.is_ready() and quiet_for >= PROACTIVE_QUIET_AFTER_ACTIVITY_S:
                 result = await agent_service.run("model_training", {"type": "run_cycle"}, timeout=300.0)
                 logger.info("Model training cycle finished: %s", result.get("success") if isinstance(result, dict) else result)
         except Exception:

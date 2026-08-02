@@ -117,6 +117,63 @@ const ORB_QUICK_NAV: { key: PanelKey; label: string; icon: typeof Brain }[] = [
 
 let logSeq = 0
 
+/** Per-word timing weights: a real word's speaking time tracks its length
+ *  (and a longer pause after punctuation), not a uniform per-word slice --
+ *  weighting by these keeps the estimate visibly closer to real cadence
+ *  than dividing duration evenly. Shared by nancySay's single-blob path and
+ *  startChunkWordTimer below, which drive the exact same live-lyrics
+ *  wordIndex from two different playback shapes (one <audio> for the whole
+ *  reply vs one per sentence chunk). */
+function computeWordWeights(words: string[]): { cumWeights: number[]; totalWeight: number } {
+  const wordWeights = words.map((tok) => {
+    const pause = /[.,!?;:]$/.test(tok) ? 3.5 : 0
+    return Math.max(2, tok.length) + pause
+  })
+  const totalWeight = wordWeights.reduce((a, b) => a + b, 0) || 1
+  const cumWeights: number[] = []
+  wordWeights.reduce((acc, w) => {
+    const next = acc + w
+    cumWeights.push(next)
+    return next
+  }, 0)
+  return { cumWeights, totalWeight }
+}
+
+/** Starts a live wordIndex timer for ONE audio chunk covering `words`,
+ *  timed against that chunk's own REAL audio duration and offset by
+ *  `baseIdx` (this chunk's first word's position in the FULL utterance) --
+ *  the fix for the live transcript racing ahead of/falling behind real
+ *  chunked/streamed audio: previously the only per-word timing exists for
+ *  nancySay's single-blob path, so every chunked reply (which is most
+ *  replies -- the boot greeting and all streamed chat) fell back to
+ *  LyricsTranscript's own fake whole-text estimate that starts counting
+ *  the instant text is known, well before this chunk's audio has even
+ *  finished synthesizing, let alone started playing. Returns the interval
+ *  handle (or null if there's nothing to animate) -- same shape as
+ *  `setInterval` so callers can store it in the same wordTimerRef nancySay
+ *  already uses and clear it identically; caller clears any PREVIOUS
+ *  chunk's timer before starting this one. */
+function startChunkWordTimer(
+  words: string[], durationMs: number, baseIdx: number, onIndex: (i: number) => void,
+): ReturnType<typeof setInterval> | null {
+  if (durationMs <= 0 || words.length === 0) {
+    onIndex(baseIdx)
+    return null
+  }
+  const { cumWeights, totalWeight } = computeWordWeights(words)
+  const startedAt = Date.now()
+  return setInterval(() => {
+    const elapsed = Date.now() - startedAt
+    const targetWeight = (elapsed / durationMs) * totalWeight
+    let idx = 0
+    for (let i = 0; i < cumWeights.length; i++) {
+      if (cumWeights[i] <= targetWeight) idx = i
+      else break
+    }
+    onIndex(baseIdx + Math.min(words.length - 1, idx))
+  }, 60)
+}
+
 export default function Page() {
   useEffect(() => {
     import('@/lib/nancy/theme').then(({ applyStoredTheme }) => applyStoredTheme())
@@ -178,6 +235,12 @@ export default function Page() {
   // speech attempt can detect it's stale and discard its result instead of
   // resurrecting audio for something that was already cut off.
   const speechGenRef = useRef(0)
+  // Cumulative word count of every chunk enqueued so far THIS utterance --
+  // lets each new chunk know its own starting position in the full
+  // transcript without needing the whole text up front (chat's onText can
+  // arrive after audio chunks already have). Reset at the start of every
+  // new utterance (beginStreamedTurn, nancySayChunked, interruptSpeech).
+  const chunkWordOffsetRef = useRef(0)
 
   // ── Context bridge: report live UI state to /api/context so the backend
   // can inject it into Nancy's system prompt (_live_context_bridge_context
@@ -237,8 +300,20 @@ export default function Page() {
     }
   }, [])
 
-  const enqueueAudioUrl = useCallback((url: string) => {
+  const enqueueAudioUrl = useCallback((url: string, sentenceWords?: string[], wordBaseIdx?: number) => {
     const audio = new Audio(url)
+    // Real per-chunk word timing: starts only once THIS chunk actually
+    // begins playing, timed against ITS real decoded duration -- not a
+    // whole-reply estimate that starts counting before any audio exists.
+    // Clears whatever timer the PREVIOUS chunk was running first, so they
+    // never overlap.
+    if (sentenceWords && sentenceWords.length > 0 && wordBaseIdx !== undefined) {
+      audio.addEventListener('play', () => {
+        if (wordTimerRef.current) clearInterval(wordTimerRef.current)
+        const durationMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0
+        wordTimerRef.current = startChunkWordTimer(sentenceWords, durationMs, wordBaseIdx, setWordIndex)
+      })
+    }
     audio.addEventListener('ended', () => {
       URL.revokeObjectURL(url)
       isPlayingQueueRef.current = false
@@ -256,13 +331,16 @@ export default function Page() {
     playNextQueuedAudio()
   }, [playNextQueuedAudio, checkSpeechDrained])
 
-  const enqueueAudioChunk = useCallback((base64: string) => {
+  const enqueueAudioChunk = useCallback((base64: string, _seq: number, sentenceText: string) => {
     // No turn-id check needed here: ws-client.ts's askNancyStreaming already
     // only invokes onAudioChunk for the currently-active turn (it drops any
     // frame whose turn_id doesn't match before calling out to us at all).
+    const words = sentenceText.trim().split(/\s+/).filter(Boolean)
+    const baseIdx = chunkWordOffsetRef.current
+    chunkWordOffsetRef.current += words.length
     const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
     const blob = new Blob([bytes], { type: 'audio/wav' })
-    enqueueAudioUrl(URL.createObjectURL(blob))
+    enqueueAudioUrl(URL.createObjectURL(blob), words, baseIdx)
   }, [enqueueAudioUrl])
 
   /** Splits arbitrary text into sentences and speaks it via the same queued-
@@ -286,12 +364,15 @@ export default function Page() {
       wordTimerRef.current = null
     }
     ttsDoneRef.current = false
+    chunkWordOffsetRef.current = 0
     const myGen = ++speechGenRef.current
     log('nancy', text)
     sfx.confirm()
     // Same reasoning as streamed chat's onText: show the full transcript
     // immediately rather than waiting for every sentence's audio, since
-    // there's no per-word timing data for audio that hasn't synthesized yet.
+    // there's no per-word timing data for audio that hasn't synthesized yet
+    // -- the real per-word highlight is driven per-chunk below instead, via
+    // the same startChunkWordTimer streamed chat uses.
     setCurrentUtterance(text)
     setSpeaking(true)
     setWordIndex(-1)
@@ -301,13 +382,16 @@ export default function Page() {
     ;(async () => {
       for (const sentence of sentences) {
         if (speechGenRef.current !== myGen) return // superseded (interrupted or a newer utterance started)
+        const words = sentence.split(/\s+/).filter(Boolean)
+        const baseIdx = chunkWordOffsetRef.current
+        chunkWordOffsetRef.current += words.length
         try {
           const { audioUrl } = await synthesizeSpeech(sentence)
           if (speechGenRef.current !== myGen) {
             URL.revokeObjectURL(audioUrl)
             return
           }
-          if (audioUrl) enqueueAudioUrl(audioUrl)
+          if (audioUrl) enqueueAudioUrl(audioUrl, words, baseIdx)
         } catch {
           // Best-effort: skip this sentence's audio and keep going with the rest.
         }
@@ -340,6 +424,7 @@ export default function Page() {
     }
     ttsDoneRef.current = false
     speechGenRef.current++ // invalidate any still-in-flight chunked greeting fetch loop
+    chunkWordOffsetRef.current = 0
     currentTurnIdRef.current = turnId
     setSpeaking(true)
     setWordIndex(-1)
@@ -368,6 +453,7 @@ export default function Page() {
     currentTurnIdRef.current = null
     ttsDoneRef.current = false
     speechGenRef.current++ // discard any in-flight chunked-fetch loop's late result
+    chunkWordOffsetRef.current = 0
     setSpeaking(false)
     setThinking(false)
     setWordIndex(-1)
@@ -688,6 +774,12 @@ export default function Page() {
 
   const { state, start, stop, pause, startConversationMode, stopConversationMode } = useVoice({
     onCommand: (text, audioBase64) => {
+      // Confirmed live: unlike onUserInput (typed console input), this path
+      // never logged what the user actually SAID -- voice and console were
+      // effectively two different transcripts. Same log() call as the typed
+      // path so a spoken command shows up in the console exactly like a
+      // typed one would.
+      log('user', text)
       if (/^\s*(close|exit|dismiss|hide)\b/i.test(text)) {
         sfx.whooshOut()
         setPanel(null)

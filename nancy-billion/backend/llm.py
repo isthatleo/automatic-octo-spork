@@ -1227,21 +1227,41 @@ class FallbackLLM(LLMBackend):
     # inference) could block the entire chain well past a minute with
     # nothing to cut it short and move to the next backend.
     BACKEND_TIMEOUT_S = 20.0
+    # Once a backend fails with a non-transient error (quota/credit/auth --
+    # see is_transient_llm_error), skip it for this long instead of paying
+    # its real network round-trip cost again on every single subsequent
+    # message. Confirmed live: Gemini's free tier hit a hard "20 requests
+    # per DAY" quota and Anthropic's credit balance was exhausted, and both
+    # failures are only ever going to repeat identically until something
+    # external changes (quota reset tomorrow, credits purchased) -- without
+    # this, every message pays ~2 guaranteed-dead real HTTP round trips
+    # before ever reaching a backend that works, which measured live as
+    # several extra seconds added to every single reply.
+    NON_TRANSIENT_COOLDOWN_S = 300.0
 
     def __init__(self, backends):
         self.backends = backends
+        self._cooldown_until: Dict[str, float] = {}
         logger.info(f"FallbackLLM initialized with {len(self.backends)} backends")
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
         last_exception = None
         for backend in self.backends:
+            name = backend.__class__.__name__
             # Cloud backends set self.api_key from an env var and always fail
             # the same way when it's missing -- skip immediately instead of
             # burning up to BACKEND_TIMEOUT_S waiting on a call that can never
             # succeed. Local/no-key backends (Ollama, Fury, llama.cpp, Dummy)
             # have no api_key attribute at all, so they're never skipped here.
             if hasattr(backend, "api_key") and not backend.api_key:
-                logger.info(f"Skipping LLM backend {backend.__class__.__name__}: no API key configured")
+                logger.info(f"Skipping LLM backend {name}: no API key configured")
+                continue
+            cooldown_until = self._cooldown_until.get(name)
+            if cooldown_until and time.monotonic() < cooldown_until:
+                logger.info(
+                    f"Skipping LLM backend {name}: in cooldown for another "
+                    f"{cooldown_until - time.monotonic():.0f}s (last failure was quota/credit/auth, not transient)"
+                )
                 continue
             call_start = time.monotonic()
             try:
@@ -1273,6 +1293,7 @@ class FallbackLLM(LLMBackend):
                 if not (result or "").strip():
                     raise RuntimeError(f"{backend.__class__.__name__} returned an empty response")
                 logger.info(f"LLM backend {backend.__class__.__name__} succeeded")
+                self._cooldown_until.pop(name, None)  # clear any stale cooldown now that it's working again
                 # Backends that can extract real provider-reported usage from
                 # their own raw API response stash it on self._last_usage
                 # (see e.g. AnthropicLLM/GroqLLM.generate) -- picked up here
@@ -1303,6 +1324,8 @@ class FallbackLLM(LLMBackend):
                 usage_analytics.record_call(
                     backend.__class__.__name__, time.monotonic() - call_start, prompt, "", False, error=str(e),
                 )
+                if not is_transient_llm_error(e):
+                    self._cooldown_until[name] = time.monotonic() + self.NON_TRANSIENT_COOLDOWN_S
                 last_exception = e
                 continue
         # If all backends failed, raise the last exception. `last_exception`

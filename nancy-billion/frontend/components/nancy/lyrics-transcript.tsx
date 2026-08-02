@@ -154,15 +154,30 @@ export function LyricsTranscript({
               )}
             >
               {line.words.map((w, i) => {
-                const active = isCurrent && i <= currentIdx
                 const isNow = isCurrent && i === currentIdx
+                // Real gradient fade instead of a two-state active/dim
+                // switch: words already spoken fade out gradually the
+                // further behind the current word they are (like a real
+                // karaoke/lyrics app), and upcoming words stay softly
+                // legible rather than a single flat dim block. The 500ms
+                // ease-out transition on opacity is what actually makes
+                // each word visibly FADE as the wave passes over it,
+                // instead of snapping between two fixed states.
+                let wordOpacity = 0.45
+                if (isCurrent) {
+                  const distance = i - currentIdx
+                  wordOpacity = distance <= 0
+                    ? Math.max(0.22, 1 - Math.abs(distance) * 0.16)
+                    : Math.max(0.35, 0.5 - distance * 0.03)
+                }
                 return (
                   <span
                     key={`${line.id}-${i}`}
                     ref={isNow ? activeWordRef : undefined}
+                    style={{ opacity: wordOpacity }}
                     className={cn(
-                      'mx-[0.15em] inline-block transition-all duration-300',
-                      active ? 'text-primary' : 'opacity-45',
+                      'mx-[0.15em] inline-block transition-opacity duration-500 ease-out',
+                      isCurrent && i <= currentIdx ? 'text-primary' : 'text-foreground/80',
                       isNow && 'text-primary drop-shadow-[0_0_10px_var(--hud)]',
                     )}
                   >

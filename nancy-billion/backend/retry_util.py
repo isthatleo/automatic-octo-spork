@@ -85,7 +85,10 @@ async def retry_async(
 # Anthropic credit balance, a 429 quota error) never succeeds on retry, so
 # retrying it would only add latency for a call that's going to fail again
 # regardless of the fallback chain's own real per-backend timeout budget.
-_NON_TRANSIENT_MARKERS = ("credit balance", "invalid_request_error", "invalid api key", "unauthorized", "not configured")
+_NON_TRANSIENT_MARKERS = (
+    "credit balance", "invalid_request_error", "invalid api key", "unauthorized", "not configured",
+    "quota", "resource_exhausted", " 429", "rate limit", "rate_limit",
+)
 
 
 def is_transient_llm_error(exc: BaseException) -> bool:
