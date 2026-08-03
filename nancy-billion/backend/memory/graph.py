@@ -21,6 +21,12 @@ from enum import Enum
 logger = logging.getLogger(__name__)
 
 
+class UntrustedMemoryRejected(Exception):
+    """Raised when a write is refused for failing Book I Ch.10's truthfulness
+    bar. Callers should treat this as "this claim was not worth remembering",
+    never as a system error -- it is the guard working."""
+
+
 class MemoryType(Enum):
     """Types of memories Nancy can store"""
     CONVERSATION = "conversation"
@@ -44,12 +50,34 @@ class MemoryNode:
     links: List[str] = None  # IDs of related memories
     importance: float = 0.5  # 0.0 - 1.0
     created_at: str = None
+    # Book V Ch.5 mandates twelve scoring dimensions; `importance` alone was
+    # the only one implemented. These are the two that Book I Ch.10 makes
+    # non-optional -- how sure we are, and where it came from. Without them a
+    # fabricated agent claim and a measured system fact were indistinguishable
+    # once stored, which is exactly how invented readings became "facts"
+    # Nancy would later recite. Defaults are deliberately low/unknown so any
+    # writer that does not declare provenance is treated as untrusted.
+    confidence: float = 0.3
+    provenance: str = "unknown"   # see trust.Provenance
+    source: Optional[str] = None  # tool name, URL, document id, agent key
 
     def __post_init__(self):
         if self.links is None:
             self.links = []
         if self.created_at is None:
             self.created_at = datetime.now().isoformat()
+        # Confidence can never exceed what the provenance permits -- a
+        # recalled claim cannot be stored as certain no matter how the
+        # caller scores it.
+        try:
+            from trust import CONFIDENCE_CEILING, Provenance
+
+            ceiling = CONFIDENCE_CEILING.get(Provenance(self.provenance), 0.3)
+            self.confidence = max(0.0, min(float(self.confidence), ceiling))
+        except Exception:
+            # trust.py unavailable (standalone import of this module) --
+            # fall back to the untrusted default rather than trusting blindly.
+            self.confidence = max(0.0, min(float(self.confidence), 0.3))
 
     def to_dict(self):
         """Convert to dictionary for JSON serialization"""
@@ -211,7 +239,10 @@ class MemoryGraph:
         content: str,
         memory_type: MemoryType,
         metadata: Dict = None,
-        importance: float = 0.5
+        importance: float = 0.5,
+        confidence: float = 0.3,
+        provenance: str = "unknown",
+        source: Optional[str] = None,
     ) -> MemoryNode:
         """
         Add a new memory to the graph.
@@ -223,6 +254,34 @@ class MemoryGraph:
         """
         if metadata is None:
             metadata = {}
+
+        # Book I Ch.10 enforced at the storage boundary. Memory is Foundation
+        # One, so a fabrication written here is recited as fact indefinitely --
+        # the damage compounds rather than fades. Anything that claims a live
+        # observation it could not have made is refused outright, and so is
+        # anything below the trust floor. Chat may still SHOW a qualified
+        # version (see trust.annotate_uncertainty); long-term memory may not
+        # keep it.
+        try:
+            from trust import MEMORY_TRUST_FLOOR, Provenance, fabrication_reason
+
+            reason = fabrication_reason(content)
+            if reason:
+                logger.warning("Refusing to store fabricated claim (%s): %.90s", reason, content)
+                raise UntrustedMemoryRejected(reason)
+            ceiling_ok = float(confidence) >= MEMORY_TRUST_FLOOR
+            if not ceiling_ok and Provenance(provenance) in (Provenance.RECALLED, Provenance.UNKNOWN):
+                logger.info(
+                    "Refusing to store low-trust memory (provenance=%s confidence=%.2f): %.90s",
+                    provenance, float(confidence), content,
+                )
+                raise UntrustedMemoryRejected(
+                    f"provenance={provenance} confidence={confidence:.2f} below floor {MEMORY_TRUST_FLOOR}"
+                )
+        except UntrustedMemoryRejected:
+            raise
+        except Exception:
+            pass  # trust.py unavailable -- do not block writes on the guard itself
 
         # Generate ID
         node_id = self._generate_id(content)
@@ -237,6 +296,9 @@ class MemoryGraph:
 
         # Create node
         node = MemoryNode(
+            confidence=confidence,
+            provenance=provenance,
+            source=source,
             id=node_id,
             type=memory_type,
             content=content,
@@ -275,6 +337,9 @@ class MemoryGraph:
         memory_type: MemoryType,
         metadata: Dict = None,
         importance: float = 0.5,
+        confidence: float = 0.3,
+        provenance: str = "unknown",
+        source: Optional[str] = None,
     ) -> MemoryNode:
         """Like add_memory, but first checks for an existing node of the
         SAME type whose content is similar enough to be "the same topic
@@ -314,7 +379,10 @@ class MemoryGraph:
             self._save_to_disk()
             return best_match
 
-        return self.add_memory(content, memory_type, metadata, importance)
+        return self.add_memory(
+            content, memory_type, metadata, importance,
+            confidence=confidence, provenance=provenance, source=source,
+        )
 
     def query_with_scores(self, query_text: str, top_k: int = 10, threshold: float = 0.3) -> List[Tuple[MemoryNode, float]]:
         """Same real semantic search as query(), but also returns each

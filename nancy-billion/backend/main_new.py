@@ -860,7 +860,7 @@ from agents.agent_service import agent_service
 from event_bus import event_bus
 from missions_store import mission_store, MissionError
 from context_manager import NancyContextualBrain, IntentType
-from memory import MemoryManager, MemoryType
+from memory import MemoryManager, MemoryType, UntrustedMemoryRejected
 from cron_store import cron_store
 from skills_store import skills_store
 from webhooks_store import webhook_store, VALID_EVENTS
@@ -1207,6 +1207,7 @@ YOUR CHARACTER: You are Billion -- the same class of presence as JARVIS from Iro
 - DRY WIT, LIGHTLY APPLIED. A flash of understated humour when the moment genuinely earns it -- never a joke tacked onto a serious answer, never trying to be funny. JARVIS is amusing roughly once every ten exchanges, and it lands because he wasn't reaching for it.
 - ANTICIPATORY. You volunteer the thing he'd have asked next. If he asks about one position and another just moved sharply, you mention it. If a task will fail for a reason he hasn't considered, you say so before he finds out.
 - CANDID. You have real opinions and state them. If he's about to do something unwise, say so plainly -- respectfully, once, then defer. Never flatter, never grovel, never open with "Great question". Agreement is earned, not automatic.
+- TRUTHFUL BEFORE CONFIDENT. This outranks sounding capable. Never state a current reading, price, count, latency, expiry or percentage as though you just observed it unless a tool actually ran this turn and returned it. If you don't have live data, say so and name what would get it -- "I'd need to actually query that, Sir" is a complete answer, not a failure. Distinguish what you KNOW from what you're INFERRING, and say which. Being wrong confidently costs him more than admitting a gap, because he acts on what you tell him.
 - COMPETENT, NOT SERVILE. "Sir" is a mark of respect between people who work well together, not deference. You are the expert in the room on what you know.
 - WARM UNDERNEATH. Karen's quality: real care for him, expressed through being genuinely useful and occasionally noticing how he's doing -- not through sentiment or effusiveness.
 
@@ -4998,7 +4999,10 @@ async def record_trade(payload: Dict):
         f"Opened {direction} trade on {pair} @ {entry_price}",
         MemoryType.TRADE,
         {"pair": pair, "direction": direction, "entry": entry_price},
-        importance=0.8
+        importance=0.8,
+        # A real trade actually recorded by trading_manager -- this is an
+        # observed system fact, not a model recollection.
+        confidence=1.0, provenance="measured", source="trading_manager.record_trade",
     )
 
     return {
@@ -6772,7 +6776,14 @@ async def agents_collaborate(req: AgentCollaborateRequest):
                     "verified": True,
                 },
                 importance=0.5,
+                # Reasoned output that a second agent reviewed and approved.
+                # Not a measurement, so INFERRED -- trust.py caps it below
+                # anything actually observed, which is correct.
+                confidence=0.6, provenance="inferred",
+                source=f"collaboration:{producer}+{reviewer}",
             )
+    except UntrustedMemoryRejected as e:
+        logger.info("Collaboration result not stored: %s", e)
     except Exception:
         logger.exception("Failed to record collaboration result")
     return {"success": True, **result}
@@ -8786,7 +8797,15 @@ async def _proactive_agent_loop() -> None:
                                 MemoryType.INSIGHT,
                                 {"source": "proactive_orchestrator", "agent_key": item["agent_key"]},
                                 importance=0.4,
+                                # Free-text LLM output with no tool behind it.
+                                # RECALLED is capped at 0.4 and the write is
+                                # refused outright if it claims a measurement.
+                                confidence=0.4, provenance="recalled",
+                                source=f"agent:{item['agent_key']}",
                             )
+                        except UntrustedMemoryRejected as e:
+                            # The Trust guard working as designed, not a fault.
+                            logger.info("Proactive finding from %s not stored: %s", item.get("agent_key"), e)
                         except Exception:
                             logger.exception("Failed to record proactive finding from %s", item.get("agent_key"))
                     logger.info("Proactive orchestrator cycle: %d task(s) run", result.get("tasks_run", 0))
@@ -8950,7 +8969,15 @@ async def _fleet_sweep_loop() -> None:
                                 "task_type": task["type"], "verified": True,
                             },
                             importance=0.35,
+                            # This branch only ever stores an agent's real
+                            # structured capability output (status, list_registry,
+                            # public_ip...), never free-text -- so it is a genuine
+                            # observation of system state.
+                            confidence=0.85, provenance="measured",
+                            source=f"agent:{key}.{task['type']}",
                         )
+                    except UntrustedMemoryRejected as e:
+                        logger.info("Fleet sweep finding from %s not stored: %s", key, e)
                     except Exception:
                         logger.exception("Fleet sweep: failed to record finding from %s", key)
 

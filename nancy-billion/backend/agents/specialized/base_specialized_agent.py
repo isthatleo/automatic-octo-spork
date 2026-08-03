@@ -249,11 +249,36 @@ class SpecializedAgent(BaseAgent):
             history = _current_conversation_context.get()
             history_block = f"\n\nRecent conversation so far:\n{history}" if history.strip() else ""
             peer_block = await self._maybe_consult_expert(query)
-            prompt = f"{system}{history_block}{peer_block}\n\nUser: {query}\n\nResponse:"
-            return await asyncio.wait_for(
+            # Book I Ch.10 / Book IV Oath: this path answers from model
+            # weights with NO tool access, so it must not report readings it
+            # never took. See trust.py for the four real fabrications this
+            # directive exists to prevent.
+            from trust import NO_FABRICATION_DIRECTIVE
+
+            prompt = (
+                f"{system}\n\n{NO_FABRICATION_DIRECTIVE}"
+                f"{history_block}{peer_block}\n\nUser: {query}\n\nResponse:"
+            )
+            answer = await asyncio.wait_for(
                 llm_backend.generate(prompt, max_tokens=max_tokens, temperature=temperature),
                 timeout=_LLM_ANSWER_TIMEOUT_S,
             )
+            # Output-side guard. The directive above reduces fabrication but
+            # cannot guarantee it -- a prompt is a request, not an invariant.
+            # Rather than suppress a whole otherwise-useful answer, qualify it
+            # honestly so the user is never told an unmeasured specific as
+            # fact. Storage paths apply the stricter rule and DROP such claims
+            # (see trust.Claim.is_trustworthy).
+            from trust import annotate_uncertainty, fabrication_reason
+
+            reason = fabrication_reason(answer or "")
+            if reason:
+                self.logger.warning(
+                    "%s produced an unverified measurement -- qualifying it: %s",
+                    self.agent_name, reason,
+                )
+                answer = annotate_uncertainty(answer)
+            return answer
         except asyncio.TimeoutError:
             # Logged distinctly: asyncio.TimeoutError stringifies to an EMPTY
             # string, so the generic handler below reported it as
