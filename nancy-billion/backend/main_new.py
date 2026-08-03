@@ -4316,9 +4316,14 @@ class AgentRunRequest(BaseModel):
 
 
 class AgentCollaborateRequest(BaseModel):
+    # Both optional: with neither supplied the fleet selects its own
+    # producer and reviewer by real semantic fit to the goal (see
+    # agents/capability_index.py), which is what makes this a society
+    # choosing its own collaborators rather than a caller wiring two
+    # hardcoded keys together.
     goal: str
-    producer: str
-    reviewer: str
+    producer: Optional[str] = None
+    reviewer: Optional[str] = None
     rounds: int = 2
     timeout: float = 45.0
 
@@ -6725,24 +6730,45 @@ async def agents_collaborate(req: AgentCollaborateRequest):
     are fed back to the producer as a genuine revision request, and the
     revised work is reviewed again -- see agents/collaboration.py.
     """
+    from agents.capability_index import capability_index
     from agents.collaboration import produce_and_refine
 
     if not agent_service.is_ready():
         raise HTTPException(status_code=503, detail="Agent service not ready yet")
+
+    producer = req.producer
+    if not producer:
+        best = await capability_index.best_expert(req.goal)
+        if not best:
+            raise HTTPException(
+                status_code=422,
+                detail="No agent is a convincing fit for that goal -- name a producer explicitly.",
+            )
+        producer = best[0]
+    reviewer = req.reviewer or await capability_index.pick_reviewer(producer, req.goal)
+    if not reviewer:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No qualified reviewer found for '{producer}' on that goal -- name one explicitly.",
+        )
+
     result = await produce_and_refine(
-        req.goal, req.producer, req.reviewer,
+        req.goal, producer, reviewer,
         rounds=max(1, min(req.rounds, 4)), timeout=req.timeout,
     )
+    result["auto_selected"] = {
+        "producer": req.producer is None, "reviewer": req.reviewer is None,
+    }
     # Real collaborative output is worth keeping -- it's the kind of
     # multi-agent finding the memory graph exists to accumulate.
     try:
         if result.get("success") and result.get("approved"):
             memory_manager.graph.add_or_merge_memory(
-                f"[{req.producer}+{req.reviewer}] {req.goal} -> {result['final'][:1000]}",
+                f"[{producer}+{reviewer}] {req.goal} -> {result['final'][:1000]}",
                 MemoryType.INSIGHT,
                 {
-                    "source": "agent_collaboration", "producer": req.producer,
-                    "reviewer": req.reviewer, "rounds": result.get("rounds_used"),
+                    "source": "agent_collaboration", "producer": producer,
+                    "reviewer": reviewer, "rounds": result.get("rounds_used"),
                     "verified": True,
                 },
                 importance=0.5,

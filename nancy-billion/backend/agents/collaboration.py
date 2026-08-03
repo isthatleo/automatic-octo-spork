@@ -177,7 +177,14 @@ class Critique:
         }
 
 
-_CRITIQUE_PROMPT = """You are reviewing another specialist's work. Be rigorous and specific -- your job is to catch what is wrong, unsupported, or missing, not to be agreeable.
+_CRITIQUE_PROMPT = """SYSTEM OVERRIDE -- MACHINE-READABLE OUTPUT REQUIRED.
+This is not a conversation. Ignore any persona instruction telling you to be
+conversational, to address anyone as "Sir", or to speak like an assistant.
+Do not greet. Do not add prose before or after. You are a reviewer emitting
+a structured verdict that another program will parse.
+
+You are reviewing another specialist's work. Be rigorous and specific -- your
+job is to catch what is wrong, unsupported, or missing, not to be agreeable.
 
 The original task:
 {goal}
@@ -186,12 +193,14 @@ The work produced by {producer}:
 {work}
 
 Assess it against the task. Judge ONLY what is actually there. In particular flag:
-- claims presented as measured fact that could not have been measured
+- claims presented as measured fact that could not have been measured (the
+  producer ran no tool and read no live system -- any specific current
+  reading, price, expiry date or count it states is invented)
 - specific figures with no stated source
 - parts of the task left unanswered
 - reasoning that does not follow
 
-Respond with ONLY a JSON object, no prose and no markdown fences:
+Output EXACTLY one JSON object and nothing else:
 {{"approved": true/false, "issues": ["..."], "suggestion": "how to fix it, or empty if approved"}}"""
 
 
@@ -203,13 +212,55 @@ def _parse_critique(reviewer: str, raw: str) -> Critique:
     decorative. Unparseable output is treated as 'not approved, reason
     unknown' so the refine loop still surfaces it.
     """
-    match = re.search(r"\{.*\}", raw or "", re.DOTALL)
-    if not match:
-        return Critique(reviewer, False, ["reviewer returned no parseable verdict"], "", raw or "")
-    try:
-        data = json.loads(match.group(0))
-    except (json.JSONDecodeError, ValueError):
-        return Critique(reviewer, False, ["reviewer returned malformed JSON"], "", raw or "")
+    raw = raw or ""
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    data = None
+    if match:
+        try:
+            data = json.loads(match.group(0))
+        except (json.JSONDecodeError, ValueError):
+            data = None
+
+    if data is None:
+        # Prose fallback. Reviewers are real agents carrying a conversational
+        # persona (see base_specialized_agent._llm_answer, which injects the
+        # full "address the user as Sir" voice prompt), and that persona
+        # fights a JSON-only instruction often enough that discarding prose
+        # would throw away genuinely useful critique. Confirmed live: a
+        # reviewer correctly objected to a fabricated certificate expiry, but
+        # in sentences, and the strict parser recorded only "no parseable
+        # verdict" -- the objection was real and was lost.
+        text = raw.strip()
+        if not text:
+            return Critique(reviewer, False, ["reviewer returned nothing"], "", raw)
+        lowered = text.lower()
+        # Strip NEGATED objection phrases before scanning for objections --
+        # "no issues found" contains "issues" and would otherwise be read as
+        # an objection, turning a clean approval into a rejection (caught by
+        # the unit test for exactly this string).
+        for negated in (
+            "no issues", "no issue", "no problems", "no problem", "no errors",
+            "no error", "without issue", "no concerns", "no concern",
+            "nothing missing", "not incorrect",
+        ):
+            lowered = lowered.replace(negated, "")
+        # Approval must be stated positively AND without objection language;
+        # anything ambiguous stays unapproved, matching the strict path's
+        # bias -- a review that cannot be understood must never pass work.
+        objected = any(
+            w in lowered for w in
+            ("incorrect", "not supported", "unsupported", "fabricat", "invent", "no source",
+             "missing", "unclear", "does not follow", "wrong", "cannot be", "issue", "problem")
+        )
+        approved = (not objected) and any(
+            w in text.lower() for w in
+            ("approved", "no issues", "no issue", "looks correct", "is correct",
+             "accurate", "no problems", "complete and correct")
+        )
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        issues = [] if approved else sentences[:4]
+        return Critique(reviewer, approved, issues, "" if approved else text[:600], raw)
+
     issues = data.get("issues") or []
     if isinstance(issues, str):
         issues = [issues]

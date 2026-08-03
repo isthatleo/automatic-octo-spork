@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 # and defaulted high enough for that real worst case.
 _LLM_ANSWER_TIMEOUT_S = float(os.getenv("AGENT_LLM_TIMEOUT_S", "60"))
 
+# Autonomous peer consultation (see _maybe_consult_expert). On by default --
+# it is the behaviour that makes the fleet a society rather than a rotation
+# -- but a single switch matters: every handoff is a real extra agent run,
+# so a cost-sensitive or offline deployment needs to turn it off without
+# editing code.
+AGENT_AUTO_CONSULT = os.getenv("AGENT_AUTO_CONSULT", "1").strip().lower() in ("1", "true", "yes")
+
 
 class SpecializedAgent(BaseAgent):
     """
@@ -122,6 +129,59 @@ class SpecializedAgent(BaseAgent):
         answer = str(result.get("response") or result.get("result") or "").strip()
         return answer or None
 
+    async def _maybe_consult_expert(self, query: str) -> str:
+        """Recognise a question outside this agent's expertise and consult
+        the specialist who actually owns it, unprompted.
+
+        This is the step from "can collaborate" to "does collaborate". It
+        lives in _llm_answer's path deliberately: that is the one method all
+        ~70 specialists inherit, so autonomous consultation arrives fleet-
+        wide without editing 70 files -- and it only ever fires on the
+        FREE-TEXT fallback path, never on an agent's real structured
+        capabilities, which by definition already sit inside its expertise.
+
+        Returns prompt-ready peer input, or "" to answer alone. Deliberately
+        conservative -- a consult costs a real agent run, so it fires only
+        when another agent is BOTH a convincing fit in absolute terms AND
+        materially better than this agent (see CapabilityIndex.should_hand_off).
+
+        Never raises: an unavailable peer must degrade to answering alone.
+        """
+        if not AGENT_AUTO_CONSULT:
+            return ""
+        try:
+            from ..capability_index import capability_index
+            from ..collaboration import current_chain
+
+            # Only originate a consult at the top of a chain. Without this,
+            # a consulted agent could consult onward on the same question,
+            # turning one handoff into a cascade -- the depth cap would
+            # eventually stop it, but only after paying for every hop.
+            if current_chain():
+                return ""
+
+            me = self._registry_key()
+            verdict = await capability_index.should_hand_off(me, query)
+            if not verdict:
+                return ""
+            expert_key, expert_score, own_score = verdict
+            self.logger.info(
+                "auto-consult: %s (fit %.2f) deferring to %s (fit %.2f)",
+                me, own_score, expert_key, expert_score,
+            )
+            answer = await self.consult(expert_key, query)
+            if not answer:
+                return ""
+            return (
+                f"\n\nYou consulted {expert_key}, the specialist whose domain this question "
+                f"genuinely belongs to. Their input:\n{answer[:1500]}\n\n"
+                "Use it where it is sound, and say plainly that you drew on their expertise. "
+                "Do not contradict it without a concrete reason."
+            )
+        except Exception as e:
+            self.logger.debug("auto-consult skipped for %s: %s", self.agent_name, e)
+            return ""
+
     def _registry_key(self) -> str:
         """This agent's key as agent_service knows it -- needed so a consult
         can record an accurate delegation chain. Falls back to the domain,
@@ -188,7 +248,8 @@ class SpecializedAgent(BaseAgent):
             )
             history = _current_conversation_context.get()
             history_block = f"\n\nRecent conversation so far:\n{history}" if history.strip() else ""
-            prompt = f"{system}{history_block}\n\nUser: {query}\n\nResponse:"
+            peer_block = await self._maybe_consult_expert(query)
+            prompt = f"{system}{history_block}{peer_block}\n\nUser: {query}\n\nResponse:"
             return await asyncio.wait_for(
                 llm_backend.generate(prompt, max_tokens=max_tokens, temperature=temperature),
                 timeout=_LLM_ANSWER_TIMEOUT_S,
