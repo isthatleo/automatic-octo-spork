@@ -181,6 +181,15 @@ const alertStatusListeners = new Set<(status: AlertStatusPayload) => void>()
  *  result, 'red' on an error or a genuine security/attack signal. */
 const orbPulseListeners = new Set<(color: 'green' | 'yellow' | 'red', reason: string) => void>()
 
+/** Live per-subsystem activity, 0-1 per Book VI Ch.7's six rings. Driven by
+ *  real events server-side (agent runs, memory writes, LLM calls) -- see
+ *  backend/subsystem_activity.py. */
+export interface SubsystemLevels {
+  health: number; memory: number; knowledge: number
+  agent: number; reasoning: number; network: number
+}
+const subsystemListeners = new Set<(levels: SubsystemLevels, quiet: boolean) => void>()
+
 function connect(): Promise<WebSocket> {
   if (socket && socket.readyState === WebSocket.OPEN) return Promise.resolve(socket)
   if (connecting) return connecting
@@ -246,6 +255,13 @@ function connect(): Promise<WebSocket> {
       if (msg.type === 'alert_status') {
         const status = msg.status as AlertStatusPayload
         for (const cb of alertStatusListeners) cb(status)
+        return
+      }
+
+      if (msg.type === 'subsystem_activity') {
+        const levels = msg.levels as SubsystemLevels
+        const quiet = Boolean(msg.quiet)
+        for (const cb of subsystemListeners) cb(levels, quiet)
         return
       }
 
@@ -318,7 +334,7 @@ function connect(): Promise<WebSocket> {
       // Auto-reconnect only while something actually needs the proactive
       // push channel (a trader watching for a live NFP/CPI alert shouldn't
       // lose the connection silently if it drops mid-session).
-      if ((economicAlertListeners.size > 0 || domainEventListeners.size > 0 || alertStatusListeners.size > 0 || orbPulseListeners.size > 0) && !reconnectTimer) {
+      if ((economicAlertListeners.size > 0 || domainEventListeners.size > 0 || alertStatusListeners.size > 0 || orbPulseListeners.size > 0 || subsystemListeners.size > 0) && !reconnectTimer) {
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null
           connect().catch(() => {
@@ -427,6 +443,17 @@ export function onAlertStatus(callback: (status: AlertStatusPayload) => void): (
  * red on an error or attack signal. Eagerly opens the WS connection.
  * Returns an unsubscribe function.
  */
+/** Subscribe to live subsystem activity for the Orb's rings (Book VI Ch.7). */
+export function onSubsystemActivity(
+  callback: (levels: SubsystemLevels, quiet: boolean) => void,
+): () => void {
+  subsystemListeners.add(callback)
+  connect().catch((err) => console.warn('[ws-client] subsystem-activity connect failed:', err))
+  return () => {
+    subsystemListeners.delete(callback)
+  }
+}
+
 export function onOrbPulse(callback: (color: 'green' | 'yellow' | 'red', reason: string) => void): () => void {
   orbPulseListeners.add(callback)
   connect().catch((err) => console.warn('[ws-client] orb-pulse subscription connect failed:', err))

@@ -291,6 +291,14 @@ class MemoryGraph:
             logger.debug(f"Memory already exists: {node_id}")
             return self.nodes[node_id]
 
+        # Real memory write drives Book VI Ch.7's memory ring.
+        try:
+            from subsystem_activity import subsystem_activity
+
+            subsystem_activity.poke("memory", 0.6)
+        except Exception:
+            pass
+
         # Create embedding
         embedding = self.embedding_engine.embed(content)
 

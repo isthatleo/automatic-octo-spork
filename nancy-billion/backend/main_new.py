@@ -8428,6 +8428,7 @@ async def startup_event():
     asyncio.create_task(_update_dependency_vuln_status())
     asyncio.create_task(_pattern_suggestions_loop())
     asyncio.create_task(_presence_loop())
+    asyncio.create_task(_subsystem_activity_loop())
     asyncio.create_task(_meeting_prep_loop())
     asyncio.create_task(_conversation_idle_watchdog())
     asyncio.create_task(_watch_execution_loop())
@@ -8600,6 +8601,41 @@ async def _meeting_prep_loop() -> None:
                 meeting_prep_store.mark_prepped(event_id)
         except Exception:
             logger.exception("Meeting prep loop failed")
+
+
+async def _subsystem_activity_loop() -> None:
+    """Broadcasts live per-subsystem activity so the Orb's rings reflect real
+    system state (Book VI Ch.7), not fixed timers.
+
+    2Hz: fast enough that a ring visibly responds to a real agent task or
+    memory write, slow enough to be negligible on a socket that already
+    carries audio. Health and network are sampled here rather than poked,
+    since they are continuous conditions rather than discrete events.
+    """
+    from subsystem_activity import subsystem_activity
+
+    while True:
+        await asyncio.sleep(0.5)
+        try:
+            if not manager.active_connections:
+                continue  # nobody watching -- don't do the work
+            # Health: real psutil state, inverted so "unhealthy" lights the ring.
+            try:
+                health = system_monitor.get_comprehensive_health()
+                status = health.get("overall_status", "healthy")
+                subsystem_activity.set_level("health", {"healthy": 0.0, "warning": 0.55}.get(status, 0.95))
+            except Exception:
+                pass
+            # Network: real connected clients.
+            if manager.active_connections:
+                subsystem_activity.set_level("network", min(1.0, 0.15 * len(manager.active_connections)))
+            await manager.broadcast(json.dumps({
+                "type": "subsystem_activity",
+                "levels": subsystem_activity.snapshot(),
+                "quiet": subsystem_activity.is_quiet(),
+            }))
+        except Exception:
+            logger.debug("subsystem activity broadcast failed", exc_info=True)
 
 
 async def _presence_loop() -> None:

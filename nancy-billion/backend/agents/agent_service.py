@@ -213,6 +213,15 @@ class AgentService:
         task_type = str(task_data.get("type", "unknown"))
         start = time.time()
         await event_bus.publish("AGENT_TASK_STARTED", {"agent_key": agent_key, "task_type": task_type})
+        # Real agent activity drives Book VI Ch.7's agent ring. Poked here
+        # because agent_service.run is the single chokepoint every agent
+        # execution passes through -- no caller can bypass it.
+        try:
+            from subsystem_activity import subsystem_activity
+
+            subsystem_activity.poke("agent", 0.5)
+        except Exception:
+            pass
         try:
             result = await asyncio.wait_for(
                 agent.run_task(task_data),

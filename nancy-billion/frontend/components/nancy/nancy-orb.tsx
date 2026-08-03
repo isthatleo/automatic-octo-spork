@@ -3,8 +3,18 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
-import { onOrbPulse } from '@/lib/nancy/ws-client'
+import { onOrbPulse, onSubsystemActivity, type SubsystemLevels } from '@/lib/nancy/ws-client'
 
+/** Book VI Ch.10's cognitive states.
+ *
+ *  The Orb previously tracked voice I/O (idle/listening/thinking/speaking),
+ *  which inverts Ch.4's premise: it is meant to be "the visible heartbeat"
+ *  of the Digital Brain, not a microphone indicator. When the agent fleet
+ *  ran a produce -> critique -> revise cycle, the Orb had no way to show it.
+ *
+ *  'speaking' is retained because it is real and useful even though Ch.10
+ *  does not list it -- the user genuinely needs to know when Nancy holds the
+ *  floor. The cognitive states below are the ones that were missing. */
 export type OrbState =
   | 'idle'
   | 'listening'
@@ -12,6 +22,14 @@ export type OrbState =
   | 'speaking'
   | 'executing'
   | 'alert'
+  // --- Book VI Ch.10 cognitive states ---
+  | 'reasoning'   // multiple rings accelerate, pulse frequency rises
+  | 'researching' // particle density increases
+  | 'recalling'   // memory retrieval: golden threads
+  | 'planning'    // concentric construction grids
+  | 'reflecting'  // movement slows, particles converge, core brightens
+  | 'learning'    // new pathways appear
+  | 'sleeping'    // minimal motion, soft heartbeat
 
 /*
   Aerospace/FUI HUD, built to an exact spec: independent concentric layers
@@ -32,6 +50,11 @@ const BLUE = '#4B8DFF'
 const GOLD = '#DAB249'
 const PLUM = '#978CAD'
 const ALERT_C = '#E54C4A'
+// Book VI Ch.18 binds amber specifically to memory. Cyan/violet are its
+// named accents for the remaining cognitive states.
+const AMBER = '#D9A441'
+const CYAN = '#5FD3E0'
+const VIOLET = '#9B7FE8'
 const PULSE_GREEN = '#2ECC71'
 
 // Real-time transient pulse colors (see backend/main_new.py's _pulse_orb) --
@@ -69,6 +92,17 @@ const PROFILES: Record<OrbState, StateProfile> = {
   speaking:  { color: BLUE,    label: 'Speaking',    arcDuration: 7,  dotDuration: 36, glowRange: [0.55, 0.95], ringPulseMs: null },
   executing: { color: GOLD,    label: 'Working',     arcDuration: 6,  dotDuration: 26, glowRange: [0.5, 0.88], ringPulseMs: 700 },
   alert:     { color: ALERT_C, label: 'Degraded',    arcDuration: 10, dotDuration: 50, glowRange: [0.5, 0.8], ringPulseMs: null },
+
+  // Book VI Ch.10 cognitive states. Motion follows Ch.17's language rather
+  // than taste: fast = urgent, slow = thoughtful, so reasoning accelerates
+  // and reflecting decelerates. Colour follows Ch.18, where amber IS memory.
+  reasoning:   { color: VIOLET,  label: 'Reasoning',   arcDuration: 4,  dotDuration: 18, glowRange: [0.55, 0.95], ringPulseMs: 500 },
+  researching: { color: CYAN,    label: 'Researching', arcDuration: 5,  dotDuration: 22, glowRange: [0.5, 0.9],  ringPulseMs: 620 },
+  recalling:   { color: AMBER,   label: 'Recalling',   arcDuration: 8,  dotDuration: 30, glowRange: [0.6, 0.95], ringPulseMs: 900 },
+  planning:    { color: CYAN,    label: 'Planning',    arcDuration: 6,  dotDuration: 24, glowRange: [0.5, 0.88], ringPulseMs: 760 },
+  reflecting:  { color: PLUM,    label: 'Reflecting',  arcDuration: 16, dotDuration: 64, glowRange: [0.45, 0.92], ringPulseMs: 1400 },
+  learning:    { color: VIOLET,  label: 'Learning',    arcDuration: 9,  dotDuration: 34, glowRange: [0.5, 0.9],  ringPulseMs: 820 },
+  sleeping:    { color: BLUE,    label: 'Resting',     arcDuration: 26, dotDuration: 96, glowRange: [0.18, 0.4], ringPulseMs: 2600 },
 }
 
 interface AmbientParticle { x: number; y: number; driftX: number; driftY: number; duration: number; delay: number; size: number }
@@ -261,6 +295,14 @@ export function NancyOrb({
   // here directly (not passed as a prop) so every mounted orb reflects
   // real backend activity without page.tsx needing to wire it through.
   const [pulseColor, setPulseColor] = useState<string | null>(null)
+  // Book VI Ch.7: each ring is bound to a real subsystem, not a fixed timer.
+  // Ch.3's Purpose principle forbids decorative elements outright, and Ch.24
+  // says remove whatever doesn't communicate state -- so these rings either
+  // carry real data or they shouldn't be on screen. Levels are driven
+  // server-side by actual agent runs, memory writes and LLM calls (see
+  // backend/subsystem_activity.py).
+  const [levels, setLevels] = useState<SubsystemLevels | null>(null)
+  useEffect(() => onSubsystemActivity((next) => setLevels(next)), [])
   const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     return onOrbPulse((color) => {
@@ -384,16 +426,52 @@ export function NancyOrb({
         ))}
 
         <svg viewBox="0 0 100 100" className="absolute inset-0 overflow-visible">
-          {/* layer 5: outer dotted orbit, counter-rotating */}
+          {/* layer 5: outer dotted orbit, counter-rotating.
+              Bound to real AGENT activity (Book VI Ch.7 ring 4): it brightens
+              and accelerates when agents are genuinely running, so the ring
+              reports the fleet rather than decorating the core. */}
           <motion.g
             style={{ transformOrigin: '50px 50px' }}
             animate={{ rotate: -360 }}
-            transition={{ duration: profile.dotDuration, repeat: Infinity, ease: 'linear' }}
+            transition={{
+              // Real agent load speeds the ring up to ~2.5x. Ch.17: fast =
+              // urgent. At rest it returns to the profile's calm baseline.
+              duration: profile.dotDuration / (1 + (levels?.agent ?? 0) * 1.5),
+              repeat: Infinity, ease: 'linear',
+            }}
           >
             {dots.map((d, i) => (
-              <circle key={i} cx={d.x} cy={d.y} r={0.55} fill="white" fillOpacity={0.35} />
+              <circle
+                key={i} cx={d.x} cy={d.y}
+                r={0.55 + (levels?.agent ?? 0) * 0.35}
+                fill="white"
+                // Genuinely idle fleet stays dim; a busy one is clearly lit.
+                fillOpacity={0.35 + (levels?.agent ?? 0) * 0.5}
+              />
             ))}
           </motion.g>
+
+          {/* Book VI Ch.7 rings 2 & 5: MEMORY and REASONING, each an arc whose
+              sweep length is that subsystem's real activity level. They are
+              invisible at rest by design -- Ch.3 Silence, and an always-on
+              indicator communicates nothing. Amber for memory is Ch.18's
+              explicit binding. */}
+          {(levels?.memory ?? 0) > 0.02 && (
+            <circle
+              cx="50" cy="50" r="38" fill="none" stroke={AMBER} strokeWidth="0.8"
+              strokeLinecap="round" opacity={0.25 + (levels?.memory ?? 0) * 0.6}
+              strokeDasharray={`${(levels?.memory ?? 0) * 239} 239`}
+              transform="rotate(-90 50 50)"
+            />
+          )}
+          {(levels?.reasoning ?? 0) > 0.02 && (
+            <circle
+              cx="50" cy="50" r="41" fill="none" stroke={VIOLET} strokeWidth="0.8"
+              strokeLinecap="round" opacity={0.25 + (levels?.reasoning ?? 0) * 0.6}
+              strokeDasharray={`${(levels?.reasoning ?? 0) * 257} 257`}
+              transform="rotate(90 50 50)"
+            />
+          )}
 
           {/* longer, near-semi-circle arc -- innermost of the two, white,
               counter-rotating */}

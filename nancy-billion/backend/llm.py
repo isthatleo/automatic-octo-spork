@@ -1363,6 +1363,13 @@ class FallbackLLM(LLMBackend):
             call_start = time.monotonic()
             try:
                 logger.info(f"Trying LLM backend: {name}")
+                # Real inference drives Book VI Ch.7's reasoning ring.
+                try:
+                    from subsystem_activity import subsystem_activity
+
+                    subsystem_activity.poke("reasoning", 0.5)
+                except Exception:
+                    pass
                 # One real, fast retry for a genuinely transient failure
                 # (timeout/connection reset) before conceding this backend --
                 # never for a credit/auth/quota error, which won't succeed on
