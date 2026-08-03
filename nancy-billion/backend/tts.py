@@ -238,7 +238,15 @@ def get_tts_backend():
     # module docstring for the full comparison and why that ratio, not any
     # chunking strategy, was the real cause of multi-minute waits before
     # Billion started speaking.
-    backend_type = os.getenv("TTS_BACKEND", "piper").lower()
+    backend_type = os.getenv("TTS_BACKEND", "kokoro").lower()
+    if backend_type == "kokoro":
+        try:
+            from kokoro_tts import KokoroTTSBackend
+
+            return KokoroTTSBackend()
+        except Exception as e:
+            logger.warning(f"Kokoro backend unavailable ({e}), falling back to pyttsx3")
+            return Pyttsx3TTS()
     if backend_type == "piper":
         try:
             from piper_tts import PiperTTSBackend

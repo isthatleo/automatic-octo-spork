@@ -73,7 +73,22 @@ beautifulsoup4>=4.12.0
 # capability with no safe-by-default subset.
 pyautogui>=0.9.54
 
-# Piper -- the DEFAULT local neural TTS (piper_tts.py). Chosen over
+# Kokoro-82M -- the DEFAULT local neural TTS (kokoro_tts.py). Chosen after
+# benchmarking all three engines on this hardware: it is ~2x faster than
+# NeuTTS (full brief 17.1s vs ~29s, running at ~1.0x realtime) while being a
+# genuinely higher-quality model -- it places at/near the top of the
+# human-rated TTS Spaces Arena at only 82M params, and its bf_emma British
+# female voice is its highest-graded en_GB voice. kokoro-onnx (not the
+# `kokoro` package) is used deliberately: the latter pulls in spacy, which
+# has no wheel for this environment's Python 3.14 and fails to build.
+# The model + voice weights are a separate ~350MB download (not pip
+# installable), fetched once into data/kokoro/ from
+# https://github.com/thewh1teagle/kokoro-onnx/releases (model-files-v1.0):
+#   kokoro-v1.0.onnx  and  voices-v1.0.bin
+kokoro-onnx>=0.4.0
+soundfile>=0.13.0
+
+# Piper -- an alternative local neural TTS (piper_tts.py). Chosen over
 # NeuTTS-nano purely on measured speed on this hardware: same 73-char text,
 # NeuTTS 18.8s vs Piper 0.53s (~3x slower than realtime vs ~8x faster).
 # That ratio is what makes a voice-first <6s reply target achievable at all.
