@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from abc import abstractmethod
@@ -16,6 +17,14 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 from ..base import BaseAgent, _current_conversation_context
 
 logger = logging.getLogger(__name__)
+
+# A plain domain question answers well inside 20s, but a collaboration
+# revision round (see agents/collaboration.py) sends the previous answer,
+# every issue raised and the reviewer's suggestion back in one prompt --
+# several times longer, and it reliably blew a hardcoded 20s ceiling,
+# returning nothing and reading as "the agent had no answer". Configurable
+# and defaulted high enough for that real worst case.
+_LLM_ANSWER_TIMEOUT_S = float(os.getenv("AGENT_LLM_TIMEOUT_S", "60"))
 
 
 class SpecializedAgent(BaseAgent):
@@ -85,6 +94,48 @@ class SpecializedAgent(BaseAgent):
                 "error":       str(exc),
             }
 
+    async def consult(self, agent_key: str, question: str, *, timeout: float = 45.0) -> Optional[str]:
+        """Ask another specialist a real question mid-task.
+
+        The sideways edge every agent previously lacked -- see
+        agents/collaboration.py. Inherited by all ~70 specialists, so an
+        agent that hits a genuine gap in its own expertise can consult the
+        specialist who has it instead of guessing (or worse, fabricating).
+
+        Returns None rather than raising when the consult is refused
+        (cycle, depth cap, unknown agent) or fails: a peer being
+        unavailable must degrade to "answer it yourself", never break the
+        task that asked.
+        """
+        from ..collaboration import DelegationRefused, consult as _consult
+
+        try:
+            result = await _consult(
+                agent_key, question, from_agent_key=self._registry_key(), timeout=timeout,
+            )
+        except DelegationRefused as e:
+            self.logger.info("consult refused (%s -> %s): %s", self.agent_name, agent_key, e)
+            return None
+        except Exception as e:
+            self.logger.warning("consult failed (%s -> %s): %s", self.agent_name, agent_key, e)
+            return None
+        answer = str(result.get("response") or result.get("result") or "").strip()
+        return answer or None
+
+    def _registry_key(self) -> str:
+        """This agent's key as agent_service knows it -- needed so a consult
+        can record an accurate delegation chain. Falls back to the domain,
+        which is what the registry keys are derived from."""
+        try:
+            from ..agent_service import agent_service
+
+            for key, agent in agent_service._agents.items():
+                if agent is self:
+                    return key
+        except Exception:
+            pass
+        return self.domain.replace("-", "_")
+
     async def _llm_answer(self, query: str, *, max_tokens: int = 900, temperature: float = 0.5) -> Optional[str]:
         """
         Real LLM-backed answer to a free-text query, scoped to this agent's
@@ -140,8 +191,20 @@ class SpecializedAgent(BaseAgent):
             prompt = f"{system}{history_block}\n\nUser: {query}\n\nResponse:"
             return await asyncio.wait_for(
                 llm_backend.generate(prompt, max_tokens=max_tokens, temperature=temperature),
-                timeout=20.0,
+                timeout=_LLM_ANSWER_TIMEOUT_S,
             )
+        except asyncio.TimeoutError:
+            # Logged distinctly: asyncio.TimeoutError stringifies to an EMPTY
+            # string, so the generic handler below reported it as
+            # "_llm_answer failed for X: " with no reason at all -- which is
+            # exactly how a real collaboration revision round silently
+            # produced nothing and looked like the agent had no answer.
+            self.logger.warning(
+                "_llm_answer TIMED OUT after %.0fs for %s (%d-char prompt) -- raise "
+                "AGENT_LLM_TIMEOUT_S if this is a long prompt rather than a hang",
+                _LLM_ANSWER_TIMEOUT_S, self.agent_name, len(prompt),
+            )
+            return None
         except Exception as exc:
             self.logger.warning("_llm_answer failed for %s: %s", self.agent_name, exc)
             return None

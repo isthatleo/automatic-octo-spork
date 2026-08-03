@@ -4314,6 +4314,14 @@ class AgentRunRequest(BaseModel):
     payload: Dict[str, Any] = {}
     timeout: float = 60.0
 
+
+class AgentCollaborateRequest(BaseModel):
+    goal: str
+    producer: str
+    reviewer: str
+    rounds: int = 2
+    timeout: float = 45.0
+
 class AgentAutoRequest(BaseModel):
     text: str
     timeout: float = 60.0
@@ -6705,6 +6713,43 @@ async def tts_synthesize(req: SynthesizeRequest):
         logger.exception("TTS synthesis failed: %s", e)
         raise HTTPException(status_code=502, detail=str(e))
     return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.post("/agents/collaborate", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def agents_collaborate(req: AgentCollaborateRequest):
+    """Run a real produce -> critique -> revise cycle between two agents.
+
+    The 'agents improve one another' pillar, exposed. Distinct from
+    /agents/run (one agent, one task) and from DispatcherAgent (fan out to
+    several agents in parallel, then merge): here the reviewer's objections
+    are fed back to the producer as a genuine revision request, and the
+    revised work is reviewed again -- see agents/collaboration.py.
+    """
+    from agents.collaboration import produce_and_refine
+
+    if not agent_service.is_ready():
+        raise HTTPException(status_code=503, detail="Agent service not ready yet")
+    result = await produce_and_refine(
+        req.goal, req.producer, req.reviewer,
+        rounds=max(1, min(req.rounds, 4)), timeout=req.timeout,
+    )
+    # Real collaborative output is worth keeping -- it's the kind of
+    # multi-agent finding the memory graph exists to accumulate.
+    try:
+        if result.get("success") and result.get("approved"):
+            memory_manager.graph.add_or_merge_memory(
+                f"[{req.producer}+{req.reviewer}] {req.goal} -> {result['final'][:1000]}",
+                MemoryType.INSIGHT,
+                {
+                    "source": "agent_collaboration", "producer": req.producer,
+                    "reviewer": req.reviewer, "rounds": result.get("rounds_used"),
+                    "verified": True,
+                },
+                importance=0.5,
+            )
+    except Exception:
+        logger.exception("Failed to record collaboration result")
+    return {"success": True, **result}
 
 
 @app.post("/agents/run", dependencies=[Depends(require_auth), Depends(rate_limit)])
