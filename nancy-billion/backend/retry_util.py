@@ -12,6 +12,7 @@ just adds latency for a call that will never succeed. Callers pass
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
 import random
 from typing import Any, Awaitable, Callable, Optional, TypeVar
@@ -91,10 +92,44 @@ _NON_TRANSIENT_MARKERS = (
 )
 
 
+#: Providers state how long to wait, e.g. Groq's
+#: "Please try again in 1.37s" or "Please try again in 30m23.904s".
+_RETRY_AFTER_RE = re.compile(
+    r"try again in\s+(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:([\d.]+)s)?", re.IGNORECASE
+)
+
+#: A rate limit shorter than this is a throughput hiccup, not an outage --
+#: worth waiting out rather than benching the backend.
+SHORT_RATE_LIMIT_S = 30.0
+
+
+def llm_retry_after_seconds(exc: BaseException) -> Optional[float]:
+    """How long the provider ITSELF asked us to wait, if it said.
+
+    Without this every 429 cost a flat 300s bench. Confirmed live: Groq
+    replied "Rate limit reached ... Please try again in 1.37s" for
+    llama-3.1-8b-instant, and Nancy took the fastest backend in the chain
+    out for five minutes over a 1.4-second throughput blip -- turning ~0.7s
+    replies into 3-8s ones on the next backend down. The same message format
+    also carries the genuinely long waits ("30m23.904s"), so honouring the
+    number distinguishes the two cases instead of guessing.
+    """
+    m = _RETRY_AFTER_RE.search(str(exc))
+    if not m or not any(m.groups()):
+        return None
+    h, mins, secs = m.groups()
+    return (float(h or 0) * 3600) + (float(mins or 0) * 60) + float(secs or 0)
+
+
 def is_transient_llm_error(exc: BaseException) -> bool:
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
         return True
     msg = str(exc).lower()
+    # A rate limit the provider says clears in seconds is transient, whatever
+    # the marker list says -- check before the markers, which match every 429.
+    wait = llm_retry_after_seconds(exc)
+    if wait is not None and wait <= SHORT_RATE_LIMIT_S:
+        return True
     if any(marker in msg for marker in _NON_TRANSIENT_MARKERS):
         return False
     # OmniRoute's "no substantive content" (see OmniRouteLLM in llm.py) means

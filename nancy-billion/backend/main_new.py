@@ -4316,6 +4316,11 @@ class AgentRunRequest(BaseModel):
     timeout: float = 60.0
 
 
+class LlmOrderRequest(BaseModel):
+    #: Backend stems in desired priority order, e.g. ["groq","opencode","gemini"].
+    order: List[str]
+
+
 class AgentCollaborateRequest(BaseModel):
     # Both optional: with neither supplied the fleet selects its own
     # producer and reviewer by real semantic fit to the goal (see
@@ -6442,6 +6447,92 @@ async def llm_set_primary(req: LlmPrimaryRequest):
         detail=f"No backend matching '{req.backend}' in the live chain: "
                f"{[b.__class__.__name__ for b in llm_backend.backends]}",
     )
+
+
+@app.get("/llm/order")
+async def llm_get_order():
+    """The live chain, in priority order, with why each entry sits where it
+    does. Backs the frontend's reordering UI -- every caller in the system
+    (web chat, Telegram, all 70 agents) shares this exact list, so what is
+    shown here IS what runs."""
+    from llm import _is_local_backend
+
+    chain = []
+    for i, b in enumerate(llm_backend.backends):
+        cls = b.__class__.__name__
+        chain.append({
+            "position": i,
+            "backend": cls,
+            "stem": cls.lower().removesuffix("llm"),
+            "model": getattr(b, "model", None),
+            "local": _is_local_backend(cls),
+            "configured": bool(getattr(b, "api_key", True)),
+        })
+    return {
+        "success": True,
+        "chain": chain,
+        "order_env": os.getenv("LLM_ORDER", ""),
+        "primary": chain[0]["backend"] if chain else None,
+    }
+
+
+@app.post("/llm/order", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def llm_set_order(req: LlmOrderRequest):
+    """Reorder the ENTIRE chain and persist it.
+
+    /llm/primary can only ever promote one backend, so expressing "try these
+    four in this sequence" was impossible without editing .env and
+    restarting. This reorders the live list every caller already holds --
+    so it applies to the very next message across web chat, Telegram and
+    every agent simultaneously -- and writes LLM_ORDER so it survives a
+    restart.
+
+    Named backends move to the front in the given order; unnamed ones keep
+    their relative order behind them; local backends are always forced last
+    (reaching them means every cloud option failed, and they compete with
+    TTS for CPU on this machine).
+    """
+    from llm import _is_local_backend, matches_backend_name
+
+    wanted = [w.strip() for w in req.order if w and w.strip()]
+    if not wanted:
+        raise HTTPException(status_code=400, detail="order cannot be empty")
+
+    live = list(llm_backend.backends)
+    ordered, remaining = [], list(live)
+    unmatched = []
+    for want in wanted:
+        hits = [b for b in remaining if matches_backend_name(b.__class__.__name__, want)]
+        if not hits:
+            unmatched.append(want)
+            continue
+        for b in hits:  # move a vendor's models as a group, keeping siblings adjacent
+            ordered.append(b)
+            remaining.remove(b)
+
+    merged = ordered + remaining
+    cloud = [b for b in merged if not _is_local_backend(b.__class__.__name__)]
+    local = [b for b in merged if _is_local_backend(b.__class__.__name__)]
+    llm_backend.backends[:] = cloud + local  # in-place: every holder of this list sees it
+
+    try:
+        os.environ["LLM_ORDER"] = ",".join(wanted)
+        from dotenv import set_key
+        env_path = Path(__file__).parent / ".env"
+        if env_path.exists():
+            set_key(str(env_path), "LLM_ORDER", ",".join(wanted))
+        persisted = True
+    except Exception:
+        logger.exception("Failed to persist LLM_ORDER")
+        persisted = False
+
+    chain = [b.__class__.__name__ for b in llm_backend.backends]
+    logger.info("LLM chain reordered via /llm/order; chain now %s", chain)
+    return {
+        "success": True, "chain": chain, "persisted": persisted,
+        "unmatched": unmatched,
+        "primary": chain[0] if chain else None,
+    }
 
 
 @app.get("/ollama-cloud/status")

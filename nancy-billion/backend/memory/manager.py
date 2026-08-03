@@ -10,7 +10,7 @@ Handles:
 
 import logging
 from typing import Dict, List, Optional
-from memory.graph import MemoryGraph, MemoryType, MemoryNode
+from memory.graph import UntrustedMemoryRejected, MemoryGraph, MemoryType, MemoryNode
 from memory import holographic_store
 from context_manager import ContextManager
 
@@ -103,7 +103,8 @@ class MemoryManager:
                     content,
                     MemoryType.CONVERSATION,
                     {"source": role, "timestamp": msg.get("timestamp")},
-                    importance=0.3
+                    importance=0.3, confidence=0.6,
+                    provenance="retrieved", source=f"conversation:{role}",
                 )
                 memories.append(node)
 
@@ -126,24 +127,42 @@ class MemoryManager:
         memories = []
         lower = content.lower()
 
+        # A conversation turn is an OBSERVED event -- Leonard really did send
+        # these words -- so it is stored as RETRIEVED (verbatim from a real
+        # source), never RECALLED. Getting this wrong is not cosmetic: with
+        # the default provenance ("unknown", confidence 0.3, below
+        # MEMORY_TRUST_FLOOR) the Trust gate correctly rejected every single
+        # conversation memory, and because UntrustedMemoryRejected propagated
+        # out of here it aborted the whole extraction -- Nancy silently
+        # stopped learning anything from chat. Confirmed in the log as
+        # "Memory extraction/learning failed for this turn" on every turn.
+        prov = {"provenance": "retrieved", "source": f"conversation:{role}"}
+
+        def store(memory_type, metadata, importance, confidence):
+            """One rejected memory must never cost the turn its other
+            memories. The Trust gate refusing a claim is a NORMAL outcome, not
+            an error -- but it raises, and an uncaught raise here aborted
+            extraction for the whole turn."""
+            try:
+                return self.graph.add_or_merge_memory(
+                    content, memory_type, metadata,
+                    importance=importance, confidence=confidence, **prov,
+                )
+            except UntrustedMemoryRejected as exc:
+                logger.info("Memory not stored (%s): %.70s", exc, content)
+                return None
+
         if role == "user":
             if any(x in lower for x in ["working on", "project", "building", "developing"]):
-                memories.append(self.graph.add_or_merge_memory(
-                    content, MemoryType.PROJECT, {"source": "conversation", "role": role}, importance=0.7,
-                ))
+                memories.append(store(
+                    MemoryType.PROJECT, {"source": "conversation", "role": role}, 0.7, 0.7))
             if any(x in lower for x in ["trade", "buy", "sell", "forex", "eur/usd"]):
-                memories.append(self.graph.add_or_merge_memory(
-                    content, MemoryType.TRADE, {"source": "conversation"}, importance=0.8,
-                ))
+                memories.append(store(MemoryType.TRADE, {"source": "conversation"}, 0.8, 0.8))
             if any(x in lower for x in ["decided", "decided to", "will", "planning to"]):
-                memories.append(self.graph.add_or_merge_memory(
-                    content, MemoryType.DECISION, {"source": "conversation"}, importance=0.6,
-                ))
+                memories.append(store(MemoryType.DECISION, {"source": "conversation"}, 0.6, 0.6))
 
-        memories.append(self.graph.add_or_merge_memory(
-            content, MemoryType.CONVERSATION, {"source": role}, importance=0.3,
-        ))
-        return memories
+        memories.append(store(MemoryType.CONVERSATION, {"source": role}, 0.3, 0.6))
+        return [m for m in memories if m is not None]
 
     def get_relevant_memories(self, query: str, top_k: int = 5) -> List[Dict]:
         """

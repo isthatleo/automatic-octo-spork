@@ -32,7 +32,7 @@ import {
   Fingerprint, Layers, MessageCircle, SendHorizonal, Upload, Mic,
   Moon, CheckSquare, Network, Award, Bell, Home, PhoneCall, MessageSquare,
   Archive, ArchiveRestore, Package, GitMerge, Search, AlertTriangle, FileText,
-  Orbit, RotateCcw, X, TrendingUp,
+  Orbit, RotateCcw, X, TrendingUp, ChevronUp, ChevronDown,
 } from 'lucide-react'
 
 // Same-origin authenticated proxy -- see app/api/backend/[...path]/route.ts.
@@ -1593,7 +1593,47 @@ export function SkillsPanel() {
    latency/uptime numbers per link. ═══════════════════════════════════════ */
 export function ModelsPanel() {
   const { data: llm, loading } = useLlmStatus()
-  const backends = llm?.backends ?? []
+  // The chain is reorderable in place. `override` holds the order the user
+  // has just arranged so the pipeline reflects the change instantly rather
+  // than waiting out useLlmStatus's 30s poll -- the backend has already
+  // applied it by then, so showing the old order would be a lie.
+  const [override, setOverride] = useState<typeof llm extends null ? never : NonNullable<typeof llm>['backends'] | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveNote, setSaveNote] = useState<string | null>(null)
+  const backends = override ?? llm?.backends ?? []
+
+  /** Move one backend up or down and push the WHOLE resulting order to the
+   * backend. The backend mutates the single shared chain object in place,
+   * so this takes effect on the very next message in web chat, Telegram and
+   * every agent at once -- there is no per-surface copy to keep in sync. */
+  const move = useCallback(async (from: number, dir: -1 | 1) => {
+    const to = from + dir
+    if (to < 0 || to >= backends.length) return
+    const next = [...backends]
+    ;[next[from], next[to]] = [next[to], next[from]]
+    setOverride(next)
+    setSaving(true)
+    setSaveNote(null)
+    try {
+      // Send stems (groq, omniroute...), not class names: a vendor with
+      // several models moves as one group so its siblings stay adjacent.
+      const stems = Array.from(new Set(next.map((b) => b.name.toLowerCase().replace(/llm$/, ''))))
+      const res = await fetch('/api/llm/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: stems }),
+      })
+      const json = await res.json()
+      setSaveNote(json.success
+        ? `Saved — ${json.primary ?? 'chain'} now leads, everywhere.`
+        : `Could not save: ${json.error ?? 'unknown error'}`)
+    } catch {
+      setSaveNote('Could not reach the backend — order not saved.')
+    } finally {
+      setSaving(false)
+    }
+  }, [backends])
+
   return (
     <div className="mx-auto flex max-w-[900px] flex-col gap-1">
       <div className="mb-2 flex items-center justify-between rounded-xl border border-border bg-card/60 px-4 py-3">
@@ -1602,7 +1642,10 @@ export function ModelsPanel() {
           <span className="font-heading text-xs text-foreground">Reasoning Pipeline</span>
         </div>
         <span className="text-[0.55rem] text-muted-foreground">
-          {loading && !llm ? 'reading live chain…' : `${backends.length} backend${backends.length !== 1 ? 's' : ''} configured`}
+          {saving ? 'applying order…'
+            : saveNote ? saveNote
+            : loading && !llm ? 'reading live chain…'
+            : `${backends.length} backend${backends.length !== 1 ? 's' : ''} · reorder with ▲▼`}
         </span>
       </div>
 
@@ -1643,6 +1686,26 @@ export function ModelsPanel() {
                     {i === 0 && <span className="rounded-full border border-primary/40 px-1.5 text-[0.45rem] uppercase text-primary">primary</span>}
                   </div>
                   <div className="truncate text-[0.5rem] text-muted-foreground">{b.model ?? 'fallback route'}</div>
+                </div>
+                <div className="flex shrink-0 flex-col">
+                  <button
+                    type="button"
+                    onClick={() => move(i, -1)}
+                    disabled={i === 0 || saving}
+                    aria-label={`Move ${b.name} earlier in the chain`}
+                    className="rounded p-0.5 text-muted-foreground transition-colors hover:text-primary disabled:opacity-20 disabled:hover:text-muted-foreground"
+                  >
+                    <ChevronUp className="h-3 w-3" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => move(i, 1)}
+                    disabled={i === backends.length - 1 || saving}
+                    aria-label={`Move ${b.name} later in the chain`}
+                    className="rounded p-0.5 text-muted-foreground transition-colors hover:text-primary disabled:opacity-20 disabled:hover:text-muted-foreground"
+                  >
+                    <ChevronDown className="h-3 w-3" />
+                  </button>
                 </div>
               </div>
               {i < backends.length - 1 && (

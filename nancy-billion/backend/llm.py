@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from tool_args import coerce_tool_input
-from retry_util import retry_async, is_transient_llm_error
+from retry_util import llm_retry_after_seconds, retry_async, is_transient_llm_error
 import usage_analytics
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,30 @@ class LLMBackend(ABC):
         Generate text from prompt.
         """
         pass
+
+#: Stop sequences for every OpenAI-compatible backend.
+#:
+#: Nancy sends the conversation as ONE user message containing a
+#: "user:"/"assistant:" transcript rather than a real messages array.
+#: Without a stop sequence an instruct model happily continues the pattern
+#: it can see -- confirmed live on Groq llama-3.3-70b, which answered
+#: "The capital of Australia is Canberra." and then invented an entire
+#: follow-up exchange (a fake user turn asking about buying a laptop, plus
+#: its own reply to it), all of which was returned to the user as Nancy's
+#: answer.
+#:
+#: Cutting at the role markers ends the turn where it actually ends.
+#: Harmless for backends that never emit them.
+#: EXACTLY FOUR entries -- Groq rejects a longer list outright with
+#: HTTP 400 ("'stop' : maximum number of items is 4"), and because that
+#: is an auth/quota-class 400 it puts Groq into a 5-minute cooldown,
+#: silently demoting the fastest backend in the chain. Confirmed live:
+#: a 5-item list took replies from 0.7s to 4-8s. Nancy's prompt builds
+#: its transcript in lowercase (main_new.py: f"{history}\nuser: ..."), so the
+#: lowercase pair is what actually fires; the capitalised pair is there
+#: because models often normalise the casing in their continuation.
+TRANSCRIPT_STOP = ["\nuser:", "\nassistant:", "\nUser:", "\nAssistant:"]
+
 
 class DummyLLM(LLMBackend):
     """A dummy LLM that returns a simple echo or canned response for testing."""
@@ -169,8 +193,15 @@ class OllamaLLM(LLMBackend):
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            # Ollama reads generation settings from "options" and silently
+            # ignores unknown top-level keys -- so max_tokens/temperature sent
+            # at the top level (as they were) never actually applied. Its
+            # length parameter is num_predict, not max_tokens.
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature,
+                "stop": TRANSCRIPT_STOP,
+            },
             "stream": False
         }
         # Accept-Encoding: identity -- confirmed live that at least Groq's
@@ -328,6 +359,10 @@ class AnthropicLLM(LLMBackend):
             "model": self.model,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": content}],
+            # Anthropic names it stop_sequences; same purpose as the OpenAI-
+            # compatible backends' "stop" -- end the turn at a role marker
+            # instead of letting the model write the user's next line too.
+            "stop_sequences": TRANSCRIPT_STOP,
         }
         system_blocks = _anthropic_system_blocks(system)
         if system_blocks:
@@ -662,7 +697,8 @@ class OpenAILLM(LLMBackend):
                 {"role": "user", "content": prompt}
             ],
             "max_tokens": max_tokens,
-            "temperature": temperature
+            "temperature": temperature,
+            "stop": TRANSCRIPT_STOP
         }
         # Accept-Encoding: identity -- confirmed live that at least Groq's
         # API can respond with brotli (Content-Encoding: br), which aiohttp
@@ -821,7 +857,8 @@ class OpenRouterLLM(LLMBackend):
                 {"role": "user", "content": prompt}
             ],
             "max_tokens": max_tokens,
-            "temperature": temperature
+            "temperature": temperature,
+            "stop": TRANSCRIPT_STOP
         }
         # Accept-Encoding: identity -- confirmed live that at least Groq's
         # API can respond with brotli (Content-Encoding: br), which aiohttp
@@ -889,6 +926,7 @@ class OmniRouteLLM(LLMBackend):
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "stop": TRANSCRIPT_STOP,
             "stream": False,
         }
         headers = {"Accept-Encoding": "identity"}
@@ -954,7 +992,8 @@ class GroqLLM(LLMBackend):
                 {"role": "user", "content": prompt}
             ],
             "max_tokens": max_tokens,
-            "temperature": temperature
+            "temperature": temperature,
+            "stop": TRANSCRIPT_STOP
         }
         # Accept-Encoding: identity -- confirmed live that at least Groq's
         # API can respond with brotli (Content-Encoding: br), which aiohttp
@@ -1096,6 +1135,7 @@ class OpenCodeLLM(LLMBackend):
             ],
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "stop": TRANSCRIPT_STOP,
         }
         # Accept-Encoding: identity -- confirmed live that at least Groq's
         # API can respond with brotli (Content-Encoding: br), which aiohttp
@@ -1150,6 +1190,7 @@ class ClawRouterLLM(LLMBackend):
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "stop": TRANSCRIPT_STOP,
         }
         # Accept-Encoding: identity -- confirmed live that at least Groq's
         # API can respond with brotli (Content-Encoding: br), which aiohttp
@@ -1429,7 +1470,19 @@ class FallbackLLM(LLMBackend):
                     backend.__class__.__name__, time.monotonic() - call_start, prompt, "", False, error=str(e),
                 )
                 if not is_transient_llm_error(e):
-                    self._cooldown_until[name] = time.monotonic() + self.NON_TRANSIENT_COOLDOWN_S
+                    # Prefer the provider's own stated wait over a flat 300s.
+                    # Groq's TPD exhaustion says "try again in 30m23s" -- a
+                    # 300s cooldown meant re-probing it (and burning a real
+                    # call + its latency) six times before it could possibly
+                    # succeed. Capped at an hour so a bogus huge value can't
+                    # bench a backend for the rest of the session.
+                    stated = llm_retry_after_seconds(e)
+                    cooldown = min(stated, 3600.0) if stated else self.NON_TRANSIENT_COOLDOWN_S
+                    self._cooldown_until[name] = time.monotonic() + cooldown
+                    logger.info(
+                        "%s cooling down for %.0fs (%s)", name, cooldown,
+                        "provider-stated" if stated else "default",
+                    )
                 last_exception = e
                 continue
         # If all backends failed, raise the last exception. `last_exception`
@@ -1615,6 +1668,9 @@ def get_llm_backends():
         logger.warning("No valid LLM backends configured; using DummyLLM")
         backends.append(DummyLLM())
 
+    # Full-chain ordering first, then LLM_PRIMARY as a single-backend
+    # override on top of it (so an explicit /llm/primary pick still wins).
+    backends = apply_chain_order(backends)
     backends = apply_primary_preference(backends)
 
     logger.info(f"LLM backend chain initialized with {len(backends)} backends: {[b.__class__.__name__ for b in backends]}")
@@ -1631,6 +1687,66 @@ def matches_backend_name(cls_name: str, want: str) -> bool:
         return False
     stem = cls_name.lower().removesuffix("llm")
     return want in (cls_name.lower(), stem) or want == stem.removesuffix("automodels")
+
+
+#: True for backends that run inference on THIS machine. Book I Ch.9 wants
+#: local-capable sovereignty, but local inference on a CPU-only box is far
+#: slower than cloud AND competes for the same cores TTS needs -- confirmed
+#: live when llama-server pushed identical TTS synthesis from ~1s to 47s. So
+#: cloud is tried first and local is the offline safety net, never the
+#: default path.
+_LOCAL_BACKEND_NAMES = ("ollama", "ollamaautomodels", "fury", "llamacpp", "vllm", "dummy")
+
+
+def _is_local_backend(cls_name: str) -> bool:
+    stem = cls_name.lower().removesuffix("llm")
+    return any(stem.startswith(local) for local in _LOCAL_BACKEND_NAMES)
+
+
+def apply_chain_order(backends: list) -> list:
+    """Order the whole chain from LLM_ORDER, then push local backends last.
+
+    LLM_ORDER is a comma-separated preference list of backend stems, e.g.
+    "omniroute,openrouter,opencode,groq". Any backend named there is placed
+    in that exact order at the front; everything else keeps its catalog
+    order behind them. This is the full-chain equivalent of LLM_PRIMARY,
+    which could only ever promote a single backend -- so expressing "try
+    these four, in this sequence" previously required four restarts and
+    still could not be persisted.
+
+    Local backends are always sorted to the very end regardless, because
+    reaching them means every cloud option failed and we are choosing
+    "slow but working" over "nothing".
+    """
+    if not backends:
+        return backends
+    raw = os.getenv("LLM_ORDER", "").strip()
+    if raw:
+        wanted = [w.strip() for w in raw.split(",") if w.strip()]
+        ordered, remaining = [], list(backends)
+        for want in wanted:
+            for b in list(remaining):
+                if matches_backend_name(b.__class__.__name__, want):
+                    ordered.append(b)
+                    remaining.remove(b)
+            # note: no break -- a vendor with several models (Groq 70b + 8b)
+            # should move as a group, keeping siblings adjacent.
+        backends = ordered + remaining
+        if ordered:
+            logger.info(
+                "LLM_ORDER honoured: %s lead the chain",
+                [b.__class__.__name__ for b in ordered],
+            )
+
+    # Cloud before local, always.
+    cloud = [b for b in backends if not _is_local_backend(b.__class__.__name__)]
+    local = [b for b in backends if _is_local_backend(b.__class__.__name__)]
+    if local and cloud:
+        logger.info(
+            "Local backends placed last (offline fallback only): %s",
+            [b.__class__.__name__ for b in local],
+        )
+    return cloud + local
 
 
 def apply_primary_preference(backends: list) -> list:
