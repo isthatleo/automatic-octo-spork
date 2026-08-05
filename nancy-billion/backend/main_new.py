@@ -130,6 +130,9 @@ import egress_proxy
 import coverage_proxy
 import usage_analytics
 import achievements_store
+import digest_store
+import while_away_digest
+import research_agenda_store
 
 # The node_host node ID a native, on-the-real-desktop node_agent_stub.py is
 # expected to register under -- see open_application's dispatch logic in
@@ -6902,6 +6905,58 @@ async def tts_synthesize(req: SynthesizeRequest):
     return Response(content=wav_bytes, media_type="audio/wav")
 
 
+async def _persist_collaboration_finding(
+    producer: str, reviewer: str, goal: str, result: Dict[str, Any], *, origin: str,
+) -> None:
+    """Shared persistence for a produce_and_refine outcome, regardless of
+    which of the three call sites triggered it (the /agents/collaborate
+    REST endpoint, the proactive loop, or fleet sweep's sampled 'deepen a
+    research finding' step -- see _proactive_agent_loop/_fleet_sweep_loop).
+
+    Only ever called with an APPROVED result -- an unapproved revision loop
+    is exactly what critique.py's cycle-safety exists to catch, and writing
+    it to long-term memory anyway would make the review step decorative.
+    `origin` distinguishes the three sources in metadata (rest/
+    proactive_orchestrator/fleet_sweep_deepen) purely for the while-away
+    digest to describe accurately -- it changes no persistence behavior.
+    """
+    if not (result.get("success") and result.get("approved")):
+        return
+    try:
+        memory_manager.graph.add_or_merge_memory(
+            f"[{producer}+{reviewer}] {goal} -> {result['final'][:1000]}",
+            MemoryType.INSIGHT,
+            {
+                "source": "agent_collaboration", "producer": producer,
+                "reviewer": reviewer, "rounds": result.get("rounds_used"),
+                "origin": origin, "verified": True,
+            },
+            importance=0.5,
+            # Reasoned output that a second agent reviewed and approved.
+            # Not a measurement, so INFERRED -- trust.py caps it below
+            # anything actually observed, which is correct.
+            confidence=0.6, provenance="inferred",
+            source=f"collaboration:{producer}+{reviewer}",
+        )
+    except UntrustedMemoryRejected as e:
+        logger.info("Collaboration result not stored: %s", e)
+        return
+    except Exception:
+        logger.exception("Failed to record collaboration result")
+        return
+    # Best-effort live notification via the existing WebSocket bridge -- see
+    # event_bus.py. Reuses the bridge for its real, existing purpose (a live
+    # state-change toast) rather than inventing new agent-to-agent pub/sub
+    # semantics; a subscriber failure here must never affect the persistence
+    # that already succeeded above.
+    try:
+        await event_bus.publish("collaboration_finding", {
+            "producer": producer, "reviewer": reviewer, "goal": goal[:200], "origin": origin,
+        })
+    except Exception:
+        logger.debug("event_bus publish for collaboration finding failed", exc_info=True)
+
+
 @app.post("/agents/collaborate", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def agents_collaborate(req: AgentCollaborateRequest):
     """Run a real produce -> critique -> revise cycle between two agents.
@@ -6943,27 +6998,7 @@ async def agents_collaborate(req: AgentCollaborateRequest):
     }
     # Real collaborative output is worth keeping -- it's the kind of
     # multi-agent finding the memory graph exists to accumulate.
-    try:
-        if result.get("success") and result.get("approved"):
-            memory_manager.graph.add_or_merge_memory(
-                f"[{producer}+{reviewer}] {req.goal} -> {result['final'][:1000]}",
-                MemoryType.INSIGHT,
-                {
-                    "source": "agent_collaboration", "producer": producer,
-                    "reviewer": reviewer, "rounds": result.get("rounds_used"),
-                    "verified": True,
-                },
-                importance=0.5,
-                # Reasoned output that a second agent reviewed and approved.
-                # Not a measurement, so INFERRED -- trust.py caps it below
-                # anything actually observed, which is correct.
-                confidence=0.6, provenance="inferred",
-                source=f"collaboration:{producer}+{reviewer}",
-            )
-    except UntrustedMemoryRejected as e:
-        logger.info("Collaboration result not stored: %s", e)
-    except Exception:
-        logger.exception("Failed to record collaboration result")
+    await _persist_collaboration_finding(producer, reviewer, req.goal, result, origin="rest")
     return {"success": True, **result}
 
 
@@ -7196,6 +7231,23 @@ async def resolve_commitment_route(commitment_id: str):
 async def get_dream_diary_route(limit: int = 20):
     from memory import dreaming
     return {"success": True, "entries": dreaming.get_dream_diary(limit=limit)}
+
+
+# ---------------------------------------------------------------------------
+# "While you were away" digest -- see while_away_digest.py/digest_store.py.
+# GET is idempotent (safe to poll); only the explicit ack advances the
+# cursor, so a page that fetches-but-never-acks (e.g. a background refresh)
+# can never silently swallow items the user hasn't actually seen yet.
+# ---------------------------------------------------------------------------
+@app.get("/digest/while-away", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def get_while_away_digest_route():
+    since_ts = digest_store.get_last_seen()
+    return await while_away_digest.build_digest(since_ts)
+
+
+@app.post("/digest/while-away/ack", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def ack_while_away_digest_route():
+    return {"success": True, "last_seen_at": digest_store.mark_seen()}
 
 
 # ---------------------------------------------------------------------------
@@ -9029,7 +9081,8 @@ async def _proactive_agent_loop() -> None:
                     "task_orchestration", {"type": "generate_and_delegate"}, timeout=180.0,
                 )
                 if result.get("success"):
-                    for item in result.get("results", []):
+                    items = result.get("results", [])
+                    for item in items:
                         if not (item.get("success") and item.get("result")):
                             continue
                         try:
@@ -9050,6 +9103,32 @@ async def _proactive_agent_loop() -> None:
                         except Exception:
                             logger.exception("Failed to record proactive finding from %s", item.get("agent_key"))
                     logger.info("Proactive orchestrator cycle: %d task(s) run", result.get("tasks_run", 0))
+
+                    # Sampled peer review: once per cycle, the single most
+                    # substantive finding gets a genuine second opinion --
+                    # the 'agents improve one another' pillar operating on
+                    # its own schedule, not only when a user hits
+                    # /agents/collaborate directly. Substantial = actually
+                    # has enough content to be worth a reviewer's time, not
+                    # a one-line "nothing to report".
+                    substantial = [i for i in items if i.get("success") and len(i.get("result") or "") > 200]
+                    if substantial:
+                        best_item = max(substantial, key=lambda i: len(i["result"]))
+                        try:
+                            from agents.capability_index import capability_index
+                            from agents.collaboration import produce_and_refine
+
+                            reviewer = await capability_index.pick_reviewer(best_item["agent_key"], best_item["task"])
+                            if reviewer:
+                                refine_result = await produce_and_refine(
+                                    best_item["task"], best_item["agent_key"], reviewer, rounds=2, timeout=60.0,
+                                )
+                                await _persist_collaboration_finding(
+                                    best_item["agent_key"], reviewer, best_item["task"], refine_result,
+                                    origin="proactive_orchestrator",
+                                )
+                        except Exception:
+                            logger.exception("Proactive cycle: sampled peer review failed")
                 else:
                     logger.debug("Proactive orchestrator cycle produced nothing usable: %s", result.get("error"))
         except Exception:
@@ -9095,7 +9174,22 @@ _SWEEP_SAFE_TASK_TYPES = (
     # parameterless real check (the server's own local clock), same as
     # public_ip above.
     "current_time",
+    # system_monitoring's real parameterless psutil snapshots. Deliberately
+    # excludes performance-analysis, which contains a real
+    # `while time.time() < end_time:` blocking loop (confirmed via source
+    # read) -- firing that from an unattended sweep would stall the batch.
+    "health-check", "resource-usage",
+    # football_intelligence's standings, defaulting to the Premier League
+    # when no league_id is supplied -- same "genuinely parameterless in
+    # practice" shape as today_fixtures above.
+    "standings",
 )
+
+# The two open-domain research agents whose only real task types (brief,
+# literature-synthesis) need a 'topic' the generic parameterless lookup
+# above has no way to supply -- see research_agenda_store.py and
+# _fleet_sweep_research_task_for.
+_RESEARCH_AGENDA_AGENTS = {"general_research", "science_research"}
 
 
 def _agent_supported_task_types(agent: Any) -> set:
@@ -9135,6 +9229,25 @@ def _fleet_sweep_real_task_for(agent: Any) -> Optional[Dict[str, Any]]:
     if "status" in supported:
         return {"type": "status"}
     return None
+
+
+def _fleet_sweep_research_task_for(key: str) -> Optional[Dict[str, Any]]:
+    """A real, rotating research topic for general_research/science_research
+    -- see research_agenda_store.py. Checked BEFORE
+    _fleet_sweep_real_task_for's generic parameterless lookup because both
+    agents' only real handlers ('brief', 'literature-synthesis') require a
+    'topic' the generic path has no way to invent safely; without this,
+    both agents have zero fleet-sweep-safe task types and receive zero
+    autonomous work (confirmed live -- both sat at total_tasks: 0).
+    '_agenda_id' is stripped before the task dict reaches agent_service.run
+    (see _fleet_sweep_loop) -- it exists only so the sweep loop can call
+    research_agenda_store.mark_run() after a successful task."""
+    if key not in _RESEARCH_AGENDA_AGENTS:
+        return None
+    topic = research_agenda_store.research_agenda_store.next_due(key)
+    if topic is None:
+        return None
+    return {"type": topic.task_type, "topic": topic.topic, "_agenda_id": topic.id}
 
 
 def _fleet_sweep_task_for(info: Dict[str, Any]) -> str:
@@ -9179,13 +9292,18 @@ def _looks_fabricated(text: str) -> bool:
     return any(m in text.lower() for m in _FABRICATED_MEASUREMENT_MARKERS)
 
 
+_fleet_sweep_cycle_count = 0  # see the sampled-deepen gate below
+
+
 async def _fleet_sweep_loop() -> None:
     """Rotates real work through the whole agent fleet, least-used first."""
+    global _fleet_sweep_cycle_count
     await asyncio.sleep(90)  # let agent init settle
     while True:
         try:
             quiet_for = _time.time() - _last_real_activity_at
             if agent_service.is_ready() and quiet_for >= PROACTIVE_QUIET_AFTER_ACTIVITY_S:
+                _fleet_sweep_cycle_count += 1
                 roster = [
                     a for a in agent_service.list_agents()
                     if a.get("key") not in _FLEET_SWEEP_SKIP and a.get("status") != "offline"
@@ -9198,30 +9316,34 @@ async def _fleet_sweep_loop() -> None:
                 # prompt -- see _fleet_sweep_real_task_for.
                 candidates: List[tuple] = []
                 for info in roster:
-                    agent = agent_service._agents.get(info.get("key"))
+                    key = info.get("key")
+                    agent = agent_service._agents.get(key)
                     if agent is None:
                         continue
-                    task = _fleet_sweep_real_task_for(agent)
+                    task = _fleet_sweep_research_task_for(key) or _fleet_sweep_real_task_for(agent)
                     if task is not None:
                         candidates.append((info, task))
                     if len(candidates) >= FLEET_SWEEP_BATCH:
                         break
 
-                async def _sweep_one(info: Dict[str, Any], task: Dict[str, Any]) -> None:
+                async def _sweep_one(info: Dict[str, Any], task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     key = info.get("key")
+                    agenda_id = task.pop("_agenda_id", None)
                     try:
                         result = await agent_service.run(key, task, timeout=60.0)
                     except Exception as e:
                         logger.debug("Fleet sweep: %s raised: %s", key, e)
-                        return
+                        return None
                     if not isinstance(result, dict) or result.get("success") is False:
-                        return
+                        return None
+                    if agenda_id is not None:
+                        research_agenda_store.research_agenda_store.mark_run(agenda_id)
                     # Real structured output from a real capability -- record
                     # the actual returned data, not prose about it.
                     payload = {k: v for k, v in result.items() if k not in ("success", "response")}
                     finding = json.dumps(payload, default=str)[:1200] if payload else ""
                     if not finding or finding in ("{}", "null"):
-                        return
+                        return result
                     try:
                         memory_manager.graph.add_or_merge_memory(
                             f"[{key}] {task['type']} -> {finding}",
@@ -9242,13 +9364,48 @@ async def _fleet_sweep_loop() -> None:
                         logger.info("Fleet sweep finding from %s not stored: %s", key, e)
                     except Exception:
                         logger.exception("Fleet sweep: failed to record finding from %s", key)
+                    return result
 
                 if candidates:
-                    await asyncio.gather(*(_sweep_one(i, t) for i, t in candidates))
+                    results = await asyncio.gather(*(_sweep_one(i, t) for i, t in candidates))
                     logger.info(
                         "Fleet sweep: ran real tasks -> %s",
                         ", ".join(f"{i.get('key')}({t['type']})" for i, t in candidates),
                     )
+
+                    # Sampled deepen, gated to roughly every 6th cycle (~12
+                    # min at the default 2-min interval) so the other 5/6
+                    # cycles pay zero extra cost -- see
+                    # _persist_collaboration_finding's docstring for why this
+                    # exists: a raw research-agenda finding is an unreviewed
+                    # Wikipedia summary, and this gives it the same real
+                    # produce -> critique -> revise pass /agents/collaborate
+                    # already offers on demand, but running on its own
+                    # schedule against fresh fleet-sweep output.
+                    if _fleet_sweep_cycle_count % 6 == 0:
+                        for (info, task), result in zip(candidates, results):
+                            if task.get("type") not in ("brief", "literature-synthesis"):
+                                continue
+                            if not (isinstance(result, dict) and result.get("success")):
+                                continue
+                            overview = result.get("overview") or result.get("summary")
+                            if not overview:
+                                continue
+                            key = info.get("key")
+                            goal = f"Critically verify and deepen this research finding on '{task.get('topic', '')}': {overview[:800]}"
+                            try:
+                                from agents.capability_index import capability_index
+                                from agents.collaboration import produce_and_refine
+
+                                reviewer = await capability_index.pick_reviewer(key, goal)
+                                if reviewer:
+                                    refine_result = await produce_and_refine(goal, key, reviewer, rounds=2, timeout=60.0)
+                                    await _persist_collaboration_finding(
+                                        key, reviewer, goal, refine_result, origin="fleet_sweep_deepen",
+                                    )
+                            except Exception:
+                                logger.exception("Fleet sweep: sampled deepen failed for %s", key)
+                            break
         except Exception:
             logger.exception("Fleet sweep cycle failed")
         await asyncio.sleep(FLEET_SWEEP_INTERVAL_S)

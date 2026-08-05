@@ -3304,7 +3304,7 @@ export function WebhooksPanel() {
    journey.py, memory/dreaming.py, memory/commitments.py, memory/wiki_store.py).
    One panel, tabbed, matching the lighter-touch DOCS treatment above rather
    than a full CRUD form since three of these four surfaces are read-mostly. ═══ */
-type MemoryTab = 'journey' | 'dreams' | 'commitments' | 'wiki' | 'galaxy'
+type MemoryTab = 'journey' | 'dreams' | 'commitments' | 'wiki' | 'galaxy' | 'digest'
 
 type GraphNode = {
   id: string
@@ -4210,6 +4210,7 @@ export function MemoryInsightsPanel() {
   const [openCommitments, setOpenCommitments] = useState<any[]>([])
   const [wikiPages, setWikiPages] = useState<any[]>([])
   const [contradictions, setContradictions] = useState<any[]>([])
+  const [digest, setDigest] = useState<{ headline: string; items: any[]; counts: Record<string, number> } | null>(null)
   const [expandedSlug, setExpandedSlug] = useState<string | null>(null)
   const [expandedPage, setExpandedPage] = useState<any | null>(null)
   const [expandedLoading, setExpandedLoading] = useState(false)
@@ -4217,18 +4218,22 @@ export function MemoryInsightsPanel() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [j, d, c, w, k] = await Promise.all([
+      const [j, d, c, w, k, g] = await Promise.all([
         fetch('/api/memory/journey').then((r) => r.json()).catch(() => null),
         fetch('/api/memory/dream-diary').then((r) => r.json()).catch(() => null),
         fetch('/api/memory/commitments').then((r) => r.json()).catch(() => null),
         fetch('/api/memory/wiki').then((r) => r.json()).catch(() => null),
         fetch('/api/memory/wiki/contradictions').then((r) => r.json()).catch(() => null),
+        // Idempotent GET -- browsing this tab never acks/advances the
+        // cursor, only the Overview banner's own ack call does that.
+        fetch('/api/digest/while-away').then((r) => r.json()).catch(() => null),
       ])
       if (j?.success) setJourney({ timeline: j.timeline, stats: j.stats })
       if (d?.success) setDreams(d.entries)
       if (c?.success) setOpenCommitments(c.commitments)
       if (w?.success) setWikiPages(w.pages)
       if (k?.success) setContradictions(k.contradictions)
+      if (g?.success) setDigest({ headline: g.headline, items: g.items, counts: g.counts })
     } finally {
       setLoading(false)
     }
@@ -4269,6 +4274,7 @@ export function MemoryInsightsPanel() {
     { key: 'commitments', label: 'Commitments', icon: CheckSquare },
     { key: 'wiki', label: 'Memory Wiki', icon: Network },
     { key: 'galaxy', label: 'Memory Galaxy', icon: Orbit },
+    { key: 'digest', label: 'While Away', icon: Sparkles },
   ]
 
   return (
@@ -4382,6 +4388,38 @@ export function MemoryInsightsPanel() {
         </div>
       ) : tab === 'galaxy' ? (
         <MemoryGalaxyView />
+      ) : tab === 'digest' ? (
+        <div className="rounded-xl border border-border bg-card/60">
+          <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">
+            Real findings the autonomous fleet accumulated — fleet sweep, proactive orchestrator, dream
+            consolidation, wiki pages, and achievements, all backed by already-persisted records.
+          </p>
+          {digest?.counts && (
+            <div className="flex flex-wrap gap-4 border-b border-border/50 px-4 py-2.5 text-[0.55rem] text-muted-foreground">
+              <span>{digest.counts.agents_touched ?? 0}/{digest.counts.total_agents ?? 0} agents touched</span>
+              <span>{digest.counts.new_memories ?? 0} new memories</span>
+              {digest.counts.wiki_page ? <span>{digest.counts.wiki_page} new wiki page{digest.counts.wiki_page === 1 ? '' : 's'}</span> : null}
+              {digest.counts.achievement ? <span>{digest.counts.achievement} achievement{digest.counts.achievement === 1 ? '' : 's'} unlocked</span> : null}
+            </div>
+          )}
+          {!digest?.items?.length ? (
+            <EmptyNote>Nothing new since you last checked the Overview digest.</EmptyNote>
+          ) : (
+            <ul className="divide-y divide-border/40">
+              {digest.items.map((item: any, i: number) => (
+                <li key={i} className="flex items-start gap-3 px-4 py-2.5">
+                  <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-tertiary" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[0.62rem] text-foreground">{item.text}</div>
+                    <div className="text-[0.5rem] text-muted-foreground">
+                      {item.agent_key ? `${item.agent_key} · ` : ''}{item.kind} · {new Date(item.at * 1000).toLocaleString()}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       ) : (
         <div className="rounded-xl border border-border bg-card/60">
           <p className="border-b border-border/50 px-4 py-2 text-[0.55rem] text-muted-foreground">

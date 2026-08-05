@@ -85,6 +85,15 @@ def _progress_for(ach: Achievement, activity: Dict[str, Any]) -> Optional[Dict[s
     return {"current": round(current, 1) if isinstance(current, float) else current, "target": target}
 
 
+def get_unlock_times() -> Dict[str, float]:
+    """Public read of already-persisted unlock times (key -> unix timestamp),
+    with no recomputation/re-recording side effect -- callers that just want
+    to know *when* badges unlocked (e.g. while_away_digest.py) shouldn't have
+    to re-run compute_unlocked/record_unlocks, which is already done once per
+    /achievements poll."""
+    return _load_unlock_times()
+
+
 def _load_unlock_times() -> Dict[str, float]:
     try:
         with open(_UNLOCKS_PATH, "r") as f:

@@ -124,6 +124,7 @@ class TaskOrchestratorAgent(SpecializedAgent):
 
     async def _delegate(self, tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
         from agents.agent_service import agent_service
+        from agents.capability_index import capability_index
 
         valid_keys = set(agent_service._agents.keys())
         tasks = [t for t in tasks if isinstance(t, dict) and t.get("agent_key") in valid_keys and t.get("task")]
@@ -131,16 +132,35 @@ class TaskOrchestratorAgent(SpecializedAgent):
             return {"success": False, "error": "No valid tasks (each needs a real agent_key and a task string)"}
 
         async def _run_one(t: Dict[str, Any]) -> Dict[str, Any]:
+            agent_key = t["agent_key"]
+            # The model that proposed this batch only saw a truncated roster
+            # (real_agents[:40] in _generate_and_delegate) and is guessing at
+            # fit from a one-line description -- exactly the ambiguous-
+            # routing case capability_index's semantic ranking exists to
+            # correct. Fleet sweep does NOT get this treatment: its whole
+            # value is guaranteed, unambiguous rotation, and redirecting
+            # there risks an agent silently never getting its recorded turn.
+            try:
+                handoff = await capability_index.should_hand_off(agent_key, t["task"])
+            except Exception:
+                handoff = None
+            if handoff is not None:
+                expert_key, expert_score, own_score = handoff
+                logger.info(
+                    "Proactive delegate: redirecting '%s' from %s (%.2f) to %s (%.2f)",
+                    t["task"][:80], agent_key, own_score, expert_key, expert_score,
+                )
+                agent_key = expert_key
             try:
                 result = await agent_service.run(
-                    t["agent_key"], {"type": "query", "query": t["task"]}, timeout=120.0,
+                    agent_key, {"type": "query", "query": t["task"]}, timeout=120.0,
                 )
                 return {
-                    "agent_key": t["agent_key"], "task": t["task"], "success": bool(result.get("success", True)),
+                    "agent_key": agent_key, "task": t["task"], "success": bool(result.get("success", True)),
                     "result": str(result.get("response") or result.get("result") or result)[:600],
                 }
             except Exception as e:
-                return {"agent_key": t["agent_key"], "task": t["task"], "success": False, "result": str(e)}
+                return {"agent_key": agent_key, "task": t["task"], "success": False, "result": str(e)}
 
         results = await asyncio.gather(*(_run_one(t) for t in tasks))
         self._last_batch = {"ran_at": time.time(), "results": results}

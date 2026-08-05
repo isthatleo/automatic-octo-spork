@@ -14,7 +14,7 @@ import type { AgentInfo, PanelKey } from '@/lib/nancy/types'
 import {
   Activity, AlertTriangle, Award, Bot, Brain, BrainCircuit, CheckCircle2, ChevronRight,
   Cloud, CloudOff, Cpu, ExternalLink, FileClock, HardDrive, KeyRound, Loader2, LogOut,
-  MemoryStick, Radio, Send, ShieldCheck, TrendingUp, Zap,
+  MemoryStick, Radio, Send, ShieldCheck, Sparkles, TrendingUp, X, Zap,
 } from 'lucide-react'
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -46,6 +46,38 @@ function useCpuHistory(cpu: number | null, max = 40) {
     setHistory((h) => [...h, cpu].slice(-max))
   }, [cpu, max])
   return history
+}
+
+type WhileAwayItem = { kind: string; text: string; at: number; agent_key?: string }
+type WhileAwayDigest = { headline: string; items: WhileAwayItem[]; counts: Record<string, number> }
+
+/* ── "While you were away" -- one real fetch on arrival, one real ack.
+   The ack fires exactly once per mount (guarded by the ref, which also
+   survives React StrictMode's dev-only double-invoke of effects) so a
+   background refresh of this panel can never silently mark items seen
+   that the user hasn't actually looked at. ── */
+function useWhileAwayDigest() {
+  const [digest, setDigest] = useState<WhileAwayDigest | null>(null)
+  const [dismissed, setDismissed] = useState(false)
+  const acked = useRef(false)
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/digest/while-away')
+      .then((r) => r.json())
+      .then((json) => {
+        if (cancelled) return
+        if (json?.success && json.items?.length) {
+          setDigest({ headline: json.headline, items: json.items, counts: json.counts })
+        }
+        if (!acked.current) {
+          acked.current = true
+          fetch('/api/digest/while-away/ack', { method: 'POST' }).catch(() => {})
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+  return { digest, dismissed, dismiss: () => setDismissed(true) }
 }
 
 function useAgentsBrief(intervalMs = 20000) {
@@ -445,6 +477,7 @@ export function OverviewV2Panel({ onNavigate }: { onNavigate?: (k: PanelKey) => 
   const { data: telegramData } = useTelegramStatus()
   const { data: trades } = useTradeHistory(10)
   const cores = useCpuCoreCount()
+  const { digest, dismissed, dismiss } = useWhileAwayDigest()
 
   const severity = (alerts as { overall_severity?: string } | null)?.overall_severity ?? 'green'
   const successRate = stats ? Math.round((stats.success_rate ?? 0) * 100) : null
@@ -491,6 +524,34 @@ export function OverviewV2Panel({ onNavigate }: { onNavigate?: (k: PanelKey) => 
             </li>
           ))}
         </motion.ul>
+      )}
+
+      {digest && digest.items.length > 0 && !dismissed && (
+        <motion.div variants={entry} custom={0.7} initial="hidden" animate="show"
+          className="relative flex flex-col gap-2 rounded-2xl px-4 py-3"
+          style={{ background: GLASS, border: `1px solid ${BORDER}`, backdropFilter: 'blur(18px)' }}>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-[0.68rem] text-foreground">
+              <Sparkles className="h-3.5 w-3.5 shrink-0" style={{ color: ACCENT2 }} />
+              {digest.headline}
+            </div>
+            <div className="flex items-center gap-3">
+              <button type="button" onClick={() => onNavigate?.('memory-insights' as PanelKey)}
+                className="flex items-center gap-1 text-[0.6rem] text-muted-foreground transition-colors hover:text-foreground">
+                View all <ChevronRight className="h-3 w-3" />
+              </button>
+              <button type="button" onClick={dismiss} aria-label="Dismiss"
+                className="text-muted-foreground transition-colors hover:text-foreground">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+          <ul className="flex flex-col gap-1 pl-5.5">
+            {digest.items.slice(0, 5).map((item, i) => (
+              <li key={i} className="truncate text-[0.6rem] text-muted-foreground">{item.text}</li>
+            ))}
+          </ul>
+        </motion.div>
       )}
 
       {/* reactor + tiles */}
