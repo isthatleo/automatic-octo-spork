@@ -1267,6 +1267,34 @@ Calibrate depth to what was actually asked, but lean toward genuine thoroughness
 BASE_SYSTEM_PROMPT = _CORE_IDENTITY_PROMPT + _VOICE_STYLE_ADDENDUM
 
 
+def _live_datetime_prompt_block() -> str:
+    """Real, read-fresh-every-turn date/time grounding -- confirmed live
+    this was the actual cause of Billion confidently stating a wrong clock
+    time: neither BASE_SYSTEM_PROMPT nor _TELEGRAM_STYLE_ADDENDUM ever
+    contained a single date/time value, static or otherwise, so "what time
+    is it" had zero real grounding to check against and the model just
+    generated a plausible-sounding guess. datetime.now() (no tzinfo arg) is
+    the server process's own local system clock -- correct for this
+    deployment specifically because it runs natively on the user's own
+    machine (not a UTC container), so it already IS the user's real local
+    time with no separate timezone config needed.
+
+    Deliberately called from _build_chat_parts' dynamic_context, NOT baked
+    into _system_prompt_for_channel's return value -- that string is
+    documented (see _build_chat_parts) to stay byte-identical every turn
+    per channel specifically so Anthropic's prompt cache treats it as a
+    stable prefix; splicing a per-second-changing timestamp into it would
+    invalidate that cache on literally every single call."""
+    now = datetime.now().astimezone()
+    return (
+        "\n=== CURRENT DATE & TIME (real, read fresh this turn -- this is ground truth; "
+        "never state a different date/time than this, and never guess one for a place "
+        "other than here without a real tool/agent lookup) ===\n"
+        f"It is {now.strftime('%A, %B %d, %Y')}, {now.strftime('%I:%M %p').lstrip('0')} "
+        f"({now.strftime('%Z')}, UTC{now.strftime('%z')}), in the user's own local time.\n"
+    )
+
+
 def _system_prompt_for_channel(channel: str) -> str:
     if channel == "telegram":
         return _CORE_IDENTITY_PROMPT + _TELEGRAM_STYLE_ADDENDUM
@@ -3619,7 +3647,7 @@ def _build_chat_parts(user_text: str, history_text: str, channel: str = "voice")
         logger.debug("Memory context lookup failed, continuing without it: %s", e)
         memory_block = ""
     dynamic_context = (
-        f"{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n"
+        f"{_live_datetime_prompt_block()}\n\n{_live_system_context()}\n\n{_live_context_bridge_context()}\n\n"
         f"{skills_block}\n\n{links_block}\n\n{memory_block}"
     )
     user_turn = f"{history_text}\nuser: {user_text}\nassistant:"
@@ -9063,6 +9091,10 @@ _SWEEP_SAFE_TASK_TYPES = (
     # basketball_intelligence) -- market_snapshot above already covers
     # forex_intelligence for free.
     "today_fixtures", "today_games", "list_makes",
+    # timezone_scheduling's current_time with no 'place' arg -- a genuine
+    # parameterless real check (the server's own local clock), same as
+    # public_ip above.
+    "current_time",
 )
 
 

@@ -217,6 +217,11 @@ ipykernel>=6.29.0
 # Real LAN service discovery (mdns_discovery.py).
 zeroconf>=0.140.0
 
+# Real offline lat/lon -> IANA timezone resolution (timezone_scheduling_agent.py's
+# current_time task, "what time is it in <city/country/zip>") -- pure local
+# shapefile lookup, no API key, no network call, no fabricated UTC offset.
+timezonefinder>=6.5.0
+
 # Real Docker-backed multi-tenant sandboxes (fleet/*.py) -- requires Docker
 # Desktop (or another Docker Engine) actually running on this machine.
 docker>=7.0.0

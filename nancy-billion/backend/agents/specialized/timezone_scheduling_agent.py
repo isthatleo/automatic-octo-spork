@@ -3,27 +3,53 @@ Timezone Scheduling Agent for Nancy/Billion.
 Real timezone conversions via Python's stdlib `zoneinfo` (real IANA tz
 database, DST-aware) and a real overlapping-working-hours calculator --
 no guessed UTC offsets.
+
+current_time is the fix for a real, confirmed-live failure: Billion had no
+tool anywhere that answered "what time is it" -- the system prompt never
+contained a live clock value (see main_new.py's _live_datetime_prompt_block
+for the "here" half of that fix) and this agent previously only *converted*
+a time the caller already supplied, with no way to look up "now" for an
+arbitrary place. Resolves a city/country/zip code to a real IANA timezone
+via geocoding (map_snapshot.py's Nominatim wrapper, the same one
+geospatial_agent.py uses) + timezonefinder's offline lat/lon->tz lookup
+(no API key, no network call for the timezone part itself), then reads the
+real current time in that zone -- never an assumed/fabricated UTC offset.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .base_specialized_agent import SpecializedAgent
+
+_tz_finder = None
+
+
+def _get_timezone_finder():
+    """Lazy singleton -- TimezoneFinder() loads a real shapefile-derived
+    dataset into memory on construction (a genuine, if brief, cost), so
+    this is built once per process and reused, not once per request."""
+    global _tz_finder
+    if _tz_finder is None:
+        from timezonefinder import TimezoneFinder
+        _tz_finder = TimezoneFinder()
+    return _tz_finder
 
 
 class TimezoneSchedulingAgent(SpecializedAgent):
     def __init__(self, settings):
         super().__init__(settings, "Timezone Scheduling Agent", "timezone-scheduling")
         self.capabilities.update({
-            "description": "Real IANA-database timezone conversions and working-hours overlap calculation",
+            "description": "Real current time anywhere (city/country/zip -> real IANA timezone), real timezone conversions, and working-hours overlap calculation",
             "confidence": 0.85,
-            "specializations": ["timezone-conversion", "meeting-scheduling"],
-            "tools": ["zoneinfo"],
+            "specializations": ["current-time", "timezone-conversion", "meeting-scheduling"],
+            "tools": ["zoneinfo", "timezonefinder", "nominatim"],
         })
 
     async def process_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
         task_type = task_data.get("type", "status")
+        if task_type == "current_time":
+            return await self._current_time(task_data.get("place"))
         if task_type == "convert_time":
             return self._convert(task_data.get("time_iso", ""), task_data.get("from_tz", ""), task_data.get("to_tz", ""))
         if task_type == "find_overlap":
@@ -31,6 +57,36 @@ class TimezoneSchedulingAgent(SpecializedAgent):
         if task_type == "status":
             return {"success": True, "status": "ready"}
         return await self._general(task_data)
+
+    async def _current_time(self, place: Optional[str]) -> Dict[str, Any]:
+        if not place:
+            now_here = datetime.now().astimezone()
+            return {
+                "success": True,
+                "place": "here (user's local time)",
+                "iso": now_here.isoformat(),
+                "formatted": now_here.strftime("%A, %B %d, %Y, %I:%M %p (%Z)"),
+            }
+        from map_snapshot import geocode
+        result = await geocode(place)
+        if result is None:
+            return {"success": False, "error": f"Could not geocode '{place}' -- not a real, resolvable place"}
+        try:
+            tf = _get_timezone_finder()
+            tz_name = tf.timezone_at(lat=result.lat, lng=result.lon)
+        except Exception as e:
+            return {"success": False, "error": f"Timezone lookup failed: {e}"}
+        if not tz_name:
+            return {"success": False, "error": f"Could not resolve a real timezone for '{place}' (likely open ocean/no landmass match)"}
+        from zoneinfo import ZoneInfo
+        now_there = datetime.now(ZoneInfo(tz_name))
+        return {
+            "success": True,
+            "place": result.display_name,
+            "timezone": tz_name,
+            "iso": now_there.isoformat(),
+            "formatted": now_there.strftime("%A, %B %d, %Y, %I:%M %p (%Z)"),
+        }
 
     def _convert(self, time_iso: str, from_tz: str, to_tz: str) -> Dict[str, Any]:
         try:
