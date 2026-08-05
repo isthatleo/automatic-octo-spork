@@ -133,6 +133,7 @@ import achievements_store
 import digest_store
 import while_away_digest
 import research_agenda_store
+import foundation_profile
 
 # The node_host node ID a native, on-the-real-desktop node_agent_stub.py is
 # expected to register under -- see open_application's dispatch logic in
@@ -1267,13 +1268,10 @@ Calibrate depth to what was actually asked, but lean toward genuine thoroughness
 - Give a longer, structured answer whenever the request calls for real depth (a deep dive, a comparison, a plan, "tell me everything about").
 """
 
-BASE_SYSTEM_PROMPT = _CORE_IDENTITY_PROMPT + _VOICE_STYLE_ADDENDUM
-
-
 def _live_datetime_prompt_block() -> str:
     """Real, read-fresh-every-turn date/time grounding -- confirmed live
     this was the actual cause of Billion confidently stating a wrong clock
-    time: neither BASE_SYSTEM_PROMPT nor _TELEGRAM_STYLE_ADDENDUM ever
+    time: neither the base system prompt nor _TELEGRAM_STYLE_ADDENDUM ever
     contained a single date/time value, static or otherwise, so "what time
     is it" had zero real grounding to check against and the model just
     generated a plausible-sounding guess. datetime.now() (no tzinfo arg) is
@@ -1299,9 +1297,18 @@ def _live_datetime_prompt_block() -> str:
 
 
 def _system_prompt_for_channel(channel: str) -> str:
+    """Foundation profile (foundation_profile.py) is spliced in here, right
+    after Billion's own core identity and before the channel-specific voice
+    -- present unconditionally on every call, restart or not, independent
+    of memory recall/conversation history. Still safe for Anthropic's
+    prompt cache: this only changes between calls on an explicit profile
+    edit (rare, and a legitimate one-time cache invalidation), never on a
+    per-turn value the way _live_datetime_prompt_block deliberately stays
+    out of this function for."""
+    profile_block = foundation_profile.build_prompt_block()
     if channel == "telegram":
-        return _CORE_IDENTITY_PROMPT + _TELEGRAM_STYLE_ADDENDUM
-    return BASE_SYSTEM_PROMPT
+        return _CORE_IDENTITY_PROMPT + profile_block + _TELEGRAM_STYLE_ADDENDUM
+    return _CORE_IDENTITY_PROMPT + profile_block + _VOICE_STYLE_ADDENDUM
 
 # ---------------------------------------------------------------------------
 # Fury agent (optional)
@@ -1310,7 +1317,7 @@ if _FURY_AVAILABLE:
     try:
         agent = Agent(
             model=os.getenv("LLM_MODEL_PATH", "llamafactory/Llama-3-8B-Instruct-GGUF"),
-            system_prompt=BASE_SYSTEM_PROMPT,
+            system_prompt=_system_prompt_for_channel("voice"),
             tools=get_tools(),
         )
         history_root = os.getenv("HISTORY_ROOT", "./data/fury_history")
@@ -7285,6 +7292,29 @@ async def ack_while_away_digest_route():
 
 
 # ---------------------------------------------------------------------------
+# Foundation profile -- see foundation_profile.py. Leonard's durable
+# identity/mission context, present in every chat turn unconditionally.
+# GET/POST here is the tool-free counterpart to Billion editing the same
+# file directly via her own file-write tool (gated by Telegram approval).
+# ---------------------------------------------------------------------------
+class FoundationProfileUpdateRequest(BaseModel):
+    content: str
+
+
+@app.get("/identity/foundation-profile", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def get_foundation_profile_route():
+    return {"success": True, "content": foundation_profile.get_foundation_profile()}
+
+
+@app.post("/identity/foundation-profile", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def update_foundation_profile_route(req: FoundationProfileUpdateRequest):
+    if not req.content.strip():
+        raise HTTPException(status_code=400, detail="content must not be empty")
+    foundation_profile.update_foundation_profile(req.content)
+    return {"success": True, "content": foundation_profile.get_foundation_profile()}
+
+
+# ---------------------------------------------------------------------------
 # Verification evidence ledger -- see evidence_ledger.py.
 # ---------------------------------------------------------------------------
 @app.get("/evidence", dependencies=[Depends(require_auth), Depends(rate_limit)])
@@ -9693,7 +9723,7 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
     # Static persona goes in the (cached) system role -- see llm.py's
     # _anthropic_system_blocks; only the per-run instructions stay in the
     # user prompt. Same split as the interactive chat path.
-    skill_system = _chat_system_blocks(BASE_SYSTEM_PROMPT, "")
+    skill_system = _chat_system_blocks(_system_prompt_for_channel("voice"), "")
     prompt = (
         f"A {trigger_name} triggered this skill (or skill bundle) -- follow its "
         f"instructions and actually do the work, don't just describe it. If more than one skill is listed, "
