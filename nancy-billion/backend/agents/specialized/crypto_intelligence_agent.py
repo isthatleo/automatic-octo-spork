@@ -46,6 +46,7 @@ class CryptoIntelligenceAgent(SpecializedAgent):
 
     async def _snapshots(self, symbols: List[str]) -> List[Dict[str, Any]]:
         from trading.crypto_data import crypto_data
+        from trading.tradingview_symbols import crypto_tradingview_symbol
         out = []
         for sym in symbols:
             snap = await crypto_data.get_price(sym)
@@ -54,6 +55,7 @@ class CryptoIntelligenceAgent(SpecializedAgent):
                     "symbol": snap.symbol, "price_usd": snap.price_usd,
                     "change_24h_pct": snap.change_24h_pct, "volume_24h_usd": snap.volume_24h_usd,
                     "market_cap_usd": snap.market_cap_usd,
+                    "tradingview_symbol": crypto_tradingview_symbol(snap.symbol),
                 })
         return out
 

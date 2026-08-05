@@ -2,15 +2,16 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { HudPanel } from './hud-bits'
+import { TradingViewDialog } from './tradingview'
 import { timeAgo } from '@/lib/nancy/time'
 import { onEconomicAlert, type EconomicAlertPayload } from '@/lib/nancy/ws-client'
 import { getEconomicCalendarEvents } from '@/lib/nancy/economic-calendar-client'
 import {
-  useTradingQuotes, useWatchedPairs, useTradingPerformance, useRiskAssessment, useTradeHistory,
+  useTradingQuotes, useCryptoQuotes, useWatchedPairs, useTradingPerformance, useRiskAssessment, useTradeHistory,
 } from '@/hooks/useSystemData'
 import useSWR from 'swr'
 import type { NewsItem } from '@/lib/nancy/types'
-import { TrendingUp, TrendingDown, Radio, AlertTriangle, Newspaper, X, Loader2 } from 'lucide-react'
+import { TrendingUp, TrendingDown, Radio, AlertTriangle, Newspaper, X, Loader2, LineChart } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /** Real, live-polled countdown to a scheduled economic release -- ticks
@@ -69,6 +70,17 @@ export function TradingDeskPanel() {
   const { data: quotesData, loading: quotesLoading } = useTradingQuotes(pairs.length > 0 ? pairs : undefined)
   const quotes = quotesData?.quotes ?? []
 
+  // Real CoinGecko crypto quotes -- the forex ticker above had no crypto
+  // counterpart at all before this. Same real default-watchlist idiom as
+  // /trading/quotes falling back to relevant_pairs.
+  const { data: cryptoQuotesData, loading: cryptoQuotesLoading } = useCryptoQuotes()
+  const cryptoQuotes = cryptoQuotesData?.quotes ?? []
+
+  // Real TradingView Advanced Chart, on demand -- same widget the voice
+  // command "open the chart for X" already uses (components/nancy/
+  // tradingview.tsx), now also reachable by clicking a live quote here.
+  const [chartSymbol, setChartSymbol] = useState<string | null>(null)
+
   const { data: perf } = useTradingPerformance()
   const { data: risk } = useRiskAssessment()
   const { data: trades, loading: tradesLoading } = useTradeHistory(8)
@@ -97,10 +109,11 @@ export function TradingDeskPanel() {
 
       {/* Live quotes ticker -- real forex/metal prices for whatever the
           user has actually told Nancy they trade (or real trade-history
-          pairs), never a hardcoded default list. */}
+          pairs), never a hardcoded default list. Click a quote to open its
+          real TradingView chart (same widget the voice command uses). */}
       <div className="flex items-center gap-3 overflow-x-auto rounded-xl border border-border bg-card/60 px-4 py-3">
         <span className="flex shrink-0 items-center gap-1.5 text-[0.55rem] tracking-[0.2em] text-primary">
-          <Radio className="h-3 w-3 animate-pulse" /> LIVE
+          <Radio className="h-3 w-3 animate-pulse" /> LIVE FX
         </span>
         {quotesLoading && quotes.length === 0 && <span className="text-[0.6rem] text-muted-foreground">Loading quotes…</span>}
         {!quotesLoading && quotes.length === 0 && (
@@ -109,16 +122,54 @@ export function TradingDeskPanel() {
           </span>
         )}
         {quotes.map((q) => (
-          <div key={q.pair} className="flex shrink-0 items-center gap-2 rounded border border-border/60 bg-secondary/20 px-2.5 py-1.5 text-[0.6rem]">
+          <button
+            key={q.pair}
+            type="button"
+            onClick={() => q.tradingview_symbol && setChartSymbol(q.tradingview_symbol)}
+            title={q.tradingview_symbol ? `Open ${q.pair} chart` : undefined}
+            className="flex shrink-0 items-center gap-2 rounded border border-border/60 bg-secondary/20 px-2.5 py-1.5 text-[0.6rem] transition-colors hover:border-primary/50"
+          >
             <span className="font-heading text-foreground">{q.pair}</span>
             <span className="text-primary">{q.price.toFixed(q.price < 10 ? 4 : 2)}</span>
             <span className={cn('flex items-center gap-0.5', q.change_24h >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
               {q.change_24h >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
               {q.change_24h >= 0 ? '+' : ''}{q.change_24h.toFixed(2)}%
             </span>
-          </div>
+            {q.tradingview_symbol && <LineChart className="h-3 w-3 text-muted-foreground" />}
+          </button>
         ))}
       </div>
+
+      {/* Real crypto quotes (CoinGecko) -- same real-data/click-for-chart
+          idiom as the forex ticker above, previously forex-only. */}
+      <div className="flex items-center gap-3 overflow-x-auto rounded-xl border border-border bg-card/60 px-4 py-3">
+        <span className="flex shrink-0 items-center gap-1.5 text-[0.55rem] tracking-[0.2em] text-tertiary">
+          <Radio className="h-3 w-3 animate-pulse" /> LIVE CRYPTO
+        </span>
+        {cryptoQuotesLoading && cryptoQuotes.length === 0 && <span className="text-[0.6rem] text-muted-foreground">Loading quotes…</span>}
+        {!cryptoQuotesLoading && cryptoQuotes.length === 0 && (
+          <span className="text-[0.6rem] text-muted-foreground">Could not fetch real crypto quotes right now.</span>
+        )}
+        {cryptoQuotes.map((q) => (
+          <button
+            key={q.symbol}
+            type="button"
+            onClick={() => q.tradingview_symbol && setChartSymbol(q.tradingview_symbol)}
+            title={q.tradingview_symbol ? `Open ${q.symbol} chart` : undefined}
+            className="flex shrink-0 items-center gap-2 rounded border border-border/60 bg-secondary/20 px-2.5 py-1.5 text-[0.6rem] transition-colors hover:border-primary/50"
+          >
+            <span className="font-heading text-foreground">{q.symbol}</span>
+            <span className="text-primary">${q.price_usd < 10 ? q.price_usd.toFixed(4) : q.price_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+            <span className={cn('flex items-center gap-0.5', q.change_24h_pct >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
+              {q.change_24h_pct >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+              {q.change_24h_pct >= 0 ? '+' : ''}{q.change_24h_pct.toFixed(2)}%
+            </span>
+            {q.tradingview_symbol && <LineChart className="h-3 w-3 text-muted-foreground" />}
+          </button>
+        ))}
+      </div>
+
+      <TradingViewDialog symbol={chartSymbol} onClose={() => setChartSymbol(null)} />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <HudPanel title="Economic Calendar · NFP / CPI / FOMC" accent="amber">

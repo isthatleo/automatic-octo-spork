@@ -63,13 +63,51 @@ const KNOWLEDGE_CATEGORIES: Record<string, NonNullable<NancyDecision['category']
   novels: 'literature',
 }
 
-/** Common spoken instrument names → TradingView EXCHANGE:TICKER symbols. */
+/** Common spoken instrument names → TradingView EXCHANGE:TICKER symbols.
+ * Crypto entries mirror backend/trading/tradingview_symbols.py's
+ * crypto_tradingview_symbol (BINANCE:{SYM}USDT for every symbol
+ * trading/crypto_data.py's SYMBOL_TO_COINGECKO_ID actually supports) and
+ * forex entries mirror its forex_tradingview_symbol (FX:{BASE}{QUOTE}) --
+ * duplicated deliberately (this must resolve synchronously with no backend
+ * round-trip for the voice command to feel instant), not a drift risk,
+ * since both sides derive from the same real, stable exchange-prefix
+ * convention rather than from each other. */
 const SYMBOL_MAP: Record<string, string> = {
   bitcoin: 'BINANCE:BTCUSDT',
   btc: 'BINANCE:BTCUSDT',
   ethereum: 'BINANCE:ETHUSDT',
   eth: 'BINANCE:ETHUSDT',
   solana: 'BINANCE:SOLUSDT',
+  sol: 'BINANCE:SOLUSDT',
+  cardano: 'BINANCE:ADAUSDT',
+  ada: 'BINANCE:ADAUSDT',
+  polkadot: 'BINANCE:DOTUSDT',
+  dot: 'BINANCE:DOTUSDT',
+  dogecoin: 'BINANCE:DOGEUSDT',
+  doge: 'BINANCE:DOGEUSDT',
+  ripple: 'BINANCE:XRPUSDT',
+  xrp: 'BINANCE:XRPUSDT',
+  polygon: 'BINANCE:MATICUSDT',
+  matic: 'BINANCE:MATICUSDT',
+  litecoin: 'BINANCE:LTCUSDT',
+  ltc: 'BINANCE:LTCUSDT',
+  chainlink: 'BINANCE:LINKUSDT',
+  link: 'BINANCE:LINKUSDT',
+  avalanche: 'BINANCE:AVAXUSDT',
+  avax: 'BINANCE:AVAXUSDT',
+  binancecoin: 'BINANCE:BNBUSDT',
+  bnb: 'BINANCE:BNBUSDT',
+  'shiba inu': 'BINANCE:SHIBUSDT',
+  shib: 'BINANCE:SHIBUSDT',
+  tron: 'BINANCE:TRXUSDT',
+  trx: 'BINANCE:TRXUSDT',
+  uniswap: 'BINANCE:UNIUSDT',
+  uni: 'BINANCE:UNIUSDT',
+  cosmos: 'BINANCE:ATOMUSDT',
+  atom: 'BINANCE:ATOMUSDT',
+  stellar: 'BINANCE:XLMUSDT',
+  xlm: 'BINANCE:XLMUSDT',
+  near: 'BINANCE:NEARUSDT',
   apple: 'NASDAQ:AAPL',
   microsoft: 'NASDAQ:MSFT',
   nvidia: 'NASDAQ:NVDA',
@@ -100,6 +138,16 @@ const SYMBOL_MAP: Record<string, string> = {
   eurusd: 'FX:EURUSD',
   euro: 'FX:EURUSD',
   gbpusd: 'FX:GBPUSD',
+  // The rest of forex_intelligence_agent.py's real default watchlist --
+  // previously only EUR/USD and GBP/USD were mapped, so asking for a chart
+  // of any of these fell through to a bare, unresolvable ticker guess.
+  usdjpy: 'FX:USDJPY',
+  'dollar yen': 'FX:USDJPY',
+  audusd: 'FX:AUDUSD',
+  'aussie dollar': 'FX:AUDUSD',
+  usdchf: 'FX:USDCHF',
+  nzdusd: 'FX:NZDUSD',
+  usdcad: 'FX:USDCAD',
 }
 
 /** Project-related keywords -> action */

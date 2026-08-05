@@ -591,12 +591,31 @@ export interface TradingQuote {
   high_24h: number
   low_24h: number
   timestamp: string
+  tradingview_symbol?: string
 }
 // Real live forex/metal quotes (Frankfurter/ECB + Yahoo COMEX -- see
 // trading/forex_engine.py) for the user's real watched/relevant pairs.
 export function useTradingQuotes(pairs?: string[]) {
   const path = pairs && pairs.length > 0 ? `/api/trading/quotes?pairs=${encodeURIComponent(pairs.join(','))}` : '/api/trading/quotes'
   return useSimplePoll<{ success: boolean; quotes: TradingQuote[] }>(path, 30000)
+}
+
+export interface CryptoQuote {
+  symbol: string
+  price_usd: number
+  change_24h_pct: number
+  volume_24h_usd: number
+  market_cap_usd: number
+  timestamp: string
+  tradingview_symbol?: string
+}
+// Real live crypto quotes (CoinGecko -- see trading/crypto_data.py). No
+// bid/ask: CoinGecko doesn't provide one and this codebase doesn't
+// synthesize a fake spread for crypto the way forex_engine.py's
+// documented small synthetic spread does for forex.
+export function useCryptoQuotes(symbols?: string[]) {
+  const path = symbols && symbols.length > 0 ? `/api/trading/crypto-quotes?symbols=${encodeURIComponent(symbols.join(','))}` : '/api/trading/crypto-quotes'
+  return useSimplePoll<{ success: boolean; quotes: CryptoQuote[] }>(path, 30000)
 }
 
 // Real watched/relevant trading pairs (trading/manager.py) -- whatever the

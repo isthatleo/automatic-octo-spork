@@ -97,6 +97,7 @@ class ForexIntelligenceAgent(SpecializedAgent):
 
     async def _market_snapshot(self, pairs: List[str]) -> Dict[str, Any]:
         from main_new import forex_aggregator
+        from trading.tradingview_symbols import forex_tradingview_symbol
         quotes = []
         for pair in pairs:
             snap = await forex_aggregator.get_price(pair)
@@ -104,6 +105,7 @@ class ForexIntelligenceAgent(SpecializedAgent):
                 quotes.append({
                     "pair": snap.pair, "price": snap.price, "bid": snap.bid, "ask": snap.ask,
                     "change_24h": snap.change_24h, "high_24h": snap.high_24h, "low_24h": snap.low_24h,
+                    "tradingview_symbol": forex_tradingview_symbol(snap.pair),
                 })
         if not quotes:
             return {"success": False, "error": "Could not fetch real quotes for any requested pair"}
@@ -111,6 +113,7 @@ class ForexIntelligenceAgent(SpecializedAgent):
 
     async def _technical_analysis(self, pair: str) -> Dict[str, Any]:
         from main_new import forex_aggregator, analysis_engine
+        from trading.tradingview_symbols import forex_tradingview_symbol
         snapshot = await forex_aggregator.get_price(pair)
         if not snapshot:
             return {"success": False, "error": f"Could not get real market data for {pair}"}
@@ -120,7 +123,10 @@ class ForexIntelligenceAgent(SpecializedAgent):
         # neutral placeholder (see TechnicalAnalysisEngine's guards).
         historical = await forex_aggregator.get_historical(pair, days=90)
         analysis = analysis_engine.analyze(pair, snapshot, historical)
-        return {"success": True, "pair": pair, "analysis": analysis.to_dict()}
+        return {
+            "success": True, "pair": pair, "analysis": analysis.to_dict(),
+            "tradingview_symbol": forex_tradingview_symbol(pair),
+        }
 
     async def _real_macro_context(self) -> tuple:
         """Real NFP/CPI/FOMC events (economic_calendar.py, FRED-backed) --
@@ -145,12 +151,14 @@ class ForexIntelligenceAgent(SpecializedAgent):
         against the actual numbers that grounded it."""
         from main_new import forex_aggregator, analysis_engine
         from llm import llm_backend
+        from trading.tradingview_symbols import forex_tradingview_symbol
         from .trading_intelligence_prompt import TRADING_INTELLIGENCE_SYSTEM_PROMPT, build_data_grounding_block
         from trust import annotate_uncertainty, fabrication_reason
 
+        tv_symbol = forex_tradingview_symbol(pair)
         snapshot = await forex_aggregator.get_price(pair)
         if not snapshot:
-            return {"success": False, "task_type": "intelligence_report", "error": f"Could not get real market data for {pair}"}
+            return {"success": False, "task_type": "intelligence_report", "error": f"Could not get real market data for {pair}", "tradingview_symbol": tv_symbol}
         historical = await forex_aggregator.get_historical(pair, days=90)
         analysis = analysis_engine.analyze(pair, snapshot, historical)
 
@@ -174,9 +182,9 @@ class ForexIntelligenceAgent(SpecializedAgent):
             report = await llm_backend.generate(prompt, max_tokens=2400, temperature=0.4)
         except Exception as e:
             logger.warning("ForexIntelligenceAgent: report generation failed for %s: %s", pair, e)
-            return {"success": False, "task_type": "intelligence_report", "pair": pair, "error": str(e), "data": real_data}
+            return {"success": False, "task_type": "intelligence_report", "pair": pair, "error": str(e), "data": real_data, "tradingview_symbol": tv_symbol}
         if not report or not report.strip():
-            return {"success": False, "task_type": "intelligence_report", "pair": pair, "error": "LLM produced no report", "data": real_data}
+            return {"success": False, "task_type": "intelligence_report", "pair": pair, "error": "LLM produced no report", "data": real_data, "tradingview_symbol": tv_symbol}
 
         reason = fabrication_reason(report)
         if reason:
@@ -186,6 +194,7 @@ class ForexIntelligenceAgent(SpecializedAgent):
         return {
             "success": True, "task_type": "intelligence_report", "pair": pair,
             "report": report, "response": report, "data": real_data,
+            "tradingview_symbol": tv_symbol,
         }
 
     async def _general(self, task_data: Dict[str, Any]) -> Dict[str, Any]:

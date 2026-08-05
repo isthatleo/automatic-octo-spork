@@ -152,13 +152,14 @@ class CryptoTradingAgent(SpecializedAgent):
             "specifics remain gated per the ground rules."
         )
 
+        tv_symbol = technical.get("tradingview_symbol")
         try:
             report = await llm_backend.generate(prompt, max_tokens=2400, temperature=0.4)
         except Exception as e:
             logger.warning("CryptoTradingAgent: report generation failed for %s: %s", symbol, e)
-            return {"success": False, "task_type": "intelligence-report", "symbol": symbol, "error": str(e), "data": technical}
+            return {"success": False, "task_type": "intelligence-report", "symbol": symbol, "error": str(e), "data": technical, "tradingview_symbol": tv_symbol}
         if not report or not report.strip():
-            return {"success": False, "task_type": "intelligence-report", "symbol": symbol, "error": "LLM produced no report", "data": technical}
+            return {"success": False, "task_type": "intelligence-report", "symbol": symbol, "error": "LLM produced no report", "data": technical, "tradingview_symbol": tv_symbol}
 
         reason = fabrication_reason(report)
         if reason:
@@ -168,6 +169,7 @@ class CryptoTradingAgent(SpecializedAgent):
         return {
             "success": True, "task_type": "intelligence-report", "symbol": symbol,
             "report": report, "response": report, "data": technical,
+            "tradingview_symbol": tv_symbol,
         }
 
     async def _run_backtest(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -214,12 +216,15 @@ class CryptoTradingAgent(SpecializedAgent):
                 low_data = [c["low"] for c in candles]
                 volume_data = [c["volume"] for c in candles]
 
+        from trading.tradingview_symbols import crypto_tradingview_symbol
+
         result = {
             "success": True,
             "task_type": "technical-analysis",
             "symbol": symbol,
             "timeframe": timeframe,
-            "computed_at": str(now_utc())
+            "computed_at": str(now_utc()),
+            "tradingview_symbol": crypto_tradingview_symbol(symbol),
         }
 
         if len(price_data) < 2:

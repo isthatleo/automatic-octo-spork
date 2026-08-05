@@ -5169,6 +5169,8 @@ async def get_trading_quotes(pairs: str = ""):
     a live quotes ticker without requiring the caller to already know what
     to ask for. A pair that fails to fetch is simply omitted, never
     backfilled with a stale or invented price."""
+    from trading.tradingview_symbols import forex_tradingview_symbol
+
     requested = [p.strip().upper() for p in pairs.split(",") if p.strip()] or trading_manager.get_relevant_pairs()
     results = await asyncio.gather(*(forex_aggregator.get_price(p) for p in requested), return_exceptions=True)
     quotes = []
@@ -5178,7 +5180,39 @@ async def get_trading_quotes(pairs: str = ""):
         quotes.append({
             "pair": snap.pair, "price": snap.price, "bid": snap.bid, "ask": snap.ask,
             "change_24h": snap.change_24h, "high_24h": snap.high_24h, "low_24h": snap.low_24h,
-            "timestamp": snap.timestamp,
+            "timestamp": snap.timestamp, "tradingview_symbol": forex_tradingview_symbol(snap.pair),
+        })
+    return {"success": True, "quotes": quotes}
+
+
+# Real crypto quote counterpart to /trading/quotes above -- no watched-list
+# mechanism exists for crypto yet (TradingManager's relevant-pairs concept
+# is forex-trade-history-specific), so this defaults to the same watchlist
+# crypto_intelligence_agent.py already uses for its own proactive scans.
+_DEFAULT_CRYPTO_QUOTE_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA"]
+
+
+@app.get("/trading/crypto-quotes")
+async def get_crypto_quotes(symbols: str = ""):
+    """Real live crypto quotes (trading/crypto_data.py -- CoinGecko, free
+    and keyless) for either an explicit comma-separated `symbols` query
+    param or, when omitted, a real default watchlist. A symbol that fails
+    to fetch (or has no known CoinGecko id mapping) is simply omitted,
+    never backfilled with a stale or invented price. Each quote carries a
+    real tradingview_symbol so the frontend can offer a real chart for it
+    (see trading/tradingview_symbols.py)."""
+    from trading.tradingview_symbols import crypto_tradingview_symbol
+
+    requested = [s.strip().upper() for s in symbols.split(",") if s.strip()] or _DEFAULT_CRYPTO_QUOTE_SYMBOLS
+    results = await asyncio.gather(*(crypto_data.get_price(s) for s in requested), return_exceptions=True)
+    quotes = []
+    for symbol, snap in zip(requested, results):
+        if isinstance(snap, Exception) or snap is None:
+            continue
+        quotes.append({
+            "symbol": snap.symbol, "price_usd": snap.price_usd, "change_24h_pct": snap.change_24h_pct,
+            "volume_24h_usd": snap.volume_24h_usd, "market_cap_usd": snap.market_cap_usd,
+            "timestamp": snap.timestamp, "tradingview_symbol": crypto_tradingview_symbol(snap.symbol),
         })
     return {"success": True, "quotes": quotes}
 
