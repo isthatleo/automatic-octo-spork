@@ -49,6 +49,14 @@ class GeneralResearchAgent(SpecializedAgent):
                 "topic-comparison",
                 "related-topic-discovery",
                 "source-grounded-summaries",
+                # No free structured API beats Wikipedia's coverage for these
+                # three -- claiming them here (plus matching _ROUTE_RULES
+                # keyword tuples in agent_service.py) routes them through
+                # this agent's real source-grounding instead of a new agent
+                # that would just re-wrap the same Wikipedia calls.
+                "politics",
+                "history",
+                "general-physics",
             ],
             "tools": ["wikipedia-search-api", "wikipedia-summary-api"],
         })

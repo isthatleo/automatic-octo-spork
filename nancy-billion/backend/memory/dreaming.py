@@ -50,6 +50,35 @@ def _append_diary(entry: Dict[str, Any]) -> None:
     DREAM_DIARY_PATH.write_text(json.dumps(diary, indent=2), encoding="utf-8")
 
 
+def _promote_cluster_to_wiki_page(cluster: List[Any], summary: str) -> None:
+    """Mirrors a promoted recurring-theme cluster into a real Memory Wiki
+    page, not just an INSIGHT graph node -- the Wiki tab (frontend Memory
+    Insights) otherwise only ever populates through the manual WikiComposer
+    form, which is why it stays empty for a user who's never used it. Best-
+    effort and non-fatal: a wiki_store problem should never break the real
+    dedup/promotion work this phase already does regardless of Wiki's own
+    state.
+
+    Deduped by title against wiki_store.list_pages() -- without this, every
+    daily consolidation cycle would mint a fresh page for the same
+    recurring theme (create_page only guards against an exact SLUG
+    collision, appending a random suffix rather than skipping), instead of
+    leaving the existing page alone."""
+    try:
+        from memory import wiki_store
+        title = (cluster[0].content[:60].strip() or f"Recurring theme ({len(cluster)}x)")
+        if any(p.title == title for p in wiki_store.list_pages()):
+            return
+        wiki_store.create_page(
+            title=title,
+            claim=summary,
+            evidence=[n.content for n in cluster],
+            provenance="dreaming.deep_phase",
+        )
+    except Exception as e:
+        logger.warning("dreaming.run_deep_phase: failed to promote cluster to wiki page: %s", e)
+
+
 def run_light_phase(graph: Any) -> Dict[str, Any]:
     """Dedupes near-identical memories -- keeps the higher-importance one
     (ties broken by keeping the older, more-established memory), deletes
@@ -113,6 +142,7 @@ def run_deep_phase(graph: Any) -> Dict[str, Any]:
                 importance=min(1.0, 0.5 + 0.05 * len(cluster)),
             )
             promotions += 1
+            _promote_cluster_to_wiki_page(cluster, summary)
 
     return {"phase": "deep", "clusters_found": promotions, "memories_examined": len(conv_nodes)}
 

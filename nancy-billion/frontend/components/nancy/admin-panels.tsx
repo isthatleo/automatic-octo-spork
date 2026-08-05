@@ -3321,10 +3321,32 @@ type SimNode = GraphNode & { x: number; y: number; vx: number; vy: number; bornA
 // A node graduates from "star" to "planet" once it's a real recurring
 // topic (merged mentions, see memory/graph.py's add_or_merge_memory) or
 // carries enough weight on its own -- distinct rendering, not just a
-// bigger dot: planets get a steady glow and a ring, stars twinkle.
+// bigger dot: planets get a steady glow, stars twinkle.
 function isPlanet(n: GraphNode): boolean {
   const mentionCount = (n.metadata as { mention_count?: number } | undefined)?.mention_count ?? 1
   return mentionCount >= 3 || n.importance >= 0.75
+}
+
+// Stable (non-random-per-frame) hash of a node's own id -- used below to
+// decide which planets get a ring. A real solar system's rings are the
+// exception, not the rule (only the gas giants have them, and only
+// Saturn's are actually visible at a glance) -- giving every planet a ring
+// read as decoration rather than the "this is a real astronomical body"
+// cue it's meant to be. Hashing the id (rather than Math.random()) keeps
+// each specific memory's look consistent across every re-render/refetch
+// instead of flickering between ringed and ringless.
+function hashNodeId(id: string): number {
+  let h = 0
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0
+  return h
+}
+
+// ~1 in 4 planets get a ring -- close to the real solar system's ratio
+// (4 of 8 planets have rings at all, but only Saturn's read as a ring at a
+// glance; Jupiter/Uranus/Neptune's are faint) without going as low as
+// "just one," which would rarely show up in a small graph.
+function hasRing(n: GraphNode): boolean {
+  return hashNodeId(n.id) % 4 === 0
 }
 
 const GALAXY_TYPE_STYLE: Record<string, { color: string; icon: typeof MessageCircle }> = {
@@ -3447,7 +3469,18 @@ function MemoryGalaxyView() {
     })
   }, [nodes])
 
-  // Canvas sizing (device-pixel-ratio aware).
+  // Canvas sizing (device-pixel-ratio aware). Depends on [loading,
+  // nodes.length] rather than running once on mount ([]) -- the <canvas>
+  // element itself only enters the DOM once loading is false AND
+  // nodes.length > 0 (see the render below: Loading / empty-state / canvas
+  // are three mutually exclusive branches), so a mount-only effect's very
+  // first run always found canvasRef.current still null (loading starts
+  // true) and permanently bailed via the guard below with no way to ever
+  // retry -- confirmed live: the canvas stayed stuck at the browser's
+  // default 300x150 buffer indefinitely even after data loaded and an
+  // explicit window resize, because no ResizeObserver had ever actually
+  // been attached. Re-running when the canvas's own mount condition
+  // changes lets this effect (re-)attach once it's real.
   useEffect(() => {
     const canvas = canvasRef.current
     const container = containerRef.current
@@ -3465,10 +3498,16 @@ function MemoryGalaxyView() {
     const ro = new ResizeObserver(resize)
     ro.observe(container)
     return () => ro.disconnect()
-  }, [])
+  }, [loading, nodes.length])
 
-  // The simulation + draw loop. Runs once; everything it reads lives in
-  // refs so state changes (selection, filters) never restart the loop.
+  // The simulation + draw loop. Everything it reads lives in refs so state
+  // changes (selection, filters) never restart the loop -- but it still
+  // needs to depend on [loading, nodes.length], the same canvas-mount gate
+  // as the resize effect above, for the identical reason: canvasRef.current
+  // is null on the very first mount-only run (canvas doesn't exist in the
+  // DOM until loading is false and nodes.length > 0), which silently
+  // skipped starting requestAnimationFrame(tick) at all -- not just a
+  // sizing problem, nothing was ever being drawn.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -3515,14 +3554,30 @@ function MemoryGalaxyView() {
       for (const a of list) {
         a.vx += (cx - a.x) * 0.0012
         a.vy += (cy - a.y) * 0.0012
-        // Galactic rotation: a tiny tangential drift around the center, so
-        // the whole memory field slowly swirls like a real galaxy instead
-        // of settling into a frozen constellation. Perpendicular to the
-        // center vector; the centering spring above keeps orbits bound.
-        a.vx += -(a.y - cy) * 0.00035
-        a.vy += (a.x - cx) * 0.00035
-        a.vx *= 0.86
-        a.vy *= 0.86
+        // Differential (galaxy-like) orbital rotation: angular velocity
+        // falls off with distance from center, so inner nodes visibly
+        // orbit faster than outer ones -- the way a real spiral galaxy's
+        // core sweeps around faster than its outskirts, and closer orbits
+        // are faster in real orbital mechanics generally. The previous
+        // version applied a tangential force directly proportional to
+        // (a.x-cx)/(a.y-cy), which is uniform ANGULAR velocity (rigid-body
+        // rotation -- every node sweeps the same angle per frame regardless
+        // of radius), which reads as the whole field spinning as one
+        // stiff disc rather than real independent orbits. Dividing by
+        // radius instead keeps roughly constant tangential (linear) speed
+        // across radii, so inner/outer nodes visibly drift apart in phase
+        // over time exactly like differential rotation does.
+        const dxc = a.x - cx, dyc = a.y - cy
+        const r = Math.sqrt(dxc * dxc + dyc * dyc) || 1
+        const omega = 5.4 / Math.max(r, 60)
+        a.vx += -dyc * omega * 0.001
+        a.vy += dxc * omega * 0.001
+        // Softer damping than before (was 0.86) -- real orbiting bodies
+        // coast on momentum rather than losing ~15%/frame, so this reads
+        // as smoother, more sustained motion instead of everything
+        // snapping to a stop the instant a force lets up.
+        a.vx *= 0.92
+        a.vy *= 0.92
         const isDraggedNode = dragging?.mode === 'node' && dragging.id === a.id
         if (!isDraggedNode) {
           a.x += a.vx
@@ -3687,15 +3742,21 @@ function MemoryGalaxyView() {
         ctx.fill()
         ctx.restore()
 
-        if (planet) {
-          // A faint orbital ring -- the visual cue that separates "a real
-          // recurring topic" from an ordinary single-mention star.
+        if (planet && hasRing(n)) {
+          // A faint orbital ring -- NOT every planet gets one (see
+          // hasRing above): real rings are the exception, not the rule.
+          // Tilt drifts slowly (a full cycle takes several minutes, keyed off
+          // each planet's own phase so they're not in lockstep) rather than
+          // sitting at a fixed angle -- a real ring's apparent tilt shifts
+          // as the body orbits and the viewing angle changes, so a static
+          // tilt read as flat/pasted-on rather than a real 3D object.
+          const ringTilt = Math.PI / 5 + Math.sin(now * 0.00012 + n.twinklePhase) * 0.35
           ctx.save()
           ctx.globalAlpha = (dimmed ? 0.15 : 0.5) * entranceEase
           ctx.lineWidth = 1 / view.scale
           ctx.strokeStyle = color
           ctx.beginPath()
-          ctx.ellipse(n.x, n.y, drawRadius * 1.8, drawRadius * 0.7, Math.PI / 5, 0, Math.PI * 2)
+          ctx.ellipse(n.x, n.y, drawRadius * 1.8, drawRadius * 0.7, ringTilt, 0, Math.PI * 2)
           ctx.stroke()
           ctx.restore()
         }
@@ -3718,7 +3779,7 @@ function MemoryGalaxyView() {
 
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [])
+  }, [loading, nodes.length])
 
   const nodeAt = useCallback((clientX: number, clientY: number): SimNode | null => {
     const canvas = canvasRef.current
@@ -3865,7 +3926,7 @@ function MemoryGalaxyView() {
   }, [nodes])
 
   return (
-    <div className="flex flex-col gap-2.5">
+    <div className="flex h-full flex-col gap-2.5">
       <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-border bg-card/60 px-3 py-2">
         {Object.keys(typeCounts).sort().map((t) => {
           const style = GALAXY_TYPE_STYLE[t]
@@ -3894,10 +3955,10 @@ function MemoryGalaxyView() {
         </button>
       </div>
 
-      <div className="flex gap-2.5">
+      <div className="flex min-h-0 flex-1 gap-2.5">
         <div
           ref={containerRef}
-          className="relative h-[480px] flex-1 overflow-hidden rounded-xl border border-border bg-card/40"
+          className="relative h-full flex-1 overflow-hidden rounded-xl border border-border bg-card/40"
         >
           {loading ? (
             <div className="flex h-full items-center justify-center text-[0.6rem] text-muted-foreground">
@@ -4211,7 +4272,19 @@ export function MemoryInsightsPanel() {
   ]
 
   return (
-    <div className="mx-auto flex max-w-[900px] flex-col gap-4">
+    <div
+      className={cn(
+        'flex flex-col gap-4',
+        // Every other tab keeps its original compact reading-width layout;
+        // Galaxy alone breaks out to fill the full page -- it's a spatial
+        // canvas, not a list, so it benefits from the room the way the
+        // others wouldn't. h-full needs the same absolute-inset-0 ancestor
+        // (app/page.tsx's workspace content wrapper) other panels already
+        // render inside, so this is purely a width/height change, no new
+        // stacking/positioning context.
+        tab === 'galaxy' ? 'h-full' : 'mx-auto max-w-[900px]',
+      )}
+    >
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-card/60 px-3 py-2">
         {tabs.map((t) => (
           <button
@@ -4230,6 +4303,7 @@ export function MemoryInsightsPanel() {
 
       <MemorySearchBar />
 
+      <div className={cn(tab === 'galaxy' && 'flex min-h-0 flex-1 flex-col')}>
       {loading ? (
         <div className="flex items-center justify-center py-8 text-[0.6rem] text-muted-foreground">
           <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Loading…
@@ -4379,6 +4453,7 @@ export function MemoryInsightsPanel() {
           )}
         </div>
       )}
+      </div>
     </div>
   )
 }

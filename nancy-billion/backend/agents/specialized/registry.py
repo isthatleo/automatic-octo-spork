@@ -86,6 +86,13 @@ from .ecommerce_research_agent import EcommerceResearchAgent
 from .ssl_certificate_agent import SslCertificateAgent
 from .statistical_testing_agent import StatisticalTestingAgent
 from .loan_calculator_agent import LoanCalculatorAgent
+# New topic-coverage agents (forex/cars/music/football/basketball) -- see
+# each module's own docstring for real data source + honest scope.
+from .forex_intelligence_agent import ForexIntelligenceAgent
+from .automotive_specs_agent import AutomotiveSpecsAgent
+from .music_knowledge_agent import MusicKnowledgeAgent
+from .football_intelligence_agent import FootballIntelligenceAgent
+from .basketball_intelligence_agent import BasketballIntelligenceAgent
 
 # Registry of all available specialized agents
 SPECIALIZED_AGENTS = {
@@ -170,6 +177,12 @@ SPECIALIZED_AGENTS = {
     "ssl_certificate":          SslCertificateAgent,
     "statistical_testing":      StatisticalTestingAgent,
     "loan_calculator":          LoanCalculatorAgent,
+    # ---- New topic-coverage agents ----
+    "forex_intelligence":       ForexIntelligenceAgent,
+    "automotive_specs":         AutomotiveSpecsAgent,
+    "music_knowledge":          MusicKnowledgeAgent,
+    "football_intelligence":    FootballIntelligenceAgent,
+    "basketball_intelligence":  BasketballIntelligenceAgent,
 }
 
 def get_available_agents():

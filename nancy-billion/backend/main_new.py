@@ -958,7 +958,20 @@ class _RateLimiter:
 
 
 _rate_limiter = _RateLimiter(
-    max_requests=int(os.getenv("BACKEND_RATE_LIMIT_MAX", "30")),
+    # 30/60s was tuned as an abuse threshold for one deliberate request burst,
+    # but this is ONE global counter shared by every Depends(rate_limit) route
+    # (not per-route) -- confirmed live this session as the actual root cause
+    # of an apparently-empty Memory Insights page: the frontend's own normal
+    # background polling (a /context heartbeat every 10s, Memory Insights'
+    # own fetchAll hitting 5 memory routes every 60s, the Memory Galaxy tab's
+    # separate /memory/graph poll, agent-status panels, etc.) shares this same
+    # localhost-IP budget and routinely exceeds 30 within a minute even with
+    # nothing resembling an attack happening -- every one of those legitimate
+    # calls then 429s and renders as "no data" with no visible error. Raised
+    # to give a single real dashboard session realistic headroom; still a
+    # real, meaningful cap against actual abuse if this port is ever exposed
+    # beyond localhost (see BACKEND_AUTH_TOKEN's own .env comment on that).
+    max_requests=int(os.getenv("BACKEND_RATE_LIMIT_MAX", "120")),
     window_seconds=float(os.getenv("BACKEND_RATE_LIMIT_WINDOW_S", "60")),
 )
 
@@ -1177,6 +1190,18 @@ You are Nancy/Billion, a highly intelligent, versatile, and sovereign AI operati
 CRITICAL: Do NOT assume that a user's query is a map location, address, or city name unless it is explicitly framed as one. Treat every request with a general-purpose intelligence first. If the user asks a basic question, answer it directly and intelligently.
 
 You have access to a variety of tools for system control, coding, web search, media generation, and more. You speak in a clear, confident, and helpful tone. You can spawn specialized agents to handle complex tasks. Always aim to assist the user efficiently and safely.
+
+=== PREFER REAL TOOLS AND AGENTS OVER YOUR OWN RECOLLECTION ===
+You have a real 70-agent specialist fleet and a real tool suite -- web search, file/codebase
+access, live market data, calendar, and more. When a question has a real answer available
+through one of them, USE IT rather than answering from what you already "know." This is not
+about being unable to answer from memory -- it's that a tool-verified or specialist-grounded
+answer is a genuinely better answer, and he asked for the better one. Default to checking, not
+recalling, whenever checking is possible in the time you have. Reserve a bare, tool-free answer
+for cases where no tool or agent genuinely applies (a personal opinion, a hypothetical, pure
+small talk) or where you've already gathered what's needed this turn. This works together with,
+and never overrides, TRUTHFUL BEFORE CONFIDENT below: still never claim a live measurement you
+didn't actually take.
 """
 
 # Voice/web: replies are spoken aloud via NeuTTS, so length directly costs
@@ -2132,6 +2157,38 @@ def _matches_macro_name(user_text: str) -> bool:
 
 def _wants_tools(user_text: str) -> bool:
     return bool(_WANTS_TOOLS_RE.search(user_text)) or _matches_macro_name(user_text)
+
+
+# Widens both of _wants_tools' call sites (below, and in
+# _generate_response_via_hierarchy) so a real question or request engages
+# the tool/agent loop by default instead of only the narrow _WANTS_TOOLS_RE
+# action-verb allowlist above -- the fleet of specialist agents and real
+# tools is otherwise invisible to the majority of ordinary questions, which
+# never touch a file/terminal/calendar verb and so never even reach
+# generate_with_tools. Default on: a real answer that's tool- or
+# agent-verified is worth the extra round-trip latency this costs versus the
+# old fast-path. Off switch kept for anyone who wants the old fast, tool-free
+# behavior back.
+_ALWAYS_ENGAGE_TOOLS = os.getenv("ALWAYS_ENGAGE_TOOLS", "1").strip().lower() in ("1", "true", "yes")
+
+_SMALLTALK_RE = re.compile(
+    r"^(hi|hey|hello|yo|sup|good\s+(morning|afternoon|evening|night)|thanks|thank\s+you|"
+    r"cheers|ok|okay|cool|nice|great|got\s+it|sounds\s+good|bye|goodnight|see\s+you)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_pure_smalltalk(text: str) -> bool:
+    """Conservative proxy for 'not actually asking anything' -- a short
+    greeting/ack/farewell with no question mark and no real content. The
+    ONLY exemption from the widened tool/agent engagement above: a genuine
+    question or request still pays the tool loop's latency (exactly what
+    ALWAYS_ENGAGE_TOOLS is for), but a bare "hey" or "thanks" shouldn't
+    turn into a multi-round tool negotiation."""
+    t = text.strip()
+    if not t or "?" in t or len(t.split()) > 6:
+        return False
+    return bool(_SMALLTALK_RE.match(t))
 
 
 # Real tool-use fallback chain -- Claude is tried first (richest: vision
@@ -3772,7 +3829,7 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
     # (up to 5 sequential calls per backend even when no tool ends up being
     # called), which is why this only runs when the message plausibly needs
     # a tool at all -- not for every message the way it originally did.
-    if _wants_tools(user_text):
+    if _wants_tools(user_text) or (_ALWAYS_ENGAGE_TOOLS and not _is_pure_smalltalk(user_text)):
         async def _file_tool_executor(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
             # Binds this turn's real user_text in as a write_file extension
             # hint -- see _explicit_language_hint -- without changing the
@@ -4043,7 +4100,9 @@ async def _generate_response_stream(user_text: str):
             routed_key = _auto_route(user_text)
         except Exception:
             routed_key = None
-    wants_tools = _any_tool_backend_configured() and _wants_tools(user_text)
+    wants_tools = _any_tool_backend_configured() and (
+        _wants_tools(user_text) or (_ALWAYS_ENGAGE_TOOLS and not _is_pure_smalltalk(user_text))
+    )
 
     if routed_key or wants_tools:
         text, debug = await _generate_response_via_hierarchy(user_text)
@@ -4861,7 +4920,7 @@ async def get_trades():
     }
 
 
-@app.get("/memory/graph")
+@app.get("/memory/graph", dependencies=[Depends(require_auth), Depends(rate_limit)])
 async def get_memory_graph():
     """Full memory graph for the Memory Galaxy view -- every node Nancy has
     ever stored, plus its precomputed links (memory/graph.py's add_memory
@@ -8471,10 +8530,37 @@ async def _ensure_omniroute_running() -> None:
         logger.warning("Failed to auto-launch OmniRoute: %s", e)
 
 
+def _seed_default_cron_jobs() -> None:
+    """First-run only: schedules the maintenance blueprints that make the
+    Memory Insights Dreams and Wiki tabs self-populating, instead of
+    requiring the user to discover and manually fill them in via Cron Jobs
+    -> Blueprints. Guarded on action_type already existing so re-running
+    this on every restart never duplicates a job the user has since edited
+    or re-timed -- same one-shot-seed idiom as _last_real_activity_at above."""
+    existing_action_types = {j.action_type for j in cron_store.list()}
+    for key in ("memory-dreaming", "commitment-checkin"):
+        blueprint = get_blueprint(key)
+        if blueprint is None:
+            continue
+        try:
+            spec = fill_blueprint(blueprint, {})
+        except BlueprintFillError as e:
+            logger.warning("_seed_default_cron_jobs: failed to fill blueprint %r: %s", key, e)
+            continue
+        if spec["action_type"] in existing_action_types:
+            continue
+        cron_store.create(
+            spec["name"], spec["description"], 0, 0, spec["action_type"], spec["action_payload"],
+            cron_expression=spec["cron_expression"],
+        )
+        logger.info("_seed_default_cron_jobs: scheduled default job for blueprint %r", key)
+
+
 @app.on_event("startup")
 async def startup_event():
     global main_loop
     main_loop = asyncio.get_running_loop()
+    _seed_default_cron_jobs()
     logger.info("Nancy/Billion backend starting up...")
     asyncio.create_task(_ensure_omniroute_running())
     # Initialise all 29 specialized agents in background so startup is fast
@@ -8972,6 +9058,11 @@ _FLEET_SWEEP_SKIP = {"task_orchestration", "dispatcher", "planning", "model_trai
 _SWEEP_SAFE_TASK_TYPES = (
     "status", "public_ip", "market_snapshot", "top_movers", "list_registry",
     "list_drafts", "list-indicators", "inspect",
+    # New topic-coverage agents' real parameterless read-only task types
+    # (forex_intelligence, automotive_specs, football_intelligence,
+    # basketball_intelligence) -- market_snapshot above already covers
+    # forex_intelligence for free.
+    "today_fixtures", "today_games", "list_makes",
 )
 
 
@@ -8994,11 +9085,23 @@ def _fleet_sweep_real_task_for(agent: Any) -> Optional[Dict[str, Any]]:
     has none. Returning None is the correct outcome for a pure calculator
     (loan amortisation, timezone conversion) that has nothing autonomous to
     do without user-supplied inputs -- far better than inventing inputs or
-    dropping to the LLM."""
+    dropping to the LLM.
+
+    "status" is deliberately tried LAST, not in its tuple position (index 0
+    in _SWEEP_SAFE_TASK_TYPES). Confirmed live: nearly every agent also
+    implements a "status" task type alongside its real one (market_snapshot,
+    public_ip, inspect, ...), and the original first-match-in-tuple-order
+    scan returned "status" for all of them every single sweep -- the more
+    specific, more valuable task types later in the tuple were structurally
+    unreachable for any agent that also has a status handler, which is
+    nearly all of them. This is the real reason fleet sweep mostly produced
+    trivial liveness pings instead of genuine domain work."""
     supported = _agent_supported_task_types(agent)
     for candidate in _SWEEP_SAFE_TASK_TYPES:
-        if candidate in supported:
+        if candidate != "status" and candidate in supported:
             return {"type": candidate}
+    if "status" in supported:
+        return {"type": "status"}
     return None
 
 

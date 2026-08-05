@@ -93,6 +93,14 @@ _ROUTE_RULES: List[tuple[list[str], str]] = [
     (["ssl certificate", "tls certificate", "cert expir", "certificate expir"], "ssl_certificate"),
     (["t-test", "chi-square", "statistical significance", "a/b test", "sample size"], "statistical_testing"),
     (["mortgage", "loan payment", "amortization", "amortize", "loan payoff", "monthly payment"], "loan_calculator"),
+    (["forex", "fx rate", "currency pair", "eur/usd", "gbp/usd", "usd/jpy", "pip", "exchange rate", "xau/usd", "gold price"], "forex_intelligence"),
+    (["decode vin", "vehicle identification number", "car spec", "vehicle spec", "engine type", "car trim", "transmission type"], "automotive_specs"),
+    (["discography", "album release", "artist bio", "band members", "release date album"], "music_knowledge"),
+    (["premier league", "champions league", "la liga", "serie a", "bundesliga", "soccer score", "football score", "football fixture", "soccer fixture", "soccer standings", "football standings", "soccer match", "football match"], "football_intelligence"),
+    (["nba score", "nba game", "nba standings", "basketball score", "basketball game", "who's playing tonight nba"], "basketball_intelligence"),
+    (["politics", "election", "president", "prime minister", "parliament", "senate", "legislation", "policy debate"], "general_research"),
+    (["history of", "historical event", "world war", "ancient", "empire", "revolution", "in the 1800s", "in the 1900s"], "general_research"),
+    (["newton's law", "thermodynamics", "electromagnetism", "classical mechanics", "physics concept", "physics question"], "general_research"),
 ]
 
 

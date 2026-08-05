@@ -806,7 +806,8 @@ class GeminiLLM(LLMBackend):
                             # to thinking before this fix -- surface the real
                             # reason instead of a bare KeyError.
                             raise Exception(f"Gemini returned no text (finishReason={finish_reason})")
-                        if finish_reason == "MAX_TOKENS":
+                        thinking_tokens = usage.get("thoughtsTokenCount") if usage else None
+                        if finish_reason == "MAX_TOKENS" and thinking_tokens:
                             # thinkingConfig can't be disabled for every model
                             # (see the 400-retry above) and at least one --
                             # confirmed live, gemini-flash-latest resolving to
@@ -818,14 +819,27 @@ class GeminiLLM(LLMBackend):
                             # budget 350->1200 raised thinking tokens
                             # 335->1151, same cut-off-mid-sentence result
                             # either way). There's no token budget that
-                            # reliably outruns this, so a MAX_TOKENS finish is
-                            # treated as a hard failure -- letting the
+                            # reliably outruns THIS failure mode specifically,
+                            # so it's treated as a hard failure -- letting the
                             # FallbackLLM chain move on to the next real
                             # backend -- rather than returning the genuinely
                             # truncated (garbled-sounding, mid-clause) text as
                             # if it were a complete, valid reply.
+                            #
+                            # Gated on thoughtsTokenCount actually being
+                            # nonzero -- confirmed live, gemini-3.1-flash-lite
+                            # hits MAX_TOKENS constantly on open-ended prompts
+                            # ("write a story" past a few hundred tokens) with
+                            # ZERO thinking tokens consumed: it's just an
+                            # ordinary "the answer is longer than the budget"
+                            # truncation, identical to what every other
+                            # backend here does silently. Treating that as a
+                            # hard failure too would take a model with a
+                            # completely healthy free tier out of the chain
+                            # for the single most common prompt shape
+                            # (anything open-ended) it'll ever see.
                             raise Exception(
-                                f"Gemini truncated by MAX_TOKENS with {usage.get('thoughtsTokenCount', '?') if usage else '?'} "
+                                f"Gemini truncated by MAX_TOKENS with {thinking_tokens} "
                                 f"thinking tokens consumed (model={self.model} doesn't allow disabling thinking)"
                             )
                         return parts[0].get("text", "")
