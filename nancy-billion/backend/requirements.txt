@@ -44,6 +44,16 @@ llama-cpp-python>=0.3.0
 neucodec>=0.0.5
 phonemizer>=3.2.0
 soundfile>=0.13.0
+# neucodec -> torchtune -> torchao.dtypes.nf4tensor: that submodule was
+# deleted in torchao's own refactor (present up through the 0.9.x line,
+# gone by 0.10+/0.18.0+cpu, which is what pip resolves unconstrained since
+# neucodec doesn't pin a torchao ceiling itself). Without this pin, NeuTTS
+# fails to import at all with "TTS dependencies are not installed" -- a
+# generic ModuleNotFoundError wrapper in fury-sdk's tts.py that hides the
+# real torchao.dtypes.nf4tensor error. Pinned exact, same resolver-backtrack
+# reasoning as uvicorn/httpx/playwright above. Pure-Python wheel (py3-none-any),
+# so no torch-ABI compatibility risk despite being far behind torch's own version.
+torchao==0.9.0+cpu
 
 # Real semantic memory search (memory/graph.py's SentenceTransformerEmbedding)
 # -- replaces the old hashed-bag-of-words placeholder, which could only ever

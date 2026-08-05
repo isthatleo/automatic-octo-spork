@@ -40,6 +40,12 @@ class ChatStreamEvent:
     reasoning: Optional[str] = None
     tool_call: Optional[ToolCallEvent] = None
     tool_ui: Optional[ToolUiEvent] = None
+    # Set by runtime.chat()'s exception handler when `content` is an error
+    # message rather than real model output, so a caller accumulating
+    # `.content` across the stream (e.g. FuryLLM.generate() in nancy-billion)
+    # can tell a connection failure apart from an actual reply instead of
+    # silently treating the exception text as if the model had said it.
+    error: bool = False
 
 
 def create_tool(

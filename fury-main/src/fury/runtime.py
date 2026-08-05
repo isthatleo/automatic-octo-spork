@@ -374,7 +374,7 @@ class GenerationRunner:
             if _is_expected_stop_exception(exc, session):
                 return
             logger.exception(f"Error in chat: {exc}")
-            yield ChatStreamEvent(content=str(exc))
+            yield ChatStreamEvent(content=str(exc), error=True)
         finally:
             session.finalize(history, "".join(response_buffer))
 

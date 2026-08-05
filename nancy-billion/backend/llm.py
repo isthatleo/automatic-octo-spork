@@ -874,7 +874,17 @@ class OpenRouterLLM(LLMBackend):
                     usage = result.get("usage")
                     if usage:
                         self._last_usage = {"prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens")}
-                    return result["choices"][0]["message"]["content"]
+                    # content can be None -- confirmed live: some models behind
+                    # OpenRouter return a null content field (e.g. a
+                    # reasoning-only or refusal turn) instead of an empty
+                    # string, which crashed every caller of this method with
+                    # "object of type 'NoneType' has no len()" downstream
+                    # rather than letting FallbackLLM move on to the next
+                    # backend the way an actual exception would.
+                    content = result["choices"][0]["message"]["content"] or ""
+                    if not content:
+                        raise Exception("OpenRouter returned no content (null/empty message)")
+                    return content
                 else:
                     text = await resp.text()
                     raise Exception(f"OpenRouter error: {resp.status} - {text}")
@@ -1342,6 +1352,15 @@ class FuryLLM(LLMBackend):
 
         buffer = ""
         async for event in runner.chat(history):
+            # runtime.chat() yields the exception text itself as a normal
+            # ChatStreamEvent when the underlying call fails (e.g. no real
+            # model endpoint reachable) -- confirmed live: LLM_MODEL_PATH
+            # unset resolves to a placeholder model string with nothing to
+            # connect to, and without this check the resulting
+            # "All connection attempts failed" text was accumulated into
+            # `buffer` and returned as if it were a genuine reply.
+            if getattr(event, "error", False):
+                raise Exception(f"Fury backend error: {event.content}")
             if getattr(event, "content", None):
                 buffer += event.content
 
