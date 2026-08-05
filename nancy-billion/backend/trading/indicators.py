@@ -340,6 +340,43 @@ def ichimoku(highs: List[float], lows: List[float], closes: List[float], tenkan:
     return {"tenkan": tenkan_sen, "kijun": kijun_sen, "senkou_a": senkou_a, "senkou_b": senkou_b_line}
 
 
+def swing_levels(
+    highs: List[float], lows: List[float], closes: List[float],
+    lookback: int = 2, max_levels: int = 3,
+) -> Dict[str, List[float]]:
+    """Real support/resistance via swing highs/lows (a bar whose high/low is
+    the extreme of its own `lookback`-bar neighborhood on both sides -- the
+    standard fractal-pivot definition, not SMC-specific). Replaces the
+    previous approach in forex_engine.py/crypto_trading_agent.py, which
+    derived "support/resistance" as an arbitrary fixed percentage offset
+    from the 24h high/low (e.g. low * 0.99) -- a real number dressed up as a
+    technical level with no actual price-structure behind it.
+
+    Returns up to `max_levels` resistance levels above the last close
+    (nearest first) and `max_levels` support levels below it (nearest
+    first). Empty lists (not a fabricated guess) if there isn't enough
+    history to find a real swing point on either side.
+    """
+    n = len(closes)
+    if n < lookback * 2 + 1:
+        return {"support": [], "resistance": []}
+
+    last_close = closes[-1]
+    swing_highs: List[float] = []
+    swing_lows: List[float] = []
+    for i in range(lookback, n - lookback):
+        window_highs = highs[i - lookback: i + lookback + 1]
+        window_lows = lows[i - lookback: i + lookback + 1]
+        if highs[i] == max(window_highs) and window_highs.count(highs[i]) == 1:
+            swing_highs.append(highs[i])
+        if lows[i] == min(window_lows) and window_lows.count(lows[i]) == 1:
+            swing_lows.append(lows[i])
+
+    resistance = sorted({round(h, 6) for h in swing_highs if h > last_close})[:max_levels]
+    support = sorted({round(l, 6) for l in swing_lows if l < last_close}, reverse=True)[:max_levels]
+    return {"support": support, "resistance": resistance}
+
+
 def pivot_points(prev_high: float, prev_low: float, prev_close: float) -> Dict[str, float]:
     """Classic floor-trader pivot points from the PRIOR bar's H/L/C."""
     pivot = (prev_high + prev_low + prev_close) / 3.0

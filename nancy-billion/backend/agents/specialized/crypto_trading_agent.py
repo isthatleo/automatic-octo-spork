@@ -1,7 +1,15 @@
 """
 Crypto Trading Agent for Nancy Billion Backend
 Handles cryptocurrency analysis, trading strategies, and portfolio management
+
+intelligence-report is the NÅNCY Trading Intelligence Division report type
+(see trading_intelligence_prompt.py) -- a full institutional-style written
+analysis grounded ONLY in the real technical indicators this agent computes
+plus real NFP/CPI/FOMC macro events, never SMC/liquidity specifics the
+underlying data can't support.
 """
+import logging
+import re
 from .base_specialized_agent import SpecializedAgent
 from ..real_compute import (
     compute_statistics, compute_moving_average, compute_ema,
@@ -11,7 +19,40 @@ from ..real_compute import (
     detect_outliers_iqr, now_utc
 )
 import numpy as np
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+# Real symbol/name recognition for pulling a coin out of a free-text
+# question -- deliberately the same curated-allowlist approach as
+# forex_intelligence_agent.py's _extract_pair, not "any 2-5 letter word",
+# so a casual question doesn't get misread as a ticker.
+_NAME_TO_SYMBOL = {
+    "bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL", "cardano": "ADA",
+    "polkadot": "DOT", "dogecoin": "DOGE", "ripple": "XRP", "litecoin": "LTC",
+    "chainlink": "LINK", "avalanche": "AVAX", "binance coin": "BNB",
+}
+_KNOWN_SYMBOLS = (
+    "BTC", "ETH", "SOL", "ADA", "DOT", "DOGE", "XRP", "MATIC", "LTC",
+    "LINK", "AVAX", "BNB", "SHIB", "TRX", "UNI", "ATOM", "XLM", "NEAR",
+)
+_SYMBOL_RE = re.compile(rf"\b({'|'.join(_KNOWN_SYMBOLS)})\b", re.IGNORECASE)
+_REPORT_TRIGGERS = (
+    "report", "intelligence report", "full analysis", "institutional",
+    "market intelligence", "trade plan", "outlook", "deep dive",
+)
+
+
+def _extract_symbol(text: str) -> Optional[str]:
+    """Best-effort real symbol extraction from free text -- e.g. "give me a
+    full report on bitcoin" or "institutional outlook on ETH". Returns None
+    (never a guess) if nothing recognizable is found."""
+    lowered = text.lower()
+    for name, symbol in _NAME_TO_SYMBOL.items():
+        if name in lowered:
+            return symbol
+    match = _SYMBOL_RE.search(text)
+    return match.group(1).upper() if match else None
 
 
 class CryptoTradingAgent(SpecializedAgent):
@@ -20,7 +61,12 @@ class CryptoTradingAgent(SpecializedAgent):
     def __init__(self, settings):
         super().__init__(settings, "Crypto Trading Agent", "crypto-trading")
         self.capabilities.update({
-            "description": "Advanced cryptocurrency trading agent for market analysis, strategy execution, and risk management",
+            "description": (
+                "Advanced cryptocurrency trading agent: real technical analysis (Wilder RSI/MACD/"
+                "Bollinger, real swing support-resistance), portfolio optimization, arbitrage detection, "
+                "and full institutional-style intelligence reports grounded in that real data plus real "
+                "NFP/CPI/FOMC macro events"
+            ),
             "confidence": 0.85,
             "specializations": [
                 "technical-analysis",
@@ -29,7 +75,8 @@ class CryptoTradingAgent(SpecializedAgent):
                 "portfolio-optimization",
                 "risk-management",
                 "defi-analytics",
-                "nft-valuation"
+                "nft-valuation",
+                "intelligence-report",
             ],
             "tools": [
                 "tradingview",
@@ -37,7 +84,8 @@ class CryptoTradingAgent(SpecializedAgent):
                 "binance-api",
                 "etherscan",
                 "real-compute-utils",
-                "numpy-scipy"
+                "numpy-scipy",
+                "economic_calendar",
             ]
         })
 
@@ -54,8 +102,73 @@ class CryptoTradingAgent(SpecializedAgent):
             return self._analyze_defi_protocols(task_data)
         elif task_type == "backtest":
             return await self._run_backtest(task_data)
+        elif task_type == "intelligence-report":
+            return await self._intelligence_report(task_data)
         else:
             return await self._general_crypto_analysis(task_data)
+
+    async def _real_macro_context(self) -> tuple:
+        """Real NFP/CPI/FOMC events (economic_calendar.py, FRED-backed) --
+        same real macro backdrop forex_intelligence_agent.py uses. Relevant
+        to crypto too (risk appetite/dollar liquidity conditions move BTC
+        and majors right along with FX), not just traditional markets.
+        Never invents a consensus/expected figure; FRED has none."""
+        try:
+            import economic_calendar
+        except Exception:
+            return None, "Economic calendar module unavailable -- no macro data included in this report."
+        if not economic_calendar.FRED_API_KEY:
+            return None, "FRED_API_KEY is not configured -- no real economic-calendar data available for this report."
+        events = economic_calendar.get_cached_events()
+        if not events:
+            return None, "Economic calendar is configured but has no cached events yet (still polling)."
+        return events, None
+
+    async def _intelligence_report(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """The NÅNCY Trading Intelligence Division report -- see
+        trading_intelligence_prompt.py for the full honesty contract this
+        is built on. Reuses _perform_technical_analysis's real indicator
+        computation rather than duplicating it, so the report and the raw
+        technical-analysis task type can never silently disagree."""
+        symbol = params.get("symbol", "BTC")
+        technical = await self._perform_technical_analysis({"symbol": symbol, "days": int(params.get("days", 90))})
+        if not technical.get("indicators"):
+            return {
+                "success": False, "task_type": "intelligence-report", "symbol": symbol,
+                "error": technical.get("message", "Could not compute real indicators for this symbol"),
+            }
+
+        from llm import llm_backend
+        from .trading_intelligence_prompt import TRADING_INTELLIGENCE_SYSTEM_PROMPT, build_data_grounding_block
+        from trust import annotate_uncertainty, fabrication_reason
+
+        macro_events, macro_note = await self._real_macro_context()
+        grounding = build_data_grounding_block(symbol, "crypto", technical, macro_events, macro_note)
+        prompt = (
+            f"{TRADING_INTELLIGENCE_SYSTEM_PROMPT}\n\n{grounding}\n\n"
+            f"Write the full institutional intelligence report for {symbol} now. This is a crypto asset -- "
+            "real 24/7 volume data IS available in the block above (unlike forex), so you may reference "
+            "real volume readings; there is still no real order-book/Level II data, so Smart Money Concepts "
+            "specifics remain gated per the ground rules."
+        )
+
+        try:
+            report = await llm_backend.generate(prompt, max_tokens=2400, temperature=0.4)
+        except Exception as e:
+            logger.warning("CryptoTradingAgent: report generation failed for %s: %s", symbol, e)
+            return {"success": False, "task_type": "intelligence-report", "symbol": symbol, "error": str(e), "data": technical}
+        if not report or not report.strip():
+            return {"success": False, "task_type": "intelligence-report", "symbol": symbol, "error": "LLM produced no report", "data": technical}
+
+        reason = fabrication_reason(report)
+        if reason:
+            logger.warning("CryptoTradingAgent: report for %s flagged (%s) -- qualifying it", symbol, reason)
+            report = annotate_uncertainty(report)
+
+        return {
+            "success": True, "task_type": "intelligence-report", "symbol": symbol,
+            "report": report, "response": report, "data": technical,
+        }
 
     async def _run_backtest(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Real end-to-end crypto strategy backtest: fetches real historical
@@ -209,18 +322,28 @@ class CryptoTradingAgent(SpecializedAgent):
             "volatility": "high" if bandwidth > 10 else ("moderate" if bandwidth > 5 else "low")
         }
 
-        result["support_resistance"] = {
-            "support_levels": [
-                round(bb_lower, 2),
-                round(bb_lower * 0.95, 2),
-                round(bb_lower * 0.90, 2)
-            ],
-            "resistance_levels": [
-                round(bb_upper, 2),
-                round(bb_upper * 1.05, 2),
-                round(bb_upper * 1.10, 2)
-            ]
-        }
+        # Real swing-high/swing-low support/resistance off the actual
+        # historical series (trading/indicators.py) -- replaces the
+        # previous approach of offsetting the Bollinger lower/upper band by
+        # an arbitrary fixed 5%/10%, which was a real number with no actual
+        # price-structure behind it dressed up as a "resistance level".
+        # Falls back to Bollinger-band-derived levels (still real, just a
+        # coarser signal) only when there's too little history for a
+        # genuine swing point to exist yet.
+        from trading.indicators import swing_levels
+        swings = swing_levels(high_data, low_data, price_data)
+        if swings["support"] or swings["resistance"]:
+            result["support_resistance"] = {
+                "support_levels": swings["support"] or [round(bb_lower, 2)],
+                "resistance_levels": swings["resistance"] or [round(bb_upper, 2)],
+                "method": "swing high/low (fractal pivots) over the real historical series",
+            }
+        else:
+            result["support_resistance"] = {
+                "support_levels": [round(bb_lower, 2)],
+                "resistance_levels": [round(bb_upper, 2)],
+                "method": "Bollinger Band-derived fallback -- not enough history yet for a real swing point",
+            }
 
         if current_rsi < 30 and macd_line > signal_line:
             signal = "buy"
@@ -237,12 +360,26 @@ class CryptoTradingAgent(SpecializedAgent):
             "risk_reward_ratio": round(risk_reward, 4)
         }
 
-        result["recommendations"] = [
-            "Set stop-loss orders to manage risk",
-            "Consider position sizing based on account risk tolerance",
-            "Monitor volume for confirmation of price moves",
-            "Watch for divergence between price and momentum indicators"
-        ]
+        # Data-driven notes reflecting THIS analysis's actual computed
+        # values, not a fixed four-line list returned identically regardless
+        # of what was just calculated (confirmed live: the previous version
+        # returned the same text whether RSI was 12 or 88).
+        notes: List[str] = []
+        if current_rsi > 70:
+            notes.append(f"RSI at {current_rsi:.1f} is in overbought territory -- momentum may be stretched.")
+        elif current_rsi < 30:
+            notes.append(f"RSI at {current_rsi:.1f} is in oversold territory -- momentum may be stretched to the downside.")
+        if "bullish_macd_cross" in signals:
+            notes.append("MACD line is above its signal line -- bullish momentum cross.")
+        elif "bearish_macd_cross" in signals:
+            notes.append("MACD line is below its signal line -- bearish momentum cross.")
+        if bandwidth > 10:
+            notes.append(f"Bollinger bandwidth of {bandwidth:.1f}% indicates a high-volatility regime -- wider stops warranted.")
+        elif bandwidth < 5:
+            notes.append(f"Bollinger bandwidth of {bandwidth:.1f}% indicates a compressed, low-volatility regime -- often precedes an expansion move.")
+        if not notes:
+            notes.append("No indicator is at an extreme right now -- current readings are unremarkable.")
+        result["notes"] = notes
         return result
 
     def _optimize_crypto_portfolio(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -445,6 +582,13 @@ class CryptoTradingAgent(SpecializedAgent):
 
     async def _general_crypto_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
         query = params.get("query", "general crypto analysis")
+        # Reachable from a normal chat question, not just a direct /agents/run
+        # call -- "give me a full report on bitcoin" should get the real
+        # institutional report, not a generic LLM reply about crypto in general.
+        if any(t in query.lower() for t in _REPORT_TRIGGERS):
+            symbol = _extract_symbol(query)
+            if symbol:
+                return await self._intelligence_report({"symbol": symbol})
         answer = await self._llm_answer(query)
         return {
             "success": True,
