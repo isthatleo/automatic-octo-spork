@@ -1994,6 +1994,21 @@ FILE_TOOLS: List[Dict[str, Any]] = [
 
 _FILE_WRITE_TOOLS = {"write_file", "edit_file", "multi_edit_file", "edit_notebook_cell", "delete_file", "move_file"}
 
+# Graduated trust, tier 2: every other gated tool can be satisfied by
+# arm_switch (a time-boxed blanket bypass) or by _current_turn_chat_approved
+# (approving something Billion proposed, in whatever channel that happened
+# on) -- appropriate for reversible, contained actions like writing a file
+# or committing locally. These three are different in kind, not degree:
+# irreversible data loss (delete_file), a real-world action reaching a
+# third party (place_phone_call), or publishing to a real shared remote
+# that other people can see (git_push) -- none of them undoable by simply
+# asking Billion to fix it after the fact. They always require a genuine,
+# live Telegram approval for THIS specific action, regardless of whether
+# arm_switch is currently armed or he already approved something else this
+# turn. This never makes anything undeniable -- see _request_approval's own
+# docstring -- it just removes the two shortcuts for these three specifically.
+_ALWAYS_CONFIRM_TOOLS = {"delete_file", "place_phone_call", "git_push"}
+
 # Real-world safety net for write_file: a real bug this session was Claude
 # happily writing runnable Python source out to a bare "calculator.txt" --
 # the tool description above now tells it not to, but LLMs miss instructions,
@@ -2875,7 +2890,7 @@ def _voice_mismatch() -> bool:
     return bool(voice_match and voice_match.get("match") is False)
 
 
-async def _request_approval(description: str, timeout: float = 120.0) -> bool:
+async def _request_approval(description: str, timeout: float = 120.0, force: bool = False) -> bool:
     """The one place every chat-tool-triggered Telegram approval actually
     goes through. When this turn's voice didn't match the enrolled profile,
     prepends a real, visible warning so whoever approves on Telegram sees
@@ -2887,7 +2902,13 @@ async def _request_approval(description: str, timeout: float = 120.0) -> bool:
     of what voice_id's real-but-lightweight MFCC matching decides -- a
     mismatch only makes the ask louder and harder to skip, so a false
     negative (background noise, a cold, a different mic) degrades to "one
-    extra approval tap," never to a hard denial."""
+    extra approval tap," never to a hard denial.
+
+    force=True (see _ALWAYS_CONFIRM_TOOLS) skips the in-chat-approval
+    shortcut below even if he already said yes to something else this turn
+    -- reserved for the handful of actions where that shortcut genuinely
+    isn't appropriate (irreversible, third-party-facing, or publishing to a
+    shared remote), never used for the general case."""
     if _voice_mismatch():
         voice_match = _current_voice_match.get()
         if voice_match and voice_match.get("similarity") is not None:
@@ -2897,7 +2918,7 @@ async def _request_approval(description: str, timeout: float = 120.0) -> bool:
         else:
             warning = "⚠️ VOICE CHECK inconclusive for this command -- treating it as unverified."
         description = f"{warning}\n\n{description}"
-    if _current_turn_chat_approved.get() and not _voice_mismatch():
+    if _current_turn_chat_approved.get() and not _voice_mismatch() and not force:
         # He already said yes to this in the conversation itself (web/voice/
         # console/Telegram) this same turn -- don't make him approve it a
         # second time on Telegram. Still post it there so his phone shows
@@ -3113,12 +3134,15 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         return {"success": True, "match": "keyword", "entities": [n.to_dict() for n in hits]}
 
     if name == "place_phone_call":
-        if not arm_switch.is_armed() or _voice_mismatch():
-            approved = await _request_approval(
-                f"Nancy wants to call {tool_input.get('to_number')} and say: {tool_input.get('message', '')[:200]}", timeout=120.0,
-            )
-            if not approved:
-                return {"success": False, "error": "User did not approve this phone call."}
+        # Always confirmed live -- see _ALWAYS_CONFIRM_TOOLS: a real call to
+        # a real third party, never eligible for the arm_switch or
+        # chat-approval shortcuts.
+        approved = await _request_approval(
+            f"Nancy wants to call {tool_input.get('to_number')} and say: {tool_input.get('message', '')[:200]}",
+            timeout=120.0, force=True,
+        )
+        if not approved:
+            return {"success": False, "error": "User did not approve this phone call."}
         from providers.registry import get_ordered_providers
         providers = get_ordered_providers("telephony")
         if not providers:
@@ -3604,14 +3628,19 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         is_mutating = name in ("git_commit", "git_push", "git_pull") or (
             name == "git_branch" and (tool_input.get("create") or tool_input.get("checkout"))
         )
-        if is_mutating and (not arm_switch.is_armed() or _voice_mismatch()):
+        # git_push always confirms live -- see _ALWAYS_CONFIRM_TOOLS: it
+        # publishes to a real shared remote, visible to anyone with repo
+        # access, never eligible for the arm_switch or chat-approval
+        # shortcuts the way a local commit is.
+        always_confirm = name in _ALWAYS_CONFIRM_TOOLS
+        if is_mutating and (always_confirm or not arm_switch.is_armed() or _voice_mismatch()):
             description = {
                 "git_commit": f"git commit: {str(tool_input.get('message', ''))[:200]!r} in {tool_input.get('cwd') or 'current dir'}",
                 "git_push": f"git push to {tool_input.get('remote', 'origin')} in {tool_input.get('cwd') or 'current dir'}",
                 "git_pull": f"git pull from {tool_input.get('remote', 'origin')} in {tool_input.get('cwd') or 'current dir'}",
                 "git_branch": f"git branch {'create ' + str(tool_input.get('create')) if tool_input.get('create') else 'checkout ' + str(tool_input.get('checkout'))} in {tool_input.get('cwd') or 'current dir'}",
             }[name]
-            if not await _request_approval(f"Nancy wants to: {description}", timeout=120.0):
+            if not await _request_approval(f"Nancy wants to: {description}", timeout=120.0, force=always_confirm):
                 return {"success": False, "error": "User did not approve this git operation."}
         if name == "git_status":
             return await git_tool.git_status(tool_input.get("cwd"))
@@ -3676,7 +3705,11 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
     if name == "write_file":
         resolved_write_path = _resolve_write_path(tool_input["path"], tool_input["content"], user_hint)
 
-    if name in _FILE_WRITE_TOOLS and (not arm_switch.is_armed() or _voice_mismatch()):
+    # delete_file always confirms live -- see _ALWAYS_CONFIRM_TOOLS:
+    # irreversible data loss, never eligible for the arm_switch or
+    # chat-approval shortcuts the rest of this set gets.
+    _always_confirm_file_op = name in _ALWAYS_CONFIRM_TOOLS
+    if name in _FILE_WRITE_TOOLS and (_always_confirm_file_op or not arm_switch.is_armed() or _voice_mismatch()):
         description = {
             "write_file": f"Write to file: {resolved_write_path}",
             "edit_file": (
@@ -3710,7 +3743,7 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             lint_findings = security_lint.lint_content(tool_input.get("new_source", ""))
             description += security_lint.format_findings(lint_findings)
         approved = await _request_approval(
-            f"Nancy wants to: {description}", timeout=120.0
+            f"Nancy wants to: {description}", timeout=120.0, force=_always_confirm_file_op
         )
         if not approved:
             return {"success": False, "error": "User did not approve this file operation."}
