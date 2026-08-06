@@ -474,13 +474,13 @@ class TechnicalAnalysisEngine:
         # Fallback: real 24h range, not a fabricated structural level --
         # kept only for the case where genuinely no swing point exists yet.
         return (
-            [round(snapshot.low_24h * 0.99, 6)],
-            [round(snapshot.high_24h * 1.01, 6)],
+            [round(snapshot.low_24h * 0.99, 2)],
+            [round(snapshot.high_24h * 1.01, 2)],
         )
 
     def _calculate_pivot(self, snapshot: MarketSnapshot) -> float:
         """Calculate pivot point"""
-        return (snapshot.high_24h + snapshot.low_24h + snapshot.price) / 3
+        return round((snapshot.high_24h + snapshot.low_24h + snapshot.price) / 3, 2)
 
     def _calculate_momentum(self, snapshot: MarketSnapshot, closes: List[float]) -> float:
         """Momentum as real rate-of-change over the available history when

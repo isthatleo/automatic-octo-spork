@@ -105,6 +105,41 @@ const PROFILES: Record<OrbState, StateProfile> = {
   sleeping:    { color: BLUE,    label: 'Resting',     arcDuration: 26, dotDuration: 96, glowRange: [0.18, 0.4], ringPulseMs: 2600 },
 }
 
+/** Maps a real, in-flight tool-call name (see ws-client's onToolProgress,
+ * fired the instant a tool actually starts during a chat turn) to the Book
+ * VI Ch.10 cognitive state it represents, so the Orb shows what kind of
+ * thinking is happening instead of one generic "Thinking" for every tool
+ * call. Verified against each tool's real registered name in the backend
+ * (grep `"name": "..."` across backend/*.py) rather than guessed. Tools not
+ * listed here return undefined -- callers fall back to plain 'thinking'
+ * rather than a guessed label for an unmapped tool. */
+const TOOL_ORB_STATES: Partial<Record<string, OrbState>> = {
+  // researching: reaching outside the conversation for new information
+  web_search: 'researching', fetch_url: 'researching', search_arxiv: 'researching',
+  get_prediction_markets: 'researching', extract_document_text: 'researching',
+  browser_navigate: 'researching', browser_get_text: 'researching', browser_screenshot: 'researching',
+  browser_click: 'researching', browser_fill: 'researching', search_files: 'researching',
+  glob_files: 'researching', look_at_camera: 'researching', take_screenshot: 'researching',
+  // recalling: retrieving what Nancy already knows, not learning something new
+  search_conversation_history: 'recalling', search_knowledge_graph: 'recalling',
+  // learning: writing new durable knowledge (backend/knowledge/extraction.py)
+  extract_knowledge: 'learning',
+  // planning: organizing/delegating work rather than doing it directly
+  create_subagent: 'planning', delegate_to_coworker: 'planning',
+  // executing: real mutation/action tools -- Ch.10's existing Execution
+  // state, first routed here from a live chat tool call instead of staying
+  // on generic "Thinking" for the whole call.
+  write_file: 'executing', edit_file: 'executing', delete_file: 'executing',
+  move_file: 'executing', execute_command: 'executing', open_application: 'executing',
+}
+
+/** Book VI Ch.10 cognitive state for a real in-flight tool call, or
+ * undefined if this tool isn't categorized (caller should fall back to a
+ * generic state rather than guess). */
+export function orbStateForTool(toolName: string): OrbState | undefined {
+  return TOOL_ORB_STATES[toolName]
+}
+
 interface AmbientParticle { x: number; y: number; driftX: number; driftY: number; duration: number; delay: number; size: number }
 
 /** Deterministic scatter (no Math.random() per frame/render -- keeps
@@ -451,11 +486,31 @@ export function NancyOrb({
             ))}
           </motion.g>
 
-          {/* Book VI Ch.7 rings 2 & 5: MEMORY and REASONING, each an arc whose
-              sweep length is that subsystem's real activity level. They are
-              invisible at rest by design -- Ch.3 Silence, and an always-on
-              indicator communicates nothing. Amber for memory is Ch.18's
-              explicit binding. */}
+          {/* Book VI Ch.7's six rings, all bound to the same real
+              subsystem_activity.py signal. They are invisible at rest by
+              design -- Ch.3 Silence, and an always-on indicator communicates
+              nothing. Amber for memory and cyan/blue for the rest follow
+              Ch.18's palette (Amber = memory explicitly; Emerald = health/
+              success; Ice cyan = knowledge; Electric blue = network, pairing
+              the "synchronization" ring with the identity color). Radii and
+              rotation offsets are staggered purely so six arcs starting from
+              the same angle don't read as one blob. */}
+          {(levels?.health ?? 0) > 0.02 && (
+            <circle
+              cx="50" cy="50" r="29" fill="none" stroke={PULSE_GREEN} strokeWidth="0.8"
+              strokeLinecap="round" opacity={0.25 + (levels?.health ?? 0) * 0.6}
+              strokeDasharray={`${(levels?.health ?? 0) * 182} 182`}
+              transform="rotate(180 50 50)"
+            />
+          )}
+          {(levels?.network ?? 0) > 0.02 && (
+            <circle
+              cx="50" cy="50" r="35" fill="none" stroke={BLUE} strokeWidth="0.8"
+              strokeLinecap="round" opacity={0.25 + (levels?.network ?? 0) * 0.6}
+              strokeDasharray={`${(levels?.network ?? 0) * 220} 220`}
+              transform="rotate(45 50 50)"
+            />
+          )}
           {(levels?.memory ?? 0) > 0.02 && (
             <circle
               cx="50" cy="50" r="38" fill="none" stroke={AMBER} strokeWidth="0.8"
@@ -470,6 +525,14 @@ export function NancyOrb({
               strokeLinecap="round" opacity={0.25 + (levels?.reasoning ?? 0) * 0.6}
               strokeDasharray={`${(levels?.reasoning ?? 0) * 257} 257`}
               transform="rotate(90 50 50)"
+            />
+          )}
+          {(levels?.knowledge ?? 0) > 0.02 && (
+            <circle
+              cx="50" cy="50" r="47" fill="none" stroke={CYAN} strokeWidth="0.8"
+              strokeLinecap="round" opacity={0.25 + (levels?.knowledge ?? 0) * 0.6}
+              strokeDasharray={`${(levels?.knowledge ?? 0) * 295} 295`}
+              transform="rotate(-45 50 50)"
             />
           )}
 

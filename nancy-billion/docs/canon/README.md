@@ -14,13 +14,22 @@ over a literal rewrite.
 | [V](BOOK_V_MEMORY_KNOWLEDGE_COGNITIVE.md) | Memory, Knowledge & Cognitive Architecture | Memory categories, knowledge graph node/relationship types, the cognitive stack |
 | [VI](BOOK_VI_UI_UX_EXPERIENCE.md) | UI/UX, Visual Language & Experience Bible | The Orb (Intelligence Core), its six orbit rings and ten thinking states, dashboard/sidebar/chat layout, motion/color/typography language |
 
-Book VI Ch.7's six orbit rings (system health, memory, knowledge, agent, reasoning, network
-synchronization) were already wired to a real signal before this index existed --
-`backend/subsystem_activity.py`'s `SUBSYSTEMS` tuple is exactly that list, poked by real
-memory/agent/LLM activity across the backend (see `Book VI Ch.7` citations via
-`grep -rn "Book VI" backend/`) rather than fixed timers. Chapters beyond the ring-activity signal
-(particle system, thinking-state choreography, dashboard/sidebar layout, color/motion/sound design)
-have not been audited against the frontend yet.
+**Book VI status (audited + partially wired 2026-08-06, see `CHANGELOG.md`):**
+- Ch.7 (six orbit rings) -- REAL. All six (health/memory/knowledge/agent/reasoning/network) render in
+  `components/nancy/nancy-orb.tsx`, each bound to `backend/subsystem_activity.py`'s live signal via
+  `onSubsystemActivity`, invisible at rest.
+- Ch.10 (ten thinking states) -- REAL for the 7 previously-dead cognitive states. `orbStateForTool()`
+  (`nancy-orb.tsx`) maps real in-flight tool names to reasoning/researching/recalling/planning/
+  learning/executing; `sleeping` is driven by a genuine pointer/keyboard inactivity timer in
+  `app/page.tsx`. `reflecting` remains defined but has no real trigger wired yet.
+- Ch.18 (color philosophy) -- **superseded by a deliberate decision, not an oversight.** The live app
+  runs "Graphite & Ember" (`app/globals.css`), which explicitly rejects Book VI's blue/cyan/violet
+  palette. Ring/state *colors* inside the Orb itself still use Book VI's hues (Amber=memory,
+  Emerald=health, Ice cyan=knowledge, Electric blue=network/idle) since those are semantic bindings
+  internal to the Orb, not the app-wide theme -- the two currently coexist without conflict.
+- Ch.8 (particle system), Ch.11/12 (dashboard/sidebar layout), Ch.6 (glass/WebGL energy core), Ch.20
+  (beyond sound, which is REAL -- see `lib/nancy/sfx.ts`) -- not yet audited/wired against the rest of
+  the frontend.
 
 ## How this is actually used
 

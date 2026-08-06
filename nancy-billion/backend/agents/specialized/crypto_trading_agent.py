@@ -298,11 +298,15 @@ class CryptoTradingAgent(SpecializedAgent):
         macd_result = macd(price_data, 12, 26, 9)
 
         indicators = {
+            # Real moving-average price levels, rounded to 2dp -- these are
+            # genuine levels a trader watches (e.g. "price reclaimed the
+            # 20-SMA"), not raw indicator math, so they get the same
+            # 2-decimal display convention as support/resistance/FVGs.
             "moving_averages": {
-                "sma_20": sma_20[-1] if len(sma_20) > 0 else current_price,
-                "sma_50": sma_50[-1] if len(sma_50) > 0 else current_price,
-                "ema_12": ema_12[-1] if len(ema_12) > 0 else current_price,
-                "ema_26": ema_26[-1] if len(ema_26) > 0 else current_price
+                "sma_20": round(sma_20[-1], 2) if len(sma_20) > 0 else round(current_price, 2),
+                "sma_50": round(sma_50[-1], 2) if len(sma_50) > 0 else round(current_price, 2),
+                "ema_12": round(ema_12[-1], 2) if len(ema_12) > 0 else round(current_price, 2),
+                "ema_26": round(ema_26[-1], 2) if len(ema_26) > 0 else round(current_price, 2)
             },
             "oscillators": {
                 "rsi": round(current_rsi, 4),

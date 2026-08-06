@@ -13,7 +13,7 @@ import { OverviewV2Panel } from '@/components/nancy/overview-v2'
 import { MissionControlPanel } from '@/components/nancy/mission-control'
 import { PanelErrorBoundary } from '@/components/nancy/panel-error-boundary'
 import { ConsoleBar } from '@/components/nancy/console-bar'
-import { NancyOrb, type OrbState } from '@/components/nancy/nancy-orb'
+import { NancyOrb, type OrbState, orbStateForTool } from '@/components/nancy/nancy-orb'
 import { LyricsTranscript } from '@/components/nancy/lyrics-transcript'
 import { WorkflowOrchestratorPanel } from '@/components/nancy/workflow-orchestrator'
 import { CanvasPanel } from '@/components/nancy/canvas-panel'
@@ -191,6 +191,35 @@ export default function Page() {
   const [clock, setClock] = useState('')
   const [speaking, setSpeaking] = useState(false)
   const [thinking, setThinking] = useState(false)
+  // Book VI Ch.10 cognitive states, derived from the real in-flight tool
+  // name (see onToolProgress below / orbStateForTool) -- replaces generic
+  // "Thinking" with what Nancy is actually doing while a tool call is in
+  // flight. Cleared on turn completion/error so orbState falls back to its
+  // normal derivation.
+  const [activeToolOrbState, setActiveToolOrbState] = useState<OrbState | null>(null)
+  // Real inactivity signal for Ch.10's Sleep state -- bumped by genuine
+  // pointer/keyboard activity (see the listener effect below), not a fixed
+  // demo timer. Checked on an interval rather than a single setTimeout so
+  // it also recovers (goes back to idle) the moment activity resumes.
+  const SLEEP_AFTER_MS = 10 * 60 * 1000
+  const lastActivityRef = useRef(Date.now())
+  const [longIdle, setLongIdle] = useState(false)
+  useEffect(() => {
+    const bump = () => {
+      lastActivityRef.current = Date.now()
+      setLongIdle(false)
+    }
+    window.addEventListener('pointerdown', bump)
+    window.addEventListener('keydown', bump)
+    const iv = setInterval(() => {
+      if (Date.now() - lastActivityRef.current > SLEEP_AFTER_MS) setLongIdle(true)
+    }, 30_000)
+    return () => {
+      window.removeEventListener('pointerdown', bump)
+      window.removeEventListener('keydown', bump)
+      clearInterval(iv)
+    }
+  }, [])
   const [currentUtterance, setCurrentUtterance] = useState('')
   const [wordIndex, setWordIndex] = useState(-1)
   // Voice is the primary interaction; the full terminal (scrollback + typed
@@ -647,6 +676,7 @@ export default function Page() {
           setLogs([])
           setPanel('overview')
           setThinking(false)
+          setActiveToolOrbState(null)
           nancySay(result.reply)
           break
         case 'unknown': {
@@ -657,11 +687,15 @@ export default function Page() {
           // immediately supersedes whatever's still speaking (see
           // askNancyStreaming/beginStreamedTurn).
           setThinking(true)
+          setActiveToolOrbState(null) // a fresh turn supersedes any tool state left over from a prior one
           const turnId = askNancyStreaming(
             input,
             {
               onAudioChunk: enqueueAudioChunk,
-              onToolProgress: (toolName) => log('info', describeToolProgress(toolName)),
+              onToolProgress: (toolName) => {
+                log('info', describeToolProgress(toolName))
+                setActiveToolOrbState(orbStateForTool(toolName) ?? null)
+              },
               onText: (text) => {
                 const finalText = text || "I'm not sure how to respond to that, Sir."
                 log('nancy', finalText)
@@ -669,6 +703,7 @@ export default function Page() {
               },
               onDone: () => {
                 setThinking(false)
+                setActiveToolOrbState(null)
                 // All chunks have been SENT (not necessarily played yet --
                 // checkSpeechDrained only actually flips `speaking` false
                 // once the queue has also finished playing them).
@@ -678,6 +713,7 @@ export default function Page() {
               onError: () => {
                 sfx.error()
                 setThinking(false)
+                setActiveToolOrbState(null)
                 nancySay("I'm having trouble reaching my backend right now, Sir.")
               },
             },
@@ -938,14 +974,23 @@ export default function Page() {
       : speaking
         ? 'speaking'
         : thinking
-          ? 'thinking'
+          // Book VI Ch.10: while a real tool call is in flight, show what
+          // Nancy is actually doing (researching/recalling/planning/
+          // learning/executing) instead of one generic "Thinking" for
+          // every tool -- see orbStateForTool. Falls back to plain
+          // 'thinking' between tool calls or for uncategorized tools.
+          ? (activeToolOrbState ?? 'thinking')
           : state.listening
             ? 'listening'
             // Real degraded-mode signal: this browser can't do speech
             // recognition at all, not a fabricated "warning" for effect.
             : !state.supported
               ? 'alert'
-              : 'idle'
+              // Book VI Ch.10 Sleep: only reached when genuinely idle for
+              // SLEEP_AFTER_MS with nothing else going on above.
+              : longIdle
+                ? 'sleeping'
+                : 'idle'
 
   if (booting) return <BootSequence onDone={() => setBooting(false)} />
 

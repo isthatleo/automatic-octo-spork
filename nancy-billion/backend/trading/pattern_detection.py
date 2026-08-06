@@ -213,7 +213,7 @@ def detect_fair_value_gaps(candles: List[Candle], lookback_bars: int = 60) -> Li
             for j in range(i + 1, len(candles))
         )
         gaps.append({
-            "type": gap_type, "top": round(top, 6), "bottom": round(bottom, 6),
+            "type": gap_type, "top": round(top, 2), "bottom": round(bottom, 2),
             "formed_at": candles[i - 1]["timestamp"], "filled": filled,
         })
     return gaps
@@ -256,7 +256,7 @@ def key_zones(highs: List[float], lows: List[float], closes: List[float], tolera
         last_close = closes[-1]
         return [
             {
-                "level": round(sum(cl) / len(cl), 6), "kind": kind, "touches": len(cl),
+                "level": round(sum(cl) / len(cl), 2), "kind": kind, "touches": len(cl),
                 "distance_pct": round(abs(sum(cl) / len(cl) - last_close) / last_close * 100, 3),
             }
             for cl in clusters

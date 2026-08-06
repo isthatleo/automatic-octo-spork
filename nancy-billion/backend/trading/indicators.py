@@ -372,8 +372,8 @@ def swing_levels(
         if lows[i] == min(window_lows) and window_lows.count(lows[i]) == 1:
             swing_lows.append(lows[i])
 
-    resistance = sorted({round(h, 6) for h in swing_highs if h > last_close})[:max_levels]
-    support = sorted({round(l, 6) for l in swing_lows if l < last_close}, reverse=True)[:max_levels]
+    resistance = sorted({round(h, 2) for h in swing_highs if h > last_close})[:max_levels]
+    support = sorted({round(l, 2) for l in swing_lows if l < last_close}, reverse=True)[:max_levels]
     return {"support": support, "resistance": resistance}
 
 

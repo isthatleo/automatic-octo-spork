@@ -108,9 +108,9 @@ def compute_bollinger_bands(data: list[float], period: int = 20, num_std: float 
             window = arr[i - period + 1: i + 1]
             std = float(np.std(window, ddof=1))
             m = middle[i - padding]
-            upper.append(round(m + num_std * std, 6))
-            lower.append(round(m - num_std * std, 6))
-    return {"middle": [round(float(v), 6) for v in middle], "upper": upper, "lower": lower}
+            upper.append(round(m + num_std * std, 2))
+            lower.append(round(m - num_std * std, 2))
+    return {"middle": [round(float(v), 2) for v in middle], "upper": upper, "lower": lower}
 
 
 def macd(data: list[float], fast: int = 12, slow: int = 26, signal_period: int = 9) -> dict[str, list[float]]:
@@ -282,7 +282,7 @@ def conditional_var(returns: list[float], confidence: float = 0.95) -> float:
 def fibonacci_retracement(high: float, low: float) -> dict[str, float]:
     diff = high - low
     levels = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
-    return {f"{int(l * 100)}%": round(high - l * diff, 6) for l in levels}
+    return {f"{int(l * 100)}%": round(high - l * diff, 2) for l in levels}
 
 
 def solve_linear_program(c: list[float], A: list[list[float]], b: list[float], bounds: list[tuple[float, float]] | None = None) -> dict[str, Any]:
