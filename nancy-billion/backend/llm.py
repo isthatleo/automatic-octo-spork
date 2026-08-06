@@ -1411,6 +1411,17 @@ class FallbackLLM(LLMBackend):
     # inference) could block the entire chain well past a minute with
     # nothing to cut it short and move to the next backend.
     BACKEND_TIMEOUT_S = 20.0
+    # OmniRoute is structurally different from every other entry in this
+    # chain: it's not one provider, it's a local gateway that does its OWN
+    # internal fallback across 290+ real providers before answering, so a
+    # single call can legitimately need longer than one vendor's API would.
+    # Confirmed live: measured across this session's real traffic, exactly
+    # ~52% of OmniRoute calls hit the generic 20s ceiling and got cut off
+    # (57 succeeded, 62 timed out) -- not a hang, just genuinely still
+    # working through its own provider list when this chain gave up on it.
+    # A longer, backend-specific budget lets its own internal resilience
+    # actually pay off instead of being punished for having one.
+    _BACKEND_TIMEOUT_OVERRIDES_S: Dict[str, float] = {"OmniRouteLLM": 40.0}
     # Once a backend fails with a non-transient error (quota/credit/auth --
     # see is_transient_llm_error), skip it for this long instead of paying
     # its real network round-trip cost again on every single subsequent
@@ -1456,6 +1467,9 @@ class FallbackLLM(LLMBackend):
                 )
                 continue
             call_start = time.monotonic()
+            backend_timeout_s = self._BACKEND_TIMEOUT_OVERRIDES_S.get(
+                backend.__class__.__name__, self.BACKEND_TIMEOUT_S
+            )
             try:
                 logger.info(f"Trying LLM backend: {name}")
                 # Real inference drives Book VI Ch.7's reasoning ring.
@@ -1471,7 +1485,8 @@ class FallbackLLM(LLMBackend):
                 # retry and (for quota specifically) is strictly better
                 # served by immediately trying the NEXT backend in the chain
                 # than waiting out this one's own suggested retry delay.
-                # Still bounded by the same overall BACKEND_TIMEOUT_S.
+                # Still bounded by the same overall backend_timeout_s (see
+                # _BACKEND_TIMEOUT_OVERRIDES_S for the one real exception).
                 result = await asyncio.wait_for(
                     retry_async(
                         lambda: backend.generate(prompt, max_tokens=max_tokens, temperature=temperature),
@@ -1479,7 +1494,7 @@ class FallbackLLM(LLMBackend):
                         base_delay_s=0.4,
                         should_retry=is_transient_llm_error,
                     ),
-                    timeout=self.BACKEND_TIMEOUT_S,
+                    timeout=backend_timeout_s,
                 )
                 # A provider can return HTTP 200 with nothing in it -- a
                 # content filter, a refusal, a malformed tool call, or
@@ -1510,11 +1525,11 @@ class FallbackLLM(LLMBackend):
                 return result
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"LLM backend {backend.__class__.__name__} timed out after {self.BACKEND_TIMEOUT_S}s"
+                    f"LLM backend {backend.__class__.__name__} timed out after {backend_timeout_s}s"
                 )
                 usage_analytics.record_call(
                     backend.__class__.__name__, time.monotonic() - call_start, prompt, "", False,
-                    error=f"timed out after {self.BACKEND_TIMEOUT_S}s",
+                    error=f"timed out after {backend_timeout_s}s",
                 )
                 last_exception = TimeoutError(f"{backend.__class__.__name__} timed out")
                 continue

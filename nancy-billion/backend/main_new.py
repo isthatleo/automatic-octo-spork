@@ -2328,6 +2328,63 @@ def _is_pure_smalltalk(text: str) -> bool:
     return bool(_SMALLTALK_RE.match(t))
 
 
+# Detects "yes, build that" -- approving something Billion herself proposed
+# earlier in the SAME conversation. Confirmed live as a real gap: a short
+# reply like "sounds good, do it" or "ok, go ahead" matches _SMALLTALK_RE
+# (via "ok"/"sounds good") and so never engaged the tool-use loop at all --
+# an approved build was silently never built, and she just kept chatting
+# agreeably instead. This is a narrow, separate exemption from smalltalk,
+# not a change to it: it only fires when a real proposal is actually
+# sitting in her own last turn, so an unrelated "ok" reply to a plain
+# question never triggers an unwanted autonomous build.
+_APPROVAL_RE = re.compile(
+    r"^(yes|yeah|yep|yup|sure|ok(ay)?|do it|go ahead|let'?s do (it|that)|let'?s build it|"
+    r"sounds good|please do|approved?|build it|make it happen|go for it|proceed|"
+    r"absolutely|definitely|go for that|do that)\b",
+    re.IGNORECASE,
+)
+_BILLION_PROPOSAL_RE = re.compile(
+    r"\b(would you like me to|should i|shall i|want me to|do you want me to|could i|"
+    r"i could|i can)\b[^.?!\n]{0,100}"
+    r"\b(build|design|create|implement|develop|put together|write|add)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_approving_own_proposal(user_text: str, history_text: str) -> bool:
+    if not _APPROVAL_RE.match(user_text.strip()):
+        return False
+    # Only her MOST RECENT turn counts as "pending approval" -- a proposal
+    # from many turns ago shouldn't still fire on an unrelated later "ok".
+    assistant_turns = re.findall(r"assistant:\s*(.*?)(?=\nuser:|\Z)", history_text, re.DOTALL)
+    if not assistant_turns:
+        return False
+    return bool(_BILLION_PROPOSAL_RE.search(assistant_turns[-1]))
+
+
+# Injected into dynamic_context whenever _is_approving_own_proposal fires --
+# turns a bare "yes" into a real, complete, reported, committed build
+# instead of just an agreeable acknowledgement.
+_AUTONOMOUS_BUILD_DIRECTIVE = """
+=== AUTONOMOUS BUILD APPROVED ===
+He just approved something YOU proposed earlier in this conversation (see the
+proposal in the recent history above). Do not just acknowledge this -- actually
+build the complete thing now, for real:
+- Use write_file/edit_file/execute_command across as many tool-call rounds as it
+  genuinely takes. Deliver a real, working result -- not a stub, not a partial
+  version, not a description of what you would do.
+- When the build is genuinely finished, use git_commit (and git_push) to commit
+  everything you created or changed as part of it, with a clear commit message
+  describing what was built. This is expected every time, not optional.
+- Close with a full, comprehensive report: every file you created or modified,
+  what each one does, and how he can run or test it. Never just say "done" --
+  he needs to know exactly what now exists because of this.
+If you genuinely cannot complete the build this turn (a real tool failure, not
+laziness), say exactly what's done, what's left, and why -- never claim
+completion you didn't actually reach.
+"""
+
+
 # Real tool-use fallback chain -- Claude is tried first (richest: vision
 # support in tool results, native structured tool_use), but confirmed live
 # this session that when Anthropic is unavailable (e.g. out of API credit),
@@ -2423,7 +2480,15 @@ _FALLBACK_TOOL_NAMES = {
     "delete_file", "move_file", "execute_command", "fetch_url", "web_search",
     "post_to_canvas", "open_application", "look_at_camera", "run_background_task",
     "browser_navigate", "browser_get_text", "browser_screenshot", "browser_click", "browser_fill",
-    "delegate_to_coworker",
+    "delegate_to_coworker", "send_telegram_document",
+    # Confirmed live as a real gap: git tools were missing from this trimmed
+    # set entirely, meaning any turn that fell through to a smaller-context
+    # backend (Groq/OpenRouter/OpenCode -- which is most turns whenever
+    # Groq's primary model is quota-exhausted) had no way to actually commit
+    # a real build, only the raw execute_command escape hatch. Needed for
+    # the "commit everything you build" behavior to actually hold on the
+    # backends carrying most of the real traffic, not just on Claude.
+    "git_status", "git_diff", "git_log", "git_commit", "git_push",
 }
 
 
@@ -3952,6 +4017,21 @@ async def _maybe_distill_skill(user_text: str, response_text: str, tool_trace: L
         logger.exception("Skill distillation failed (reply was unaffected)")
 
 
+# A gated file/terminal tool call inside a tool round can legitimately block
+# for as long as _request_approval's own 120s window (it waits on a real
+# human tapping Approve/Deny on Telegram). Confirmed live as a real bug: the
+# tool-round timeout below used to be 45.0 -- shorter than that approval
+# window -- so a tap that arrived after ~45s did nothing (asyncio.wait_for
+# had already cancelled the round, which pops the pending approval out of
+# TelegramNotifier._pending_approvals in its `finally`, orphaning the
+# button), the whole turn silently retried on the next backend and sent a
+# *duplicate* approval prompt, and once every backend lost that race the
+# turn fell through to the tool-less final fallback -- which fabricated a
+# "done" claim despite having no idea whether the write actually happened.
+# This must stay comfortably above _request_approval's timeout, not below it.
+_TOOL_ROUND_TIMEOUT_S = 150.0
+
+
 async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "voice") -> tuple[str, dict]:
     """Route a chat message to Claude's real tool-use loop when it clearly
     wants a real action, to a real specialized agent when the text clearly
@@ -3989,6 +4069,13 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
     _current_tool_channel.set(channel)
     history_text = _history_to_text()
     static_system, dynamic_context, user_turn = _build_chat_parts(user_text, history_text, channel)
+    # "yes, build that" approving her own prior suggestion -- goes in
+    # dynamic_context (turn-specific), never static_system (must stay
+    # byte-identical per channel for Anthropic prompt caching, same rule
+    # _live_datetime_prompt_block already follows).
+    approving_own_proposal = _is_approving_own_proposal(user_text, history_text)
+    if approving_own_proposal:
+        dynamic_context = f"{dynamic_context}\n\n{_AUTONOMOUS_BUILD_DIRECTIVE}"
     # Single-string shape for backends without a usable system role
     # (OpenAI-compat tool fallbacks, plain-chat fallback chain) -- same
     # content, just joined.
@@ -4004,7 +4091,12 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
     # (up to 5 sequential calls per backend even when no tool ends up being
     # called), which is why this only runs when the message plausibly needs
     # a tool at all -- not for every message the way it originally did.
-    if _wants_tools(user_text) or (_ALWAYS_ENGAGE_TOOLS and not _is_pure_smalltalk(user_text)):
+    # approving_own_proposal always forces this open too: a bare "yes"/"ok"
+    # approving a real proposal from her own last turn would otherwise match
+    # _SMALLTALK_RE and never reach the tool loop at all -- see
+    # _is_approving_own_proposal's docstring for the confirmed-live gap.
+    wants_tools_this_turn = _wants_tools(user_text) or approving_own_proposal or (_ALWAYS_ENGAGE_TOOLS and not _is_pure_smalltalk(user_text))
+    if wants_tools_this_turn:
         async def _file_tool_executor(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
             # Binds this turn's real user_text in as a write_file extension
             # hint -- see _explicit_language_hint -- without changing the
@@ -4068,7 +4160,7 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
                     # inside a single 45s-budget call.
                     system=_chat_system_blocks(static_system, dynamic_context),
                 ),
-                timeout=45.0,
+                timeout=_TOOL_ROUND_TIMEOUT_S,
             )
             return _enforce_sir(resp), {"tool_use": True, "tool_backend": "AnthropicLLM", "images": captured_images, "tool_trace": tool_trace}
 
@@ -4103,7 +4195,7 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
                         on_tool_image=captured_images.append,
                         on_tool_call=_traced_tool_progress,
                     ),
-                    timeout=45.0,
+                    timeout=_TOOL_ROUND_TIMEOUT_S,
                 )
                 if _withheld and not tool_trace and _claude_available:
                     logger.info(
@@ -4167,6 +4259,30 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
             except Exception as e:
                 logger.warning("Specialized agent '%s' failed, falling back to LLM: %s", routed_key, e)
 
+    if wants_tools_this_turn:
+        # Confirmed live as a real failure: every tool-capable backend was
+        # tried above and none completed this turn (often because a gated
+        # write was genuinely still waiting on a Telegram approval when its
+        # backend's round timed out -- see _TOOL_ROUND_TIMEOUT_S). This final
+        # call has zero tool access and zero visibility into any of that, so
+        # left to itself it will confidently narrate a file/action as done
+        # when nothing was actually confirmed to have happened. The standing
+        # "never claim a file action" rule in the system prompt wasn't enough
+        # on its own under direct pressure from an approved build request --
+        # this turn needs to be told, explicitly and concretely, that no tool
+        # actually ran this time.
+        prompt = (
+            f"{prompt}\n\n"
+            "=== NO TOOL ACCESS THIS TURN (real, confirmed) ===\n"
+            "Every tool-capable backend was tried for this turn and none of them "
+            "completed -- you have NO tool access right now and NOTHING you "
+            "asked for (file writes, edits, commands, commits, sends) was "
+            "confirmed to actually happen. Do not say or imply that a file was "
+            "created, edited, saved, committed, or sent. Tell him plainly that "
+            "the real action didn't go through this turn (mention if it looked "
+            "like it was still waiting on his Telegram approval when it ran out "
+            "of time), and that he should ask again."
+        )
     try:
         # Telegram gets real headroom for the "4 well-developed paragraphs"
         # depth its style addendum asks for. Voice/web used to cap at 512,
@@ -4276,7 +4392,8 @@ async def _generate_response_stream(user_text: str):
         except Exception:
             routed_key = None
     wants_tools = _any_tool_backend_configured() and (
-        _wants_tools(user_text) or (_ALWAYS_ENGAGE_TOOLS and not _is_pure_smalltalk(user_text))
+        _wants_tools(user_text) or _is_approving_own_proposal(user_text, history_text)
+        or (_ALWAYS_ENGAGE_TOOLS and not _is_pure_smalltalk(user_text))
     )
 
     if routed_key or wants_tools:
@@ -9926,7 +10043,7 @@ async def _run_cron_skill(action_payload: Dict[str, Any], trigger_name: str = "j
             prompt, _all_chat_tools(), _execute_file_tool, max_tokens=1024,
             system=skill_system,
         ),
-        timeout=120.0,
+        timeout=_TOOL_ROUND_TIMEOUT_S,
     )
     return _enforce_sir(resp)[:800]
 
