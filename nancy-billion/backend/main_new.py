@@ -110,6 +110,8 @@ from channels.home_assistant import HOME_ASSISTANT_TOOLS
 from providers.spotify_tool import SPOTIFY_TOOLS, handle_spotify_tool
 from providers import google_calendar
 from memory import wiki_store, commitments
+from knowledge.graph import KnowledgeGraph
+from knowledge.extraction import ingest_text as knowledge_ingest_text, KNOWLEDGE_TOOLS
 import evidence_ledger
 import lifecycle_hooks
 import lsp_client
@@ -1134,6 +1136,12 @@ nancy_brain = NancyContextualBrain(user_id="user")
 # Nancy's Memory System (long-term intelligence)
 memory_manager = MemoryManager(user_id="user")
 memory_manager.set_context_manager(nancy_brain.context)
+
+# Nancy's Knowledge Graph (Book II Phase IV) -- entities and relationships
+# resolved out of memory/documents, separate from memory_manager per
+# Book III Ch.1's Modularity principle ("Memory should not know how
+# documents work ... everything communicates through contracts").
+knowledge_graph = KnowledgeGraph()
 
 # Household member memory managers (see profiles_store.py/household_voice_id.py)
 # -- one real, isolated MemoryGraph per identified profile, created lazily on
@@ -2630,7 +2638,7 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
         + network_tools.NETWORK_TOOLS + personal_tools.PERSONAL_TOOLS + UTILITY_TOOLS
         + BACKUP_TOOLS + HOME_ASSISTANT_TOOLS + SPOTIFY_TOOLS + google_calendar.CALENDAR_TOOLS + NODE_TOOLS + DIFF_TOOLS
         + doc_extraction.DOC_EXTRACTION_TOOLS + VOICE_CALL_TOOLS + NUMBERED_OVERLAY_TOOLS + MEDIA_TOOLS
-        + RESEARCH_TOOLS + DOCUMENT_TOOLS + EMAIL_TOOLS + JUPYTER_TOOLS
+        + RESEARCH_TOOLS + DOCUMENT_TOOLS + EMAIL_TOOLS + JUPYTER_TOOLS + KNOWLEDGE_TOOLS
     )
 
 
@@ -2881,6 +2889,19 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
 
     if name == "extract_document_text":
         return doc_extraction.extract_document(tool_input.get("path", ""))
+
+    if name == "extract_knowledge":
+        return await knowledge_ingest_text(
+            knowledge_graph, tool_input.get("text", ""), source=tool_input.get("source"),
+        )
+
+    if name == "search_knowledge_graph":
+        query = tool_input.get("query", "")
+        summary = knowledge_graph.entity_summary(query)
+        if summary is not None:
+            return {"success": True, "match": "exact_or_alias", **summary}
+        hits = knowledge_graph.search(query)
+        return {"success": True, "match": "keyword", "entities": [n.to_dict() for n in hits]}
 
     if name == "place_phone_call":
         if not arm_switch.is_armed() or _voice_mismatch():
@@ -7234,6 +7255,54 @@ async def get_wiki_page(slug: str):
     if page is None:
         raise HTTPException(status_code=404, detail="wiki page not found")
     return {"success": True, "page": page.to_dict()}
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Graph -- see knowledge/graph.py, knowledge/extraction.py.
+# Book II Phase IV.
+# ---------------------------------------------------------------------------
+class KnowledgeExtractRequest(BaseModel):
+    text: str
+    source: Optional[str] = None
+
+
+@app.get("/knowledge/graph", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def get_knowledge_graph(entity_type: Optional[str] = None):
+    try:
+        nodes = knowledge_graph.list_entities(entity_type) if entity_type else knowledge_graph.list_entities()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"unknown entity_type {entity_type!r}")
+    node_ids = {n.id for n in nodes}
+    edges = [e for e in knowledge_graph.edges.values() if e.source_id in node_ids and e.target_id in node_ids]
+    return {
+        "success": True,
+        "stats": knowledge_graph.stats(),
+        "entities": [n.to_dict() for n in nodes],
+        "relationships": [e.to_dict() for e in edges],
+    }
+
+
+@app.get("/knowledge/search", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def search_knowledge_graph_route(q: str, limit: int = 10):
+    return {"success": True, "entities": [n.to_dict() for n in knowledge_graph.search(q, top_k=limit)]}
+
+
+@app.get("/knowledge/entity/{name}", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def get_knowledge_entity(name: str):
+    summary = knowledge_graph.entity_summary(name)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="entity not found")
+    return {"success": True, **summary}
+
+
+@app.post("/knowledge/extract", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def extract_knowledge_route(req: KnowledgeExtractRequest):
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="text is required")
+    result = await knowledge_ingest_text(knowledge_graph, req.text, source=req.source)
+    if not result.get("success"):
+        raise HTTPException(status_code=502, detail=result.get("error", "extraction failed"))
+    return result
 
 
 # ---------------------------------------------------------------------------
