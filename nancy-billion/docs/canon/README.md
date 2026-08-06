@@ -12,11 +12,15 @@ over a literal rewrite.
 | [III](BOOK_III_ENGINEERING_ARCHITECTURE.md) | Engineering Architecture Bible | Target architecture (Rust/Axum, Postgres/Qdrant, monorepo) -- treated as aspirational guidance, not an active migration; see the note at the top of the file |
 | [IV](BOOK_IV_AGENT_BIBLE.md) | The Agent Bible | Agent hierarchy, DNA, lifecycle, divisions, the Agent Oath |
 | [V](BOOK_V_MEMORY_KNOWLEDGE_COGNITIVE.md) | Memory, Knowledge & Cognitive Architecture | Memory categories, knowledge graph node/relationship types, the cognitive stack |
+| [VI](BOOK_VI_UI_UX_EXPERIENCE.md) | UI/UX, Visual Language & Experience Bible | The Orb (Intelligence Core), its six orbit rings and ten thinking states, dashboard/sidebar/chat layout, motion/color/typography language |
 
-Later books (VI+) are referenced by citation in backend code (`trust.py`, `subsystem_activity.py`,
-etc. cite "Book VI Ch.7", "Book VI Ch.10", "Book VI Ch.24" for Orb/UI behavior) from earlier work on
-this codebase, but their source text has not yet been captured here -- if you have it, add it as
-`BOOK_VI_<TITLE>.md` following the same format as I-V.
+Book VI Ch.7's six orbit rings (system health, memory, knowledge, agent, reasoning, network
+synchronization) were already wired to a real signal before this index existed --
+`backend/subsystem_activity.py`'s `SUBSYSTEMS` tuple is exactly that list, poked by real
+memory/agent/LLM activity across the backend (see `Book VI Ch.7` citations via
+`grep -rn "Book VI" backend/`) rather than fixed timers. Chapters beyond the ring-activity signal
+(particle system, thinking-state choreography, dashboard/sidebar layout, color/motion/sound design)
+have not been audited against the frontend yet.
 
 ## How this is actually used
 
