@@ -2308,6 +2308,17 @@ _ALWAYS_ENGAGE_TOOLS = os.getenv("ALWAYS_ENGAGE_TOOLS", "1").strip().lower() in 
 # to Telegram when the request actually came from a web/voice session.
 _current_tool_channel: ContextVar[str] = ContextVar("_current_tool_channel", default="voice")
 
+# True for the one turn where he just approved something Billion proposed,
+# in whichever channel he's actually talking to her on (web/voice/console/
+# Telegram) -- set alongside approving_own_proposal in
+# _generate_response_via_hierarchy_impl. _request_approval reads this so
+# that approval doesn't ALSO require a separate, second Telegram round-trip
+# for the exact same thing he just said yes to in the conversation itself;
+# it still notifies Telegram (so the phone reflects "already approved" for
+# visibility) rather than silently skipping the record entirely. Never
+# bypasses a genuine voice mismatch -- see _request_approval.
+_current_turn_chat_approved: ContextVar[bool] = ContextVar("_current_turn_chat_approved", default=False)
+
 _SMALLTALK_RE = re.compile(
     r"^(hi|hey|hello|yo|sup|good\s+(morning|afternoon|evening|night)|thanks|thank\s+you|"
     r"cheers|ok|okay|cool|nice|great|got\s+it|sounds\s+good|bye|goodnight|see\s+you)\b",
@@ -2856,6 +2867,18 @@ async def _request_approval(description: str, timeout: float = 120.0) -> bool:
         else:
             warning = "⚠️ VOICE CHECK inconclusive for this command -- treating it as unverified."
         description = f"{warning}\n\n{description}"
+    if _current_turn_chat_approved.get() and not _voice_mismatch():
+        # He already said yes to this in the conversation itself (web/voice/
+        # console/Telegram) this same turn -- don't make him approve it a
+        # second time on Telegram. Still post it there so his phone shows
+        # the real record, already marked decided rather than as a pending
+        # ask. Best-effort: a failed notification never blocks the action he
+        # already approved.
+        try:
+            await telegram_notifier.send(f"✅ Approved via chat, Sir -- {description}")
+        except Exception as e:
+            logger.warning("Could not post chat-approved notice to Telegram: %s", e)
+        return True
     return await telegram_notifier.request_approval(description, timeout=timeout)
 
 
@@ -4074,6 +4097,7 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
     # byte-identical per channel for Anthropic prompt caching, same rule
     # _live_datetime_prompt_block already follows).
     approving_own_proposal = _is_approving_own_proposal(user_text, history_text)
+    _current_turn_chat_approved.set(approving_own_proposal)
     if approving_own_proposal:
         dynamic_context = f"{dynamic_context}\n\n{_AUTONOMOUS_BUILD_DIRECTIVE}"
     # Single-string shape for backends without a usable system role

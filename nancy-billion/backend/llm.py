@@ -1737,10 +1737,16 @@ def get_llm_backends():
         logger.warning("No valid LLM backends configured; using DummyLLM")
         backends.append(DummyLLM())
 
-    # Full-chain ordering first, then LLM_PRIMARY as a single-backend
-    # override on top of it (so an explicit /llm/primary pick still wins).
+    # Full-chain ordering first, then either a fixed LLM_PRIMARY name or
+    # (LLM_PRIMARY=fastest/auto, or unset) real measured-latency ordering on
+    # top of it -- see apply_latency_order's docstring for why this is safe
+    # to leave on by default (a fast failure never outranks a real reply).
     backends = apply_chain_order(backends)
-    backends = apply_primary_preference(backends)
+    _primary_pref = os.getenv("LLM_PRIMARY", "").strip().lower()
+    if _primary_pref in ("", "fastest", "auto"):
+        backends = apply_latency_order(backends)
+    else:
+        backends = apply_primary_preference(backends)
 
     logger.info(f"LLM backend chain initialized with {len(backends)} backends: {[b.__class__.__name__ for b in backends]}")
     return backends
@@ -1816,6 +1822,53 @@ def apply_chain_order(backends: list) -> list:
             [b.__class__.__name__ for b in local],
         )
     return cloud + local
+
+
+def apply_latency_order(backends: list) -> list:
+    """Order cloud backends by real measured average reply latency
+    (usage_analytics.json's avg_latency_s), fastest first -- LLM_PRIMARY's
+    dynamic alternative to naming one fixed backend. usage_analytics.record_call
+    is only ever invoked from FallbackLLM.generate's plain completion path
+    (never from the tool-use loops in main_new.py), so this latency is a
+    clean measure of "how fast does this backend actually answer" -- never
+    contaminated by local tool execution or a Telegram approval wait.
+
+    Only promotes a backend with BOTH a real sample size (>=3 calls) and a
+    real success rate (>=50%) -- a backend that's "fast" purely because every
+    call fails instantly on an exhausted credit balance (confirmed live:
+    AnthropicLLM and OpenAILLM both show ~2s avg latency at a 0% success
+    rate) must never be promoted for that reason; a fast failure isn't a
+    reply. Backends without enough trustworthy data keep their existing
+    relative order, placed after every backend that has it. Local backends
+    are left alone here -- apply_chain_order already pushes them last.
+    """
+    if not backends:
+        return backends
+    try:
+        summary = usage_analytics.get_usage_summary()
+    except Exception:
+        return backends
+    stats = {e["backend"]: e for e in summary.get("per_backend", [])}
+
+    def is_trustworthy(cls_name: str) -> bool:
+        e = stats.get(cls_name)
+        if not e or e.get("call_count", 0) < 3:
+            return False
+        return (e["success_count"] / e["call_count"]) >= 0.5
+
+    cloud = [b for b in backends if not _is_local_backend(b.__class__.__name__)]
+    local = [b for b in backends if _is_local_backend(b.__class__.__name__)]
+
+    timed = [b for b in cloud if is_trustworthy(b.__class__.__name__)]
+    untimed = [b for b in cloud if not is_trustworthy(b.__class__.__name__)]
+    timed.sort(key=lambda b: stats[b.__class__.__name__]["avg_latency_s"])
+
+    if timed:
+        logger.info(
+            "Fastest-first ordering (LLM_PRIMARY=fastest) applied: %s",
+            [(b.__class__.__name__, stats[b.__class__.__name__]["avg_latency_s"]) for b in timed],
+        )
+    return timed + untimed + local
 
 
 def apply_primary_preference(backends: list) -> list:
