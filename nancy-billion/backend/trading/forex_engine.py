@@ -254,9 +254,7 @@ class ForexDataAggregator:
 
     async def get_historical(self, pair: str, period: str = "1d", days: int = 30) -> List[Dict]:
         """
-        Get real historical daily rates for analysis (Frankfurter has daily
-        resolution only — `period` is accepted for interface compatibility but
-        finer intraday granularity isn't available from this free source).
+        Get real historical daily rates for analysis.
 
         Args:
             pair: Forex pair
@@ -264,12 +262,75 @@ class ForexDataAggregator:
             days: how many calendar days of history to fetch
 
         Returns:
-            List of daily OHLC-shaped dicts built from real close-to-close rates
-            (open==prior close, high/low==close since no intraday data exists).
+            List of daily OHLC-shaped dicts.
         """
+        base, quote = self._split_pair(pair)
+        if base in self._METAL_YAHOO_SYMBOLS and quote == "USD":
+            return await self._get_metal_historical(pair, base, days)
+        return await self._get_forex_historical(pair, base, quote, days)
+
+    async def _get_metal_historical(self, pair: str, base: str, days: int) -> List[Dict]:
+        """Real historical daily OHLC for XAU/XAG via the same Yahoo Finance
+        COMEX futures chart endpoint _get_metal_price already uses for the
+        live quote -- Frankfurter (ECB reference rates) has no commodity
+        data at all, so get_historical previously silently returned []
+        for every metal, and every caller (TechnicalAnalysisEngine included)
+        silently fell back to a coarse 24h-range heuristic instead of real
+        swing-based analysis for gold/silver specifically -- confirmed live
+        the ~1% offset support/resistance now correctly seen for XAU/USD
+        request. Unlike Frankfurter's synthesized OHLC (open==prior close),
+        Yahoo's chart endpoint gives genuine daily open/high/low/close."""
         import aiohttp
 
-        base, quote = self._split_pair(pair)
+        symbol = self._METAL_YAHOO_SYMBOLS[base]
+        period2 = int(datetime.now().timestamp())
+        period1 = int((datetime.now() - timedelta(days=days)).timestamp())
+        try:
+            async with aiohttp.ClientSession(headers={"Accept-Encoding": "identity"}) as session:
+                async with session.get(
+                    f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+                    params={"period1": str(period1), "period2": str(period2), "interval": "1d"},
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=15,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Yahoo Finance historical error for {pair} ({symbol}): HTTP {resp.status}")
+                        return []
+                    data = await resp.json()
+
+            result = (data.get("chart") or {}).get("result")
+            if not result:
+                return []
+            timestamps = result[0].get("timestamp") or []
+            quote_data = (result[0].get("indicators", {}).get("quote") or [{}])[0]
+            opens, highs, lows, closes, volumes = (
+                quote_data.get("open") or [], quote_data.get("high") or [],
+                quote_data.get("low") or [], quote_data.get("close") or [],
+                quote_data.get("volume") or [],
+            )
+            candles: List[Dict] = []
+            for i, ts in enumerate(timestamps):
+                if i >= len(closes) or closes[i] is None:
+                    continue
+                candles.append({
+                    "timestamp": datetime.fromtimestamp(ts).strftime("%Y-%m-%d"),
+                    "open": opens[i] if i < len(opens) and opens[i] is not None else closes[i],
+                    "high": highs[i] if i < len(highs) and highs[i] is not None else closes[i],
+                    "low": lows[i] if i < len(lows) and lows[i] is not None else closes[i],
+                    "close": closes[i],
+                    "volume": float(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0.0,
+                })
+            return candles
+        except Exception as e:
+            logger.error(f"Failed to fetch real metal historical data for {pair}: {e}")
+            return []
+
+    async def _get_forex_historical(self, pair: str, base: str, quote: str, days: int) -> List[Dict]:
+        """Real historical daily rates via Frankfurter/ECB (fiat pairs only
+        -- daily resolution, open==prior close since no intraday data exists
+        from this free source)."""
+        import aiohttp
+
         start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         end = datetime.now().strftime("%Y-%m-%d")
 

@@ -55,6 +55,17 @@ def _extract_symbol(text: str) -> Optional[str]:
     return match.group(1).upper() if match else None
 
 
+def _extract_timeframe(text: str) -> str:
+    """"technical analysis on bitcoin for the month" -> 'month'. Defaults
+    to 'day' (this agent's real default resolution), not a guess."""
+    lowered = text.lower()
+    if "month" in lowered:
+        return "month"
+    if "week" in lowered:
+        return "week"
+    return "day"
+
+
 class CryptoTradingAgent(SpecializedAgent):
     """Specialized agent for cryptocurrency trading and analysis"""
 
@@ -131,7 +142,8 @@ class CryptoTradingAgent(SpecializedAgent):
         computation rather than duplicating it, so the report and the raw
         technical-analysis task type can never silently disagree."""
         symbol = params.get("symbol", "BTC")
-        technical = await self._perform_technical_analysis({"symbol": symbol, "days": int(params.get("days", 90))})
+        timeframe = self._normalize_timeframe(params.get("timeframe", "day"))
+        technical = await self._perform_technical_analysis({"symbol": symbol, "timeframe": timeframe})
         if not technical.get("indicators"):
             return {
                 "success": False, "task_type": "intelligence-report", "symbol": symbol,
@@ -143,18 +155,20 @@ class CryptoTradingAgent(SpecializedAgent):
         from trust import annotate_uncertainty, fabrication_reason
 
         macro_events, macro_note = await self._real_macro_context()
-        grounding = build_data_grounding_block(symbol, "crypto", technical, macro_events, macro_note)
+        grounding = build_data_grounding_block(symbol, "crypto", technical, macro_events, macro_note, timeframe=timeframe)
         prompt = (
             f"{TRADING_INTELLIGENCE_SYSTEM_PROMPT}\n\n{grounding}\n\n"
-            f"Write the full institutional intelligence report for {symbol} now. This is a crypto asset -- "
-            "real 24/7 volume data IS available in the block above (unlike forex), so you may reference "
-            "real volume readings; there is still no real order-book/Level II data, so Smart Money Concepts "
-            "specifics remain gated per the ground rules."
+            f"Write the full institutional intelligence report for {symbol} now, on the {timeframe} timeframe. "
+            "This is a crypto asset -- real 24/7 volume data IS available in the block above (unlike forex), "
+            "so you may reference real volume readings; there is still no real order-book/Level II data, so "
+            "liquidity/institutional-positioning specifics remain gated per the ground rules."
         )
 
         tv_symbol = technical.get("tradingview_symbol")
         try:
-            report = await llm_backend.generate(prompt, max_tokens=2400, temperature=0.4)
+            # Bumped from 2400 -- the template grew (candlestick patterns,
+            # FVGs, key zones, and now both a long AND a short scenario).
+            report = await llm_backend.generate(prompt, max_tokens=3400, temperature=0.4)
         except Exception as e:
             logger.warning("CryptoTradingAgent: report generation failed for %s: %s", symbol, e)
             return {"success": False, "task_type": "intelligence-report", "symbol": symbol, "error": str(e), "data": technical, "tradingview_symbol": tv_symbol}
@@ -194,27 +208,60 @@ class CryptoTradingAgent(SpecializedAgent):
         result["symbol"] = symbol
         return result
 
+    # Real calendar-day fetch window per requested timeframe. Capped at 365
+    # for week/month (not forex_intelligence_agent.py's 730/1825) -- CoinGecko's
+    # free/keyless tier hard-rejects any days value other than <=365 with
+    # HTTP 401, confirmed live (365 succeeds, 366/730/1825 all 401 with no
+    # API key configured). 365 daily bars still gives ~52 real weekly
+    # candles or ~12 real monthly candles -- less depth than forex enjoys,
+    # but real, not padded to look deeper than it is.
+    _FETCH_DAYS = {"day": 120, "week": 365, "month": 365}
+
+    @staticmethod
+    def _normalize_timeframe(raw: str) -> str:
+        """Accepts the pre-existing "1d"-style label (this method's original
+        default, still cosmetic-only for anyone already passing it) as well
+        as the real day/week/month values -- both mean something now."""
+        raw = (raw or "day").lower()
+        if raw in ("day", "1d"):
+            return "day"
+        if raw in ("week", "1w", "7d"):
+            return "week"
+        if raw in ("month", "1m", "1mo", "30d"):
+            return "month"
+        return "day"
+
     async def _perform_technical_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
         symbol = params.get("symbol", "BTC")
-        timeframe = params.get("timeframe", "1d")
+        timeframe = self._normalize_timeframe(params.get("timeframe", "day"))
         price_data = params.get("price_data", [])
         high_data = params.get("high_data", price_data)
         low_data = params.get("low_data", price_data)
         volume_data = params.get("volume_data", [])
+        resampled_candles: List[Dict[str, Any]] = []
 
         # Real live data fallback -- previously this task type only ever
         # computed on whatever price_data the caller happened to pass in,
         # with no live market data source of its own (forex_engine.py's
         # ForexDataAggregator had one; this agent didn't). CoinGecko fills
         # that real gap: if the caller didn't supply price history, fetch it.
+        #
+        # Resampling to week/month only applies on this live-fetched path --
+        # a caller supplying its own flat price_data/high_data/low_data
+        # lists isn't giving real dated OHLC bars, so there's nothing honest
+        # to resample there; that path stays exactly as given, always "day".
         if len(price_data) < 2:
             from trading.crypto_data import crypto_data
-            candles = await crypto_data.get_historical(symbol, days=int(params.get("days", 90)))
-            if len(candles) >= 2:
-                price_data = [c["close"] for c in candles]
-                high_data = [c["high"] for c in candles]
-                low_data = [c["low"] for c in candles]
-                volume_data = [c["volume"] for c in candles]
+            from trading.pattern_detection import resample_candles
+
+            fetch_days = int(params.get("days", self._FETCH_DAYS[timeframe]))
+            candles = await crypto_data.get_historical(symbol, days=fetch_days)
+            resampled_candles = resample_candles(candles, timeframe)
+            if len(resampled_candles) >= 2:
+                price_data = [c["close"] for c in resampled_candles]
+                high_data = [c["high"] for c in resampled_candles]
+                low_data = [c["low"] for c in resampled_candles]
+                volume_data = [c["volume"] for c in resampled_candles]
 
         from trading.tradingview_symbols import crypto_tradingview_symbol
 
@@ -349,6 +396,21 @@ class CryptoTradingAgent(SpecializedAgent):
                 "resistance_levels": [round(bb_upper, 2)],
                 "method": "Bollinger Band-derived fallback -- not enough history yet for a real swing point",
             }
+
+        # Real candlestick patterns, Fair Value Gaps, and clustered key
+        # zones -- see trading/pattern_detection.py. Only computable on the
+        # live-fetched, properly-dated OHLC path (resampled_candles); a
+        # caller supplying raw price_data lists gets an honest empty result
+        # here rather than a guess built on undated data.
+        if resampled_candles:
+            from trading.pattern_detection import detect_candlestick_patterns, detect_fair_value_gaps, key_zones as compute_key_zones
+            result["candlestick_patterns"] = detect_candlestick_patterns(resampled_candles)
+            result["fair_value_gaps"] = detect_fair_value_gaps(resampled_candles)
+            result["key_zones"] = compute_key_zones(high_data, low_data, price_data) if len(price_data) >= 5 else []
+        else:
+            result["candlestick_patterns"] = []
+            result["fair_value_gaps"] = []
+            result["key_zones"] = []
 
         if current_rsi < 30 and macd_line > signal_line:
             signal = "buy"
@@ -593,7 +655,7 @@ class CryptoTradingAgent(SpecializedAgent):
         if any(t in query.lower() for t in _REPORT_TRIGGERS):
             symbol = _extract_symbol(query)
             if symbol:
-                return await self._intelligence_report({"symbol": symbol})
+                return await self._intelligence_report({"symbol": symbol, "timeframe": _extract_timeframe(query)})
         answer = await self._llm_answer(query)
         return {
             "success": True,

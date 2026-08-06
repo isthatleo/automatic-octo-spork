@@ -62,6 +62,17 @@ def _extract_pair(text: str) -> Optional[str]:
     return None if base == quote else f"{base}/{quote}"
 
 
+def _extract_timeframe(text: str) -> str:
+    """"technical analysis on gold for the week" -> 'week'. Defaults to
+    'day' (not a guess -- day is this agent's real default resolution)."""
+    lowered = text.lower()
+    if "month" in lowered:
+        return "month"
+    if "week" in lowered:
+        return "week"
+    return "day"
+
+
 class ForexIntelligenceAgent(SpecializedAgent):
     def __init__(self, settings):
         super().__init__(settings, "Forex Intelligence Agent", "forex-intelligence")
@@ -90,7 +101,10 @@ class ForexIntelligenceAgent(SpecializedAgent):
             pair = task_data.get("pair")
             if not pair:
                 return {"success": False, "error": "intelligence_report requires a 'pair' (e.g. 'EUR/USD', 'XAU/USD')"}
-            return await self._intelligence_report(pair)
+            timeframe = task_data.get("timeframe", "day")
+            if timeframe not in ("day", "week", "month"):
+                return {"success": False, "error": f"timeframe must be 'day', 'week', or 'month' (got {timeframe!r})"}
+            return await self._intelligence_report(pair, timeframe)
         if task_type == "status":
             return {"success": True, "status": "ready", "default_watchlist": _DEFAULT_WATCHLIST}
         return await self._general(task_data)
@@ -143,7 +157,15 @@ class ForexIntelligenceAgent(SpecializedAgent):
             return None, "Economic calendar is configured but has no cached events yet (still polling)."
         return events, None
 
-    async def _intelligence_report(self, pair: str) -> Dict[str, Any]:
+    # Real calendar-day fetch window per requested timeframe -- enough real
+    # history to build a genuinely useful series of resampled bars (see
+    # trading/pattern_detection.py's resample_candles), not just enough for
+    # one indicator warm-up. ~2 years for weekly (~104 weekly bars), ~5
+    # years for monthly (~60 monthly bars); whatever the real source
+    # actually returns short of that is used honestly, never padded.
+    _FETCH_DAYS = {"day": 120, "week": 730, "month": 1825}
+
+    async def _intelligence_report(self, pair: str, timeframe: str = "day") -> Dict[str, Any]:
         """The NÅNCY Trading Intelligence Division report -- see
         trading_intelligence_prompt.py for the full honesty contract this
         is built on. Always returns the real underlying data alongside the
@@ -152,6 +174,7 @@ class ForexIntelligenceAgent(SpecializedAgent):
         from main_new import forex_aggregator, analysis_engine
         from llm import llm_backend
         from trading.tradingview_symbols import forex_tradingview_symbol
+        from trading.pattern_detection import resample_candles, detect_candlestick_patterns, detect_fair_value_gaps, key_zones
         from .trading_intelligence_prompt import TRADING_INTELLIGENCE_SYSTEM_PROMPT, build_data_grounding_block
         from trust import annotate_uncertainty, fabrication_reason
 
@@ -159,27 +182,42 @@ class ForexIntelligenceAgent(SpecializedAgent):
         snapshot = await forex_aggregator.get_price(pair)
         if not snapshot:
             return {"success": False, "task_type": "intelligence_report", "error": f"Could not get real market data for {pair}", "tradingview_symbol": tv_symbol}
-        historical = await forex_aggregator.get_historical(pair, days=90)
-        analysis = analysis_engine.analyze(pair, snapshot, historical)
+        historical = await forex_aggregator.get_historical(pair, days=self._FETCH_DAYS[timeframe])
+        resampled = resample_candles(historical, timeframe)
+        analysis = analysis_engine.analyze(pair, snapshot, resampled)
+
+        closes = [c["close"] for c in resampled]
+        highs = [c["high"] for c in resampled]
+        lows = [c["low"] for c in resampled]
 
         real_data = {
-            "pair": pair,
+            "pair": pair, "timeframe": timeframe,
             "price": snapshot.price, "bid": snapshot.bid, "ask": snapshot.ask,
             "change_24h_pct": snapshot.change_24h, "high_24h": snapshot.high_24h, "low_24h": snapshot.low_24h,
-            "historical_bars_available": len(historical),
+            "historical_bars_available": len(historical), "resampled_bars_available": len(resampled),
             "technical_analysis": analysis.to_dict(),
-            "note": "Daily-resolution reference rates (see forex_engine.py) -- not sub-second broker ticks.",
+            "candlestick_patterns": detect_candlestick_patterns(resampled),
+            "fair_value_gaps": detect_fair_value_gaps(resampled),
+            "key_zones": key_zones(highs, lows, closes) if len(closes) >= 5 else [],
+            "note": (
+                "Metals (XAU/XAG) are real Yahoo Finance COMEX daily OHLC; fiat pairs are real "
+                "Frankfurter/ECB daily reference rates (open synthesized as prior close -- no intraday "
+                "data from this free source). Not sub-second broker ticks."
+            ),
         }
         macro_events, macro_note = await self._real_macro_context()
 
-        grounding = build_data_grounding_block(pair, "forex/metals", real_data, macro_events, macro_note)
+        grounding = build_data_grounding_block(pair, "forex/metals", real_data, macro_events, macro_note, timeframe=timeframe)
         prompt = (
             f"{TRADING_INTELLIGENCE_SYSTEM_PROMPT}\n\n{grounding}\n\n"
-            f"Write the full institutional intelligence report for {pair} now."
+            f"Write the full institutional intelligence report for {pair} now, on the {timeframe} timeframe."
         )
 
         try:
-            report = await llm_backend.generate(prompt, max_tokens=2400, temperature=0.4)
+            # Bumped from 2400 -- the template grew (candlestick patterns,
+            # FVGs, key zones, and now both a long AND a short scenario)
+            # and was clipping mid-section at the old ceiling.
+            report = await llm_backend.generate(prompt, max_tokens=3400, temperature=0.4)
         except Exception as e:
             logger.warning("ForexIntelligenceAgent: report generation failed for %s: %s", pair, e)
             return {"success": False, "task_type": "intelligence_report", "pair": pair, "error": str(e), "data": real_data, "tradingview_symbol": tv_symbol}
@@ -205,7 +243,7 @@ class ForexIntelligenceAgent(SpecializedAgent):
         if any(t in query.lower() for t in _REPORT_TRIGGERS):
             pair = _extract_pair(query)
             if pair:
-                return await self._intelligence_report(pair)
+                return await self._intelligence_report(pair, _extract_timeframe(query))
         answer = await self._llm_answer(query)
         return {"success": True, "response": answer or (
             "I give you real live forex/metals quotes and real technical analysis -- never a trade, "
