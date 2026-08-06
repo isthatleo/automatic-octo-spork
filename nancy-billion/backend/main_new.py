@@ -9377,8 +9377,31 @@ async def _update_system_health_status() -> str:
         severity=backend_severity,
         detail="Operating normally." if backend_healthy else f"Down, running on a fallback backend instead. {last_error or ''}".strip(),
     )
+
+    coverage_healthy, coverage = self_healing.check_backend_coverage()
+    # red (not just yellow) when EVERY cloud backend is down -- distinct
+    # from llm_backend's own check above, which only ever looks at the
+    # current primary and stays green as long as *that one* is fine, even
+    # if it's the only cloud backend left standing.
+    coverage_severity = "green" if coverage_healthy else "red"
+    _update_alert_status(
+        key="llm_coverage", category="system",
+        title="Cloud reasoning backend coverage",
+        severity=coverage_severity,
+        detail=(
+            f"{coverage['available_now']}/{coverage['total_configured']} cloud backends available."
+            if coverage_healthy else
+            f"Every configured cloud backend is unavailable ({', '.join(coverage['unavailable']) or 'none configured'}) "
+            f"-- running on local/offline fallback only."
+        ),
+    )
+
     rank = {"green": 0, "yellow": 1, "red": 2}
-    return severity if rank[severity] >= rank[backend_severity] else backend_severity
+    worst = severity
+    for s in (backend_severity, coverage_severity):
+        if rank[s] > rank[worst]:
+            worst = s
+    return worst
 
 
 # ---------------------------------------------------------------------------

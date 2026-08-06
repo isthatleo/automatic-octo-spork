@@ -76,6 +76,19 @@ def check_resources() -> Dict[str, Any]:
     return {"health": health, "alerts": alerts, "actions_taken": actions_taken}
 
 
+def check_backend_coverage() -> Tuple[bool, Dict[str, Any]]:
+    """Healthy means at least one CONFIGURED cloud reasoning backend is
+    actually reachable right now -- a materially different (and materially
+    scarier) question than check_primary_backend's "is the current #1
+    backend okay", which says nothing if every OTHER backend also happens
+    to be down. See FallbackLLM.cloud_backend_coverage's docstring for the
+    real incident that motivated this: Anthropic + OpenAI both fully out of
+    credit and Groq daily-quota-exhausted, all at once, discovered only by
+    reading logs by hand."""
+    coverage = llm_backend.cloud_backend_coverage()
+    return coverage["available_now"] > 0, coverage
+
+
 def check_primary_backend() -> Tuple[bool, Optional[str]]:
     """Real read of usage_analytics.json -- flags the CURRENT primary
     backend (see _primary_backend_name) as degraded only when it has
@@ -118,6 +131,21 @@ async def run_check_cycle() -> List[str]:
                 f"Sir, my primary reasoning backend ({primary}) appears to be down"
                 + (f": {last_error}" if last_error else "")
                 + ". I'm currently running on a fallback backend instead."
+            )
+
+    coverage_healthy, coverage = check_backend_coverage()
+    if _transitioned("backend_coverage", coverage_healthy):
+        if coverage_healthy:
+            messages.append(
+                f"Cloud reasoning backends are healthy again, Sir -- "
+                f"{coverage['available_now']}/{coverage['total_configured']} available."
+            )
+        else:
+            unavailable = ", ".join(coverage["unavailable"]) or "none configured"
+            messages.append(
+                f"Sir, EVERY configured cloud reasoning backend is unavailable right now "
+                f"({unavailable}) -- I'm running on local/offline fallback only, which will be "
+                f"noticeably slower and lower quality until at least one comes back."
             )
 
     return messages

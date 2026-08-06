@@ -1563,6 +1563,38 @@ class FallbackLLM(LLMBackend):
             "No LLM backend was usable -- none is configured with a working key."
         )
 
+    def cloud_backend_coverage(self) -> Dict[str, Any]:
+        """Real snapshot of how many CONFIGURED cloud backends are actually
+        reachable right now (not currently sitting in a quota/credit/auth
+        cooldown), vs. self_healing.check_primary_backend's narrower check
+        (which only ever looks at the single current primary and says
+        nothing if every OTHER backend is also down). Built after finding,
+        live, that Anthropic and OpenAI were both fully out of credit while
+        Groq spent most of the day in a daily-quota cooldown -- all
+        simultaneously -- with nothing surfacing that proactively; it was
+        only found by manually reading logs. If the one cloud backend still
+        standing (OmniRoute, that day) had also had a bad hour, every real
+        chat turn would have silently fallen through to local/offline
+        backends with zero advance warning."""
+        now = time.monotonic()
+        total = 0
+        available = 0
+        unavailable: List[str] = []
+        for backend in self.backends:
+            cls_name = backend.__class__.__name__
+            if _is_local_backend(cls_name):
+                continue
+            if hasattr(backend, "api_key") and not backend.api_key:
+                continue  # not configured at all -- not counted as "should be up"
+            total += 1
+            model = getattr(backend, "model", "")
+            cooldown_until = self._cooldown_until.get(f"{cls_name}:{model}")
+            if cooldown_until and now < cooldown_until:
+                unavailable.append(f"{cls_name}({model})" if model else cls_name)
+            else:
+                available += 1
+        return {"total_configured": total, "available_now": available, "unavailable": unavailable}
+
 # Real, declarative catalog of cloud LLM providers -- single source of truth
 # for get_llm_backends()'s PHASE 1 below AND for main_new.py's /config/keys
 # catalog endpoint (the Keys page's credential list). Adding a new provider
@@ -1775,6 +1807,15 @@ _LOCAL_BACKEND_NAMES = ("ollama", "ollamaautomodels", "fury", "llamacpp", "vllm"
 
 def _is_local_backend(cls_name: str) -> bool:
     stem = cls_name.lower().removesuffix("llm")
+    if stem == "ollamacloud":
+        # A real bug this exact prefix-match would otherwise cause:
+        # "ollamacloud".startswith("ollama") is True, so OllamaCloudLLM (a
+        # hosted service at ollama.com, no on-device inference at all) would
+        # get pushed to the very back of the chain alongside the true local
+        # backends and excluded from cloud_backend_coverage's health count --
+        # directly contradicting LLM_PROVIDER_CATALOG's explicit intent that
+        # Ollama Cloud sits in the cloud tier, ahead of local Ollama.
+        return False
     return any(stem.startswith(local) for local in _LOCAL_BACKEND_NAMES)
 
 
