@@ -1214,6 +1214,36 @@ for cases where no tool or agent genuinely applies (a personal opinion, a hypoth
 small talk) or where you've already gathered what's needed this turn. This works together with,
 and never overrides, TRUTHFUL BEFORE CONFIDENT below: still never claim a live measurement you
 didn't actually take.
+
+=== SHARING FILE CONTENT: THREE DISTINCT ASKS, THREE DIFFERENT RESPONSES ===
+When he asks about a file's contents, listen for which of these he actually asked for --
+they are genuinely different requests, not three phrasings of the same one:
+1. "What's in X" / "check X" / "look at X" (a plain content question) -> read_file it and give a
+   real SUMMARY of what's there -- the structure, the key parts, what it does. Do not dump the
+   whole file for a question that only asked what's in it.
+2. He then explicitly asks for the whole thing ("no, the entire file", "give me the full
+   content", "all of it", "the whole file") -> paste the COMPLETE real content verbatim, in a
+   properly fenced code block tagged with the real language, not summarized or truncated.
+3. "Send me X" / "give me the file" / "attach it" (he wants the artifact itself, not a
+   description of it) -> give a short real summary in your reply text AND, only when this
+   conversation is actually on Telegram, call send_telegram_document to attach the real file
+   alongside it. On voice/web there is nothing to attach to, so read_file and share the content
+   directly there instead -- don't claim to have attached something you didn't.
+Never skip straight to case 2 or 3 just because a file was mentioned -- start from case 1 unless
+he's clearly asking for the whole thing or the file itself.
+
+=== NEVER CLAIM A FILE ACTION THAT DIDN'T ACTUALLY HAPPEN ===
+Confirmed live as a real failure: when every tool-capable backend was genuinely unavailable this
+turn, the final tool-less fallback still told him "I have updated the file" and pasted code as
+text -- a fabricated success claim, and the single worst kind: it makes him believe a real change
+exists on disk when it doesn't. This outranks sounding helpful or complete.
+Never say you created, saved, updated, edited, moved, deleted, sent, or attached a file unless a
+real write_file/edit_file/multi_edit_file/delete_file/move_file/send_telegram_document tool call
+actually ran THIS turn and returned success -- not "I attempted it", not "based on what I read
+this should now be updated", an actual returned success. If tool access genuinely isn't available
+right now, say that plainly ("I can't actually write that to disk this turn, Sir -- here's the
+code, though") and offer the content instead of the claim. Never invent having consulted another
+agent either, for the same reason: state only what genuinely happened this turn.
 """
 
 # Voice/web: replies are spoken aloud via NeuTTS, so length directly costs
@@ -1742,6 +1772,26 @@ FILE_TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "send_telegram_document",
+        "description": (
+            "Send an actual file to the user's Telegram as a real downloadable document attachment -- "
+            "for when he's away from his computer and wants the real file itself, not just pasted "
+            "content, so he can save it on his phone. ONLY use this when the current conversation is "
+            "actually happening on Telegram -- it has nothing to attach to on voice/web, where "
+            "read_file plus sharing the content directly is the right move instead. When he explicitly "
+            "asks to be sent/given/attached a file on Telegram, still give a short real summary of it "
+            "in your reply text, then call this tool to attach the actual file alongside that summary."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "caption": {"type": "string", "description": "Short caption Telegram shows with the document."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
         "name": "glob_files",
         "description": (
             "Find files by NAME pattern (e.g. '**/*.py' for every Python file, '*.tsx' for top-level "
@@ -1984,11 +2034,41 @@ _LANGUAGE_NAME_HINTS: List[tuple] = [
 ]
 
 
+# Confirmed live as a real bug: "a plain JavaScript component, no
+# TypeScript" contains the literal word "TypeScript", and since that
+# pattern is checked first in _LANGUAGE_NAME_HINTS, the naive match forced
+# a .ts/.tsx file for a request that explicitly ruled TypeScript OUT. A
+# short lookbehind for an actual negation word is enough to catch this
+# without real NLP -- "no"/"not"/"non"/"without"/"never" immediately before
+# the language name means it was named to be excluded, not requested.
+_NEGATION_RE = re.compile(r'\b(no|not|non|without|never)\b[\s-]*$', re.I)
+
+
 def _explicit_language_hint(user_text: str) -> Optional[str]:
     for pattern, ext in _LANGUAGE_NAME_HINTS:
-        if pattern.search(user_text):
-            return ext
+        match = pattern.search(user_text)
+        if not match:
+            continue
+        preceding = user_text[max(0, match.start() - 15):match.start()]
+        if _NEGATION_RE.search(preceding):
+            continue  # e.g. "no TypeScript" -- explicitly ruled out, not a positive hint
+        return ext
     return None
+
+
+# JSX/TSX detection -- confirmed live as a real bug: asking for a "React
+# TypeScript component" made _explicit_language_hint match the word
+# "TypeScript" and force a plain ".ts" extension, silently overwriting
+# Claude's own correct ".tsx" choice and saving a file full of JSX syntax
+# under an extension most tooling won't even parse as JSX. ".ts"/".js" are
+# only ever the right correction when the real generated content is NOT
+# JSX; when it is, the language hint should upgrade to ".tsx"/".jsx"
+# instead of downgrading away from it.
+_JSX_CONTENT_RE = re.compile(r"</\w+>|<[A-Za-z][\w.]*(\s[^>]*)?/?>\s*(\n|$)|\breturn\s*\(\s*<")
+
+
+def _looks_like_jsx(content: str) -> bool:
+    return bool(_JSX_CONTENT_RE.search(content))
 
 
 def _resolve_write_path(raw_path: str, content: str, user_hint: str = "") -> Path:
@@ -2006,6 +2086,8 @@ def _resolve_write_path(raw_path: str, content: str, user_hint: str = "") -> Pat
 
     current_ext = p.suffix.lower()
     requested = _explicit_language_hint(user_hint) if user_hint else None
+    if requested in (".ts", ".js") and _looks_like_jsx(content):
+        requested = requested + "x"  # .ts -> .tsx, .js -> .jsx
     if requested and current_ext != requested:
         return p.with_suffix(requested)
 
@@ -2216,6 +2298,15 @@ def _wants_tools(user_text: str) -> bool:
 # old fast-path. Off switch kept for anyone who wants the old fast, tool-free
 # behavior back.
 _ALWAYS_ENGAGE_TOOLS = os.getenv("ALWAYS_ENGAGE_TOOLS", "1").strip().lower() in ("1", "true", "yes")
+
+# Which channel this turn's tool-use loop is running for -- same ambient-
+# scoped-state pattern as agents/base.py's _current_conversation_context
+# (a ContextVar propagates through the async call chain of one turn without
+# threading a parameter through every function in it). Set once at the top
+# of _generate_response_via_hierarchy_impl; read by _execute_file_tool's
+# send_telegram_document handler so it can refuse to silently deliver a file
+# to Telegram when the request actually came from a web/voice session.
+_current_tool_channel: ContextVar[str] = ContextVar("_current_tool_channel", default="voice")
 
 _SMALLTALK_RE = re.compile(
     r"^(hi|hey|hello|yo|sup|good\s+(morning|afternoon|evening|night)|thanks|thank\s+you|"
@@ -3511,6 +3602,30 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
         if result.get("is_image") and result.get("image_base64"):
             result["_image_base64"] = result.pop("image_base64")
         return result
+    if name == "send_telegram_document":
+        # Immediate, no approval needed -- same "reads/sends are immediate,
+        # only writes/edits/deletes/moves are gated" rule read_file already
+        # follows (see _FILE_WRITE_TOOLS above). Channel-gated via
+        # _current_tool_channel (set once per turn in
+        # _generate_response_via_hierarchy_impl) so a web/voice session
+        # asking for a file can't silently make it appear on the phone
+        # instead of in the conversation the user is actually looking at.
+        if _current_tool_channel.get() != "telegram":
+            return {"success": False, "error": "This conversation isn't on Telegram -- nothing to attach it to here. Read the file and share its content directly instead."}
+        try:
+            safe_path = file_access.safe_path(tool_input["path"])
+        except file_access.PathNotAllowed as e:
+            return {"success": False, "error": str(e)}
+        if not safe_path.exists() or not safe_path.is_file():
+            return {"success": False, "error": f"File not found: {safe_path}"}
+        try:
+            file_bytes = safe_path.read_bytes()
+        except Exception as e:
+            return {"success": False, "error": f"Could not read file: {e}"}
+        if len(file_bytes) > 45 * 1024 * 1024:  # Telegram's real bot-API document cap is 50MB
+            return {"success": False, "error": f"File is {len(file_bytes) / (1024*1024):.1f}MB -- too large for Telegram's document limit."}
+        await telegram_notifier.send_document(file_bytes, safe_path.name, tool_input.get("caption", ""))
+        return {"success": True, "sent": True, "filename": safe_path.name, "size_bytes": len(file_bytes)}
     if name == "list_directory":
         return file_access.list_directory(tool_input["path"])
     if name == "glob_files":
@@ -3871,6 +3986,7 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
     conversational text isn't forced onto the "research" agent as `auto_run`'s own
     fallback does.
     """
+    _current_tool_channel.set(channel)
     history_text = _history_to_text()
     static_system, dynamic_context, user_turn = _build_chat_parts(user_text, history_text, channel)
     # Single-string shape for backends without a usable system role

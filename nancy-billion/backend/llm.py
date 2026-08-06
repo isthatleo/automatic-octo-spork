@@ -641,17 +641,38 @@ async def generate_with_tools_openai_compat(
             async def _run_tool_call(tc):
                 fn = tc.get("function", {})
                 name = fn.get("name", "")
+                schema = schema_by_name.get(name, {})
                 try:
                     raw_args = json.loads(fn.get("arguments") or "{}")
                 except Exception:
                     raw_args = {}
-                tool_input = coerce_tool_input(raw_args, schema_by_name.get(name, {}))
+                tool_input = coerce_tool_input(raw_args, schema)
                 logger.info("%s: calling tool %s(%s)", provider_label, name, tool_input)
                 if on_tool_call:
                     try:
                         await on_tool_call(name, tool_input)
                     except Exception as e:
                         logger.warning("on_tool_call callback failed: %s", e)
+                # Confirmed live: some free-tier models on this exact
+                # OpenAI-compat path (OpenCode Zen's "big-pickle") emit a
+                # tool_call with an empty/malformed `arguments` string --
+                # json.loads above silently produces {}, and without this
+                # check the executor raised a bare KeyError ("'path'") that
+                # gave the model nothing to act on, so it just repeated the
+                # identical broken call 5 times in a row rather than fixing
+                # it. A named, explicit "you're missing X" message gives it
+                # something it can actually correct on retry.
+                required = schema.get("required", []) if isinstance(schema, dict) else []
+                missing = [r for r in required if r not in tool_input]
+                if missing:
+                    result = {
+                        "success": False,
+                        "error": (
+                            f"Missing required parameter(s) for {name}: {', '.join(missing)}. "
+                            f"Retry this call with ALL required parameters included."
+                        ),
+                    }
+                    return {"role": "tool", "tool_call_id": tc.get("id", ""), "content": json.dumps(result)}
                 try:
                     result = await tool_executor(name, tool_input)
                 except Exception as e:
