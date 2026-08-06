@@ -1530,31 +1530,59 @@ def on_wake_word():
             main_loop,
         )
 
-_wake_word_default = "false" if os.getenv("WAKE_WORD_ENABLED") is None else os.getenv("WAKE_WORD_ENABLED")
-if _wake_word_default.strip().lower() in ("1", "true", "yes"):
-    try:
-        wake_word_detector = get_wake_word_detector()
-        threading.Thread(target=lambda: wake_word_detector.start(on_wake_word), daemon=True).start()
-        logger.info("Wake word detector started.")
-    except Exception as e:
-        logger.warning("Wake word detector unavailable: %s", e)
+# Opt-in, default OFF. This is the backend's OWN native microphone capture
+# (sounddevice.InputStream, real hardware, a real faster-whisper pass on a
+# rolling buffer) -- a separate thing from the browser's own Web Speech API
+# wake-word/voice capture that already covers the actual product's real
+# usage (a user talking to the web app with a tab open). Confirmed live:
+# the first time this backend ran natively with a real microphone attached
+# (as opposed to a container with no audio device at all), continuous
+# capture was directly responsible for a measured NeuTTS synthesis
+# slowdown (the same short phrase went from ~8s to ~27s while it ran).
+#
+# The detector object itself is always created (cheap -- it doesn't touch
+# the mic until .start() is called), so /wake-word/enable and
+# /wake-word/disable below have a real, live instance to toggle at runtime
+# without a restart, rather than the old one-shot "read the env var once at
+# import time" behavior. WAKE_WORD_ENABLED=true still means "start it
+# automatically at boot" for a dedicated always-on box; the default with it
+# unset is off, exactly as before.
+try:
+    wake_word_detector = get_wake_word_detector()
+except Exception as e:
+    wake_word_detector = None
+    logger.warning("Wake word detector unavailable: %s", e)
+
+_wake_word_running = False
+
+
+def _start_wake_word() -> bool:
+    global _wake_word_running
+    if wake_word_detector is None or _wake_word_running:
+        return _wake_word_running
+    threading.Thread(target=lambda: wake_word_detector.start(on_wake_word), daemon=True).start()
+    _wake_word_running = True
+    logger.info("Wake word detector started.")
+    return True
+
+
+def _stop_wake_word() -> bool:
+    global _wake_word_running
+    if wake_word_detector is None or not _wake_word_running:
+        return False
+    wake_word_detector.stop()
+    _wake_word_running = False
+    logger.info("Wake word detector stopped.")
+    return True
+
+
+if os.getenv("WAKE_WORD_ENABLED", "").strip().lower() in ("1", "true", "yes"):
+    _start_wake_word()
 else:
-    # Opt-in, default off. This is the backend's OWN native microphone
-    # capture (sounddevice.InputStream, real hardware, running a real
-    # faster-whisper pass every ~3s continuously) -- a separate thing from
-    # the browser's own Web Speech API wake-word/voice capture that already
-    # covers the actual product's real usage (a user talking to the web
-    # app). Confirmed live: this container never had a real audio device at
-    # all, so it silently no-op'd in every Docker deployment this session --
-    # the first time this backend ran natively with a real microphone
-    # attached, it started continuously listening with no one having asked
-    # for that, and the resulting constant CPU load was directly
-    # responsible for real, measured NeuTTS synthesis slowdowns (the same
-    # short phrase went from ~8s to ~27s with this running). Set
-    # WAKE_WORD_ENABLED=true if you specifically want hands-free wake-word
-    # detection from this machine's own hardware mic (e.g. a dedicated
-    # always-on box), independent of any browser tab being open.
-    logger.info("Wake word detector not started (WAKE_WORD_ENABLED is not set/true) -- browser voice input is unaffected.")
+    logger.info(
+        "Wake word detector not auto-started (WAKE_WORD_ENABLED is not set/true) -- "
+        "browser voice input is unaffected. Toggle live via POST /wake-word/enable."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -7460,6 +7488,33 @@ async def safety_switch_status():
 
 
 # ---------------------------------------------------------------------------
+# Wake word -- real runtime on/off for the backend's own native microphone
+# capture (see wake_word.py). Default OFF (WAKE_WORD_ENABLED unset); these
+# routes are the real toggle so switching it on/off doesn't require a
+# restart. No approval gate here, unlike /safety/arm -- this is the human
+# directly calling an authenticated endpoint to control his own machine's
+# own mic, not Billion granting herself a new unsupervised capability.
+# ---------------------------------------------------------------------------
+@app.post("/wake-word/enable", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def enable_wake_word_route():
+    if wake_word_detector is None:
+        raise HTTPException(status_code=503, detail="Wake word detector failed to initialize -- check server logs.")
+    running = _start_wake_word()
+    return {"success": True, "running": running}
+
+
+@app.post("/wake-word/disable", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def disable_wake_word_route():
+    _stop_wake_word()
+    return {"success": True, "running": _wake_word_running}
+
+
+@app.get("/wake-word/status", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def wake_word_status_route():
+    return {"success": True, "available": wake_word_detector is not None, "running": _wake_word_running}
+
+
+# ---------------------------------------------------------------------------
 # Backups -- see backup_tool.py.
 # ---------------------------------------------------------------------------
 @app.get("/backups", dependencies=[Depends(require_auth), Depends(rate_limit)])
@@ -9779,6 +9834,28 @@ async def _fleet_sweep_loop() -> None:
                         logger.info("Fleet sweep finding from %s not stored: %s", key, e)
                     except Exception:
                         logger.exception("Fleet sweep: failed to record finding from %s", key)
+
+                    # Confirmed live: the knowledge graph sat at 0 entities/0
+                    # relationships despite general_research/science_research
+                    # already running real research briefs and literature
+                    # syntheses on a real rotation -- extract_entities_and_relations
+                    # (knowledge/extraction.py) existed and worked, nothing was
+                    # ever calling it on this output. Only for the two
+                    # research-agenda task types, whose result actually
+                    # contains real researched prose (general_research's
+                    # "overview", science_research's "summary") -- every other
+                    # fleet-sweep task type returns structured diagnostic data
+                    # (status, list_registry, ...) with no prose worth
+                    # extracting entities from.
+                    research_text = result.get("overview") or result.get("summary")
+                    if task["type"] in ("brief", "literature-synthesis") and research_text:
+                        try:
+                            await knowledge_ingest_text(
+                                knowledge_graph, research_text,
+                                source=f"{key}:{task.get('topic', '')}",
+                            )
+                        except Exception:
+                            logger.exception("Fleet sweep: knowledge extraction failed for %s", key)
                     return result
 
                 if candidates:
