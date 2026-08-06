@@ -15,11 +15,29 @@ Example:
 
 import asyncio
 import logging
+import random
 from datetime import datetime
 from typing import Dict, Optional, List
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# Real, randomly-picked structural directions for the LLM composition below --
+# confirmed live as the actual fix for "every greeting feels scripted": temperature
+# alone wasn't enough because the prompt anchored the SAME opening phrase and the
+# SAME "weave the facts in" instruction on every call, so the model kept
+# reproducing near-identical structure even at temperature=0.9. Picking a real
+# structural instruction at random, in code, forces genuine variation in shape
+# (what comes first, how long, how it's tied together) rather than just
+# word-choice variation within a fixed shape.
+_STYLE_DIRECTIONS = [
+    "Lead with whichever single fact matters most right now, then fill in the rest.",
+    "Open with a brief, warm personal check-in line before getting into the facts.",
+    "Keep it tight and efficient -- short sentences, no throat-clearing, straight to what matters.",
+    "Tell it a little like a story: what's been happening, then what's coming up.",
+    "Group the facts by theme (systems, markets, tasks) rather than listing them in a fixed order.",
+    "Start with the most surprising or noteworthy fact, saving routine status for later in the greeting.",
+]
 
 
 @dataclass
@@ -87,30 +105,60 @@ class ContextualGreetingEngine:
     async def _compose_via_llm(self, time_greeting: str, facts: List[str]) -> str:
         from llm import llm_backend
 
+        # Real, read-fresh ground truth for THIS call -- confirmed live as the
+        # actual cause of the greeting stating a wrong clock time: this prompt
+        # previously never contained a real date/time value anywhere, only the
+        # vague morning/afternoon/evening bucket below, so the model was free to
+        # invent a specific-sounding time as flavor text with nothing to check it
+        # against. Same fix as main_new.py's _live_datetime_prompt_block, applied
+        # here since this module composes its greeting independently of that
+        # chat-turn prompt path.
+        now = datetime.now().astimezone()
+        real_time_line = (
+            f"The REAL current date and time is {now.strftime('%A, %B %d, %Y')} at "
+            f"{now.strftime('%I:%M %p').lstrip('0')} ({now.strftime('%Z')}). This is ground "
+            "truth. If you mention a specific time or date anywhere in the greeting, it must "
+            "match this exactly -- never state a different one, and never invent one for "
+            "flavor. If you don't need to state a specific time, don't; the opening tone "
+            "below already carries the time-of-day."
+        )
+        style_direction = random.choice(_STYLE_DIRECTIONS)
+
         facts_block = "\n".join(f"- {f}" for f in facts)
         prompt = (
             "You are Nancy, a JARVIS-style British AI assistant. Compose ONE short, "
             "warm, natural-sounding greeting for your user using ONLY the real facts "
             "below -- never invent or add anything not listed. Always address the user "
-            "as \"Sir\" (capitalized). Vary your sentence structure and word choice "
-            "each time you're asked -- do not fall into a fixed template or recite the "
-            "facts as a flat list; weave them into 3-5 conversational sentences the way "
-            "a real person would. The time-appropriate opening tone is: "
-            f"\"{time_greeting}\" -- use it or a natural variant of it as your opening. "
+            "as \"Sir\" (capitalized). This is a recurring greeting he hears often, so it "
+            "must NOT feel scripted or reuse the same structure every time -- genuinely "
+            "vary sentence structure, word choice, opening line, and closing line call to "
+            f"call. For THIS greeting specifically: {style_direction}\n\n"
+            "The real boundaries for time-of-day (so you can reason about this yourself, "
+            "not just take a label on faith): 05:00-11:59 is morning, 12:00-16:59 is "
+            "afternoon, 17:00-20:59 is evening, and 21:00-04:59 is late night. Given the "
+            f"real current time below, that makes right now: \"{time_greeting}\" -- this "
+            "classification is GROUND TRUTH and must never be changed or contradicted; "
+            "getting this wrong (e.g. saying \"good morning\" when it is actually evening) "
+            "is a hard factual error, not a stylistic choice. You MAY and SHOULD vary the "
+            "exact WORDING used to convey it (\"Good evening, Sir\" / \"Evening, Sir\" / "
+            "\"Hope the evening's treating you well, Sir\" / etc. are all fine variations of "
+            "the SAME real evening) -- vary the phrasing, never the underlying time-of-day "
+            "itself.\n\n"
+            f"{real_time_line}\n\n"
             # The user asked explicitly for the COMPLETE brief and said he
             # would rather wait than be short-changed. An earlier version
             # capped this to one fact / 25 words purely to cut synthesis
             # time; that traded away the thing he actually wanted, so
             # completeness wins here over time-to-first-word.
-            "Open with the address and time-of-day (e.g. \"Good evening, Sir.\") as a "
-            "SHORT first sentence, then deliver his COMPLETE brief: every single real "
-            "fact listed below, none omitted or summarised away, woven into flowing "
-            "conversational prose rather than read out as a flat list. This is his "
-            "morning/evening briefing -- thoroughness is the point of it. "
-            "ALWAYS end on a short closing line that invites him to engage (an offer "
-            "to help, a question about what to focus on first, or a simple 'ready when "
-            "you are') -- it should feel complete and rounded off, never trail off "
-            "after the last fact with no sign-off.\n\n"
+            "Address him and set the time-of-day tone in a SHORT opening sentence, then "
+            "deliver his COMPLETE brief: every single real fact listed below, none omitted "
+            "or summarised away, woven into flowing conversational prose rather than read "
+            "out as a flat list. This is his morning/evening briefing -- thoroughness is "
+            "the point of it. ALWAYS end on a short closing line that invites him to engage "
+            "-- vary it (an offer to help, a question about what to focus on first, a "
+            "simple readiness line, a light observation) rather than reusing the same "
+            "sign-off -- it should feel complete and rounded off, never trail off after the "
+            "last fact with no sign-off.\n\n"
             f"Real facts to weave in:\n{facts_block}\n\n"
             "Write only the greeting itself -- no preamble, no quotation marks, no "
             "explanation of what you're doing."
@@ -138,19 +186,30 @@ class ContextualGreetingEngine:
         a proper JARVIS-style opening line, not a single clipped word."""
         hour = datetime.now().hour
 
+        # The BUCKET boundaries here are the real, accurate classification --
+        # never touch these to add variety. Only the PHRASING within each
+        # bucket is randomized (real Python randomness, not left to the LLM),
+        # so even the deterministic template fallback doesn't say the exact
+        # same sentence every single time. 00:00-04:59 is the small hours of
+        # a *new* day, not "evening" -- confirmed live this used to say "Good
+        # evening" at 4am, which reads as flatly wrong rather than informal.
         if hour < 5:
-            # 00:00-04:59 is the small hours of a *new* day, not "evening" --
-            # confirmed live: this used to say "Good evening" at 4am, which
-            # reads as flatly wrong rather than just informal.
-            greeting = "Still up, Sir — burning the midnight oil, I see"
+            greeting = random.choice([
+                "Still up, Sir — burning the midnight oil, I see",
+                "You're still awake, Sir — the small hours suit you, it seems",
+                "Late one, Sir",
+            ])
         elif hour < 12:
-            greeting = "Good morning, Sir"
+            greeting = random.choice(["Good morning, Sir", "Morning, Sir"])
         elif hour < 17:
-            greeting = "Good afternoon, Sir"
+            greeting = random.choice(["Good afternoon, Sir", "Afternoon, Sir"])
         elif hour < 21:
-            greeting = "Good evening, Sir"
+            greeting = random.choice(["Good evening, Sir", "Evening, Sir"])
         else:
-            greeting = "Good evening, Sir — it's rather late"
+            greeting = random.choice([
+                "Good evening, Sir — it's rather late",
+                "Evening, Sir — burning the midnight oil a little early tonight",
+            ])
 
         # Persona flavor, layered onto the address rather than replacing it.
         if self.persona == "billion":
@@ -242,13 +301,29 @@ class ContextualGreetingEngine:
 
     def _closing_line(self, items: List[str]) -> str:
         """Pick a closing invitation that reflects whether there's anything
-        actually waiting on the user, instead of a single static stock line."""
+        actually waiting on the user, with real variety within each case so
+        the deterministic fallback doesn't read identically every time it's
+        used (see _STYLE_DIRECTIONS' docstring for why sameness was the
+        actual complaint, not just the LLM path's phrasing)."""
         joined = " ".join(items).lower()
         if "awaiting your" in joined or "approval" in joined:
-            return "Shall we start with what's waiting on you?"
+            return random.choice([
+                "Shall we start with what's waiting on you?",
+                "Want to tackle what's pending first, Sir?",
+                "That approval's the obvious place to start, whenever you're ready.",
+            ])
         if "open trade" in joined:
-            return "Markets are live whenever you want a closer look."
-        return "Everything's yours to command whenever you're ready, Sir."
+            return random.choice([
+                "Markets are live whenever you want a closer look.",
+                "Say the word and I'll pull up the open positions.",
+                "The desk's ready whenever you are, Sir.",
+            ])
+        return random.choice([
+            "Everything's yours to command whenever you're ready, Sir.",
+            "Ready when you are, Sir.",
+            "Just say where you'd like to start.",
+            "What would you like to focus on first?",
+        ])
 
 
 class IntelligentStartupCoordinator:
