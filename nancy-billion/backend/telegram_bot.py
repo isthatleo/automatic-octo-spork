@@ -127,6 +127,64 @@ def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+_FENCED_CODE_RE = re.compile(r"```(\w*)\n?(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _format_bold(segment: str) -> str:
+    """Escapes a plain-prose segment (no code in it) then turns **bold**
+    into real <b> tags. Deliberately doesn't touch single */_ (italic) --
+    a single asterisk is just as often a bullet-list marker in a model's own
+    reply, and italicizing everything between two unrelated bullets across
+    an entire message is worse than leaving italic unstyled."""
+    escaped = _escape_html(segment)
+    return _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", escaped)
+
+
+def _format_prose(segment: str) -> str:
+    """The non-fenced-code parts of a message: inline `code` spans (kept
+    literal, never bolded even if the code itself contains ** or *) and
+    **bold** in the surrounding text."""
+    out: List[str] = []
+    pos = 0
+    for m in _INLINE_CODE_RE.finditer(segment):
+        out.append(_format_bold(segment[pos:m.start()]))
+        out.append(f"<code>{_escape_html(m.group(1))}</code>")
+        pos = m.end()
+    out.append(_format_bold(segment[pos:]))
+    return "".join(out)
+
+
+def _markdown_to_telegram_html(text: str) -> str:
+    """Converts the model's own markdown -- fenced ```code``` blocks, inline
+    `code`, **bold** -- into Telegram's real HTML parse_mode, so a code
+    snippet actually renders as a monospace/syntax-tagged block instead of
+    the literal triple-backtick characters dumped as plain paragraph text.
+    Confirmed live: that was the entire previous behavior (send() ran the
+    whole reply through nothing but _escape_html), so any code Billion sent
+    over Telegram showed up unreadable -- three backticks, a language name,
+    then the code jammed into normal prose with no monospacing at all.
+    A fenced block with a language tag becomes a syntax-highlighted
+    <pre><code class="language-x">; without one it's still a real monospace
+    <pre> block, just unhighlighted."""
+    parts: List[str] = []
+    pos = 0
+    for m in _FENCED_CODE_RE.finditer(text):
+        parts.append(_format_prose(text[pos:m.start()]))
+        lang = m.group(1).strip()
+        code = m.group(2)
+        if code.endswith("\n"):
+            code = code[:-1]
+        if lang:
+            parts.append(f'<pre><code class="language-{_escape_html(lang)}">{_escape_html(code)}</code></pre>')
+        else:
+            parts.append(f"<pre>{_escape_html(code)}</pre>")
+        pos = m.end()
+    parts.append(_format_prose(text[pos:]))
+    return "".join(parts)
+
+
 _TELEGRAM_SAFE_CHUNK = 3900  # margin under Telegram's hard 4096 for HTML-escaping expansion
 
 
@@ -237,19 +295,22 @@ class TelegramNotifier:
         if it exceeds Telegram's 4096-char hard limit (see
         _split_for_telegram) instead of a single oversized call silently
         400ing and dropping the whole reply. Best-effort per chunk: a later
-        chunk still gets sent even if an earlier one failed. Sent as escaped
-        HTML so it renders identically to plain text for every existing
-        caller, while this module's own richly-formatted messages can use
-        send_html directly. Returns True only if every chunk actually sent --
-        callers that need to know a real reply reached the user (as opposed
-        to just being generated) should check this rather than assuming
-        fire-and-forget success."""
+        chunk still gets sent even if an earlier one failed. Run through
+        _markdown_to_telegram_html so any fenced ```code``` blocks, inline
+        `code`, and **bold** the model actually wrote render as real
+        Telegram HTML (monospace/syntax-tagged code, real bold) instead of
+        literal backtick/asterisk characters -- plain text with none of that
+        markdown passes through unchanged either way. This module's own
+        richly-formatted messages can use send_html directly. Returns True
+        only if every chunk actually sent -- callers that need to know a
+        real reply reached the user (as opposed to just being generated)
+        should check this rather than assuming fire-and-forget success."""
         chunks = _split_for_telegram(text)
         if not chunks:
             return True
         all_ok = True
         for chunk in chunks:
-            message_id = await self.send_html(_escape_html(chunk))
+            message_id = await self.send_html(_markdown_to_telegram_html(chunk))
             if message_id is None:
                 all_ok = False
         return all_ok

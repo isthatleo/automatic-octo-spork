@@ -2357,7 +2357,9 @@ _APPROVAL_RE = re.compile(
 _BILLION_PROPOSAL_RE = re.compile(
     r"\b(would you like me to|should i|shall i|want me to|do you want me to|could i|"
     r"i could|i can)\b[^.?!\n]{0,100}"
-    r"\b(build|design|create|implement|develop|put together|write|add)\b",
+    r"\b(build|design|create|implement|develop|put together|write|add|update|modify|"
+    r"change|edit|fix|refactor|rewrite|extend|improve|upgrade|remove|delete|configure|"
+    r"set up|install|deploy)\b",
     re.IGNORECASE,
 )
 
