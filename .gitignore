@@ -27,6 +27,12 @@ nancy-billion/backups/
 # on the nested .git or silently create a submodule reference nobody set up.
 neutts/
 
+# Same story: a full separate SearXNG clone (has its own .git), running
+# natively as nancy-billion's self-hosted web-search fallback -- see
+# nancy-billion/backend/dev_tools/start_searxng.sh for setup/patches. Not
+# this repo's source.
+searxng/
+
 # Generated native app projects/build output -- regenerated on demand
 # (`npm run add:android`/`add:ios` in mobile/, `npm run dist:*` in desktop/),
 # not source. The Electron dist/ folder alone contains a 180MB+ .exe --
