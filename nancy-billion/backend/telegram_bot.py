@@ -508,6 +508,26 @@ class TelegramNotifier:
                     self._last_update_id = max(self._last_update_id, update["update_id"])
                     callback_query = update.get("callback_query")
                     if callback_query:
+                        # Same identity check as the text-message path below --
+                        # confirmed live (security assessment) that this was
+                        # previously missing here: a button tap was trusted
+                        # purely by knowing a valid request_id in its callback
+                        # data, with no independent check on which chat it
+                        # came from. Not currently exploitable by a third
+                        # party in practice (Telegram only ever delivers a
+                        # callback_query to the chat the inline keyboard was
+                        # actually sent to, and every approval prompt is only
+                        # ever sent to self.chat_id), but this is the same
+                        # real defense-in-depth the message path already has,
+                        # not something that should rely solely on an
+                        # external platform guarantee holding forever.
+                        cb_chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+                        if str(cb_chat_id) != str(self.chat_id):
+                            logger.warning(
+                                "Ignoring callback_query from unexpected chat_id=%s (expected %s)",
+                                cb_chat_id, self.chat_id,
+                            )
+                            continue
                         self._dispatch_callback(callback_query)
                         continue
                     message = update.get("message")

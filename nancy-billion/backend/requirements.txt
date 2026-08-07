@@ -180,7 +180,18 @@ torchaudio>=2.1.0
 websockets>=13.0
 
 # Real cryptography for channels/reef.py's message encryption (Fernet).
-cryptography>=42.0
+# Ceiling, not just a floor: mitmproxy (egress_proxy.py's TLS-intercepting
+# allowlist) pins cryptography<=48.1, and pyopenssl pins <49 -- confirmed
+# live by actually trying the upgrade below and having pip refuse both.
+# CVE-2026-69247 (a PKCS#7 Bleichenbacher oracle, pyca/cryptography
+# GHSA-g6cj-pr64-35w5) affects every version from 44.0.0 up to the fix in
+# 50.0.0, so there is currently NO version that is both fixed and
+# compatible with mitmproxy -- confirmed via `grep` that this codebase
+# never calls pkcs7_decrypt_der/pkcs7_decrypt_pem/pkcs7_decrypt_smime (the
+# only affected functions), so this is a real, present, but unreachable
+# vulnerability rather than something actively exploitable here. Revisit
+# once mitmproxy ships a cryptography>=50 compatible release.
+cryptography>=42.0,<=48.1
 
 # Real embedded vector-DB memory backend (memory/lancedb_store.py) -- optional
 # alternative to MemoryGraph's brute-force cosine scan, enabled via
