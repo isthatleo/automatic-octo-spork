@@ -224,10 +224,23 @@ export function parseCommand(rawInput: string): CommandResult {
   }
 
   // Real geocoding + map fly-to.
+  //
+  // "show"/"show me" are dangerously overloaded as triggers here: "show me
+  // the image of the milky way from our conversation" or "show me what you
+  // built" mean "display some content", not "find this place on a map" --
+  // confirmed live as a real bug, where exactly that phrase matched this
+  // regex and opened the Recon/satellite panel (setPanel('map') fires
+  // synchronously below, before geocoding even runs) instead of the
+  // request ever reaching the backend. NOT_A_PLACE_RE excludes those
+  // rather than dropping "show"/"show me" as triggers entirely, since
+  // "show me Tokyo" is a perfectly reasonable real place request that
+  // should keep working exactly as before.
+  const NOT_A_PLACE_RE =
+    /\b(image|picture|photo|screenshot|photograph|file|video|chart|graph|report|document|what you (built|made|created|showed|generated)|(that|it) (again|you (built|made|showed))|from (our|the|this) conversation|earlier|before|last time)\b/i
   const locateMatch = input.match(
     /\b(?:locate|find|show me|show|go to|fly to|navigate to|take me to|where is|zoom (?:in )?(?:on|to))\s+(.+)/,
   )
-  if (locateMatch) {
+  if (locateMatch && !NOT_A_PLACE_RE.test(locateMatch[1])) {
     const query = clean(locateMatch[1].replace(/^(the|a)\s+/, ''))
     if (query) {
       return { type: 'locate', query, reply: `Acquiring satellite lock on ${query}, Sir.` }

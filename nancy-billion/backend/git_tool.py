@@ -112,11 +112,25 @@ async def git_branch(cwd: str | None = None, create: str | None = None, checkout
     return await _run_git(["branch"], cwd)
 
 
+BILLION_COAUTHOR_TRAILER = "Co-Authored-By: Billion <billion@nancy-billion.local>"
+
+
 async def git_commit(message: str, cwd: str | None = None, paths: List[str] | None = None) -> Dict[str, Any]:
+    """Real commit -- stages the given paths (or everything, if none given)
+    and commits with `message` exactly as the model wrote it, plus one
+    addition: BILLION_COAUTHOR_TRAILER, always appended (unless somehow
+    already present), the same way Claude Code appends its own
+    Co-Authored-By line to every commit it makes. Confirmed live as a real
+    need: an autonomous git_commit call previously left no attribution
+    trail distinguishing "Billion committed this on her own" from an
+    ordinary human commit under the same git identity -- `git log` alone
+    couldn't tell you which turns actually built something versus which
+    were typed by hand."""
     add_result = await _run_git(["add"] + (paths if paths else ["-A"]), cwd)
     if not add_result["success"]:
         return add_result
-    return await _run_git(["commit", "-m", message], cwd)
+    full_message = message if BILLION_COAUTHOR_TRAILER in message else f"{message}\n\n{BILLION_COAUTHOR_TRAILER}"
+    return await _run_git(["commit", "-m", full_message], cwd)
 
 
 async def git_push(cwd: str | None = None, remote: str = "origin", branch: str | None = None) -> Dict[str, Any]:

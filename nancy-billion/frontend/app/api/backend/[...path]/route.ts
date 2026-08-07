@@ -41,9 +41,17 @@ async function proxy(req: NextRequest, path: string[]) {
       body: hasBody ? await req.arrayBuffer() : undefined,
       redirect: 'manual',
       cache: 'no-store',
-      // Long enough for a tool-using chat turn, which can legitimately take
-      // most of a minute; short enough that a hung backend doesn't pile up.
-      signal: AbortSignal.timeout(120_000),
+      // The backend's own tool-round timeout is 150s (_TOOL_ROUND_TIMEOUT_S
+      // in main_new.py -- deliberately raised there to comfortably outlast a
+      // live Telegram approval wait, which can itself take up to 120s).
+      // Confirmed live as a real bug: this used to be 120_000, shorter than
+      // that single backend's own ceiling, so a turn that genuinely needed
+      // the full approval wait got its proxy connection aborted here with
+      // "backend unreachable" while the backend kept working and completed
+      // fine (confirmed by the same request succeeding via Telegram
+      // moments later) -- a false negative, not a real outage. 300s gives
+      // real headroom above the backend's own worst-case single-round wait.
+      signal: AbortSignal.timeout(300_000),
     })
 
     const out = new Headers(res.headers)

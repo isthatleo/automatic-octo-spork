@@ -171,6 +171,17 @@ _current_speaker_profile_id: ContextVar[Optional[str]] = ContextVar("_current_sp
 # turn or one with no attached audio.
 _current_turn_audio: ContextVar[Optional[Any]] = ContextVar("_current_turn_audio", default=None)
 
+# Set only for the turn immediately following a real, VAD-detected voice
+# interruption (see frontend's interrupt-vad.ts + page.tsx's
+# interruptedReplyRef) -- what she was actually saying, verbatim, the
+# instant he cut her off. Read in _generate_response_via_hierarchy_impl to
+# inject an honest, explicit marker into dynamic_context (never into
+# user_text/history -- this is turn-scoped grounding, not something he
+# said), giving the model real evidence to judge whether the new utterance
+# continues that exact thought or changes topic, instead of seeing an
+# ordinary, un-annotated consecutive turn. None for every other turn.
+_current_interrupted_reply: ContextVar[Optional[str]] = ContextVar("_current_interrupted_reply", default=None)
+
 
 async def _broadcast_tool_progress(name: str, tool_input: Dict[str, Any]) -> None:
     """Pushed to the UI right before each tool call actually runs, during a
@@ -1495,6 +1506,22 @@ class ConnectionManager:
         self._turn_tasks[websocket] = task
         return turn_id
 
+    def stop_turn(self, websocket: WebSocket) -> bool:
+        """Cancel whatever turn is in flight for this connection, with no
+        replacement -- the real fix for a genuine gap: pressing Escape (see
+        the frontend's interruptSpeech) used to only clear local audio
+        playback, never tell the backend anything, so an interrupted turn
+        kept generating/synthesizing to completion in the background
+        (wasted tokens/CPU) and its own _run_chat_turn's real
+        CancelledError handling was reachable only via start_turn's
+        cancel-and-replace path, never on its own. Returns True if there
+        was actually something running to cancel."""
+        task = self._turn_tasks.pop(websocket, None)
+        if task and not task.done():
+            task.cancel()
+            return True
+        return False
+
     async def broadcast(self, message: str):
         dead = []
         for ws in self.active_connections:
@@ -2534,7 +2561,7 @@ def _any_tool_backend_configured() -> bool:
 _FALLBACK_TOOL_NAMES = {
     "read_file", "list_directory", "glob_files", "search_files", "write_file", "edit_file", "multi_edit_file",
     "delete_file", "move_file", "execute_command", "fetch_url", "web_search",
-    "post_to_canvas", "open_application", "look_at_camera", "run_background_task",
+    "post_to_canvas", "recall_canvas_item", "open_application", "look_at_camera", "run_background_task",
     "browser_navigate", "browser_get_text", "browser_screenshot", "browser_click", "browser_fill",
     "delegate_to_coworker", "send_telegram_document",
     # Confirmed live as a real gap: git tools were missing from this trimmed
@@ -2545,6 +2572,15 @@ _FALLBACK_TOOL_NAMES = {
     # the "commit everything you build" behavior to actually hold on the
     # backends carrying most of the real traffic, not just on Claude.
     "git_status", "git_diff", "git_log", "git_commit", "git_push",
+    # Confirmed live as a real gap, the same category as the git tools above:
+    # asked (via real chat, every full-toolset backend genuinely exhausted --
+    # Anthropic/OpenAI/OpenRouter all out of credit, Groq quota-exhausted
+    # that day) to actually generate a 3D scene for a house design that had
+    # only ever been described in text. The one backend that answered
+    # (OllamaCloud) had no create_3d_scene/create_artifact in its trimmed
+    # set, so it correctly-for-itself but wrongly-for-him claimed it had no
+    # such capability at all, when the real gap was just this list.
+    "create_3d_scene", "create_artifact",
 }
 
 
@@ -2615,6 +2651,36 @@ CANVAS_TOOL: Dict[str, Any] = {
             "language": {"type": "string", "description": "for type=='code' only, e.g. 'python'"},
         },
         "required": ["type", "title", "content"],
+    },
+}
+
+# Confirmed live as a real gap: canvas had no way to find something again by
+# what it actually is -- only list-everything or get-by-id, which no caller
+# outside canvas_store.py ever already has. "Show me the image of X from our
+# conversation"/"show me what you built" previously had nowhere real to go
+# at all (the phrase used to get hijacked client-side into the Recon/map
+# panel before ever reaching a tool call -- see frontend/lib/nancy/
+# commands.ts's NOT_A_PLACE_RE fix). This is what actually finds and
+# re-displays it once that phrase reaches the model.
+RECALL_CANVAS_TOOL: Dict[str, Any] = {
+    "name": "recall_canvas_item",
+    "description": (
+        "Find and re-display something already posted to the shared canvas earlier in this session "
+        "-- an image you generated, a note, a code snippet, a link. Use this whenever he asks to see "
+        "something again ('show me the image of X from our conversation', 'show me what you built', "
+        "'pull that chart back up') rather than claiming you can't, guessing, or (for anything place-"
+        "shaped) sending him to Recon by mistake. Searches canvas titles (and, for text-shaped items, "
+        "their content) case-insensitively and re-broadcasts the best match live to every connected "
+        "tab -- the same as if you'd just posted it. Returns success=false with no match if nothing "
+        "in the canvas actually matches; say so plainly rather than inventing that something was shown."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "what to search for, e.g. 'milky way' or 'bitcoin price script'"},
+            "type": {"type": "string", "enum": ["note", "link", "code", "image", "3d_scene", "html_preview"], "description": "optional -- narrow to one canvas item type"},
+        },
+        "required": ["query"],
     },
 }
 
@@ -2841,7 +2907,7 @@ def _all_chat_tools() -> List[Dict[str, Any]]:
     function makes structurally impossible to repeat, since editing this
     list edits both callers at once."""
     return (
-        FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL, DELEGATE_TASK_TOOL]
+        FILE_TOOLS + terminal_tool.TERMINAL_TOOLS + [CREATE_SUBAGENT_TOOL, CANVAS_TOOL, RECALL_CANVAS_TOOL, CREATE_3D_SCENE_TOOL, ARTIFACT_TOOL, DELEGATE_TASK_TOOL]
         + mcp_manager.list_plugin_tools() + WEB_TOOLS + browser_tool.BROWSER_TOOLS
         + COMPUTER_USE_TOOLS + APP_LAUNCHER_TOOLS + BACKGROUND_TASK_TOOLS + CLIPBOARD_TOOLS
         + SMS_TOOLS + WATCH_TOOLS + SECURITY_MODE_TOOLS + MACRO_TOOLS + DEVICE_ROUTING_TOOLS + PRESENCE_TOOLS + PROFILE_TOOLS + SELF_MAINTENANCE_TOOLS + MEMORY_TOOLS + TRADING_BACKTEST_TOOLS + SWARM_TOOLS
@@ -2972,6 +3038,22 @@ async def _execute_file_tool(name: str, tool_input: Dict[str, Any], user_hint: s
             return {"success": False, "error": str(e)}
         await event_bus.publish("CANVAS_ITEM_ADDED", {"item": item.to_public_dict()})
         return {"success": True, "item_id": item.id}
+
+    if name == "recall_canvas_item":
+        query = tool_input.get("query", "")
+        matches = canvas_store.search(query, type_=tool_input.get("type"))
+        if not matches:
+            return {"success": False, "error": f"Nothing in the canvas matches {query!r}."}
+        item = matches[0]
+        # Re-broadcasting the SAME event a fresh post uses is deliberate --
+        # every connected surface (the dashboard's CanvasPanel today, the
+        # Mission Control overlay) already knows how to render
+        # CANVAS_ITEM_ADDED with no separate "recalled" message type needed.
+        await event_bus.publish("CANVAS_ITEM_ADDED", {"item": item.to_public_dict()})
+        return {
+            "success": True, "item_id": item.id, "type": item.type, "title": item.title,
+            "other_matches": [m.title for m in matches[1:]],
+        }
 
     if name == "create_3d_scene":
         scene = {
@@ -4163,6 +4245,23 @@ async def _generate_response_via_hierarchy_impl(user_text: str, channel: str = "
     _current_turn_chat_approved.set(approving_own_proposal)
     if approving_own_proposal:
         dynamic_context = f"{dynamic_context}\n\n{_AUTONOMOUS_BUILD_DIRECTIVE}"
+    # Real barge-in grounding -- see _current_interrupted_reply's own
+    # docstring. Turn-scoped (dynamic_context), never folded into
+    # user_text/history: this is evidence about what YOU were saying, not
+    # something he said. Told explicitly to judge continuity itself rather
+    # than guessing from an unannotated consecutive turn, since that
+    # judgment call is exactly the kind of thing worth leaning on the model
+    # for rather than building a bespoke same-topic/new-topic classifier.
+    interrupted_reply = _current_interrupted_reply.get()
+    if interrupted_reply:
+        dynamic_context = (
+            f"{dynamic_context}\n\n=== HE JUST INTERRUPTED YOU ===\n"
+            f"You were mid-reply, saying: \"{interrupted_reply}\" -- he cut you off to say what "
+            f"follows. Judge for yourself whether his new message continues that exact thought "
+            f"(finish it naturally, briefly acknowledging the interruption only if it genuinely "
+            f"helps) or moves to something new entirely (drop the old thread cleanly, don't force "
+            f"a connection that isn't there)."
+        )
     # Single-string shape for backends without a usable system role
     # (OpenAI-compat tool fallbacks, plain-chat fallback chain) -- same
     # content, just joined.
@@ -4662,6 +4761,7 @@ async def _broadcast_reply_to_web(text: str, images: Optional[List[bytes]] = Non
 async def _run_chat_turn(
     websocket: WebSocket, turn_id: int, user_text: str, voice_match: Optional[Dict[str, Any]] = None,
     speaker_profile_id: Optional[str] = None, turn_audio: Optional[Any] = None,
+    interrupted_reply: Optional[str] = None,
 ) -> None:
     """The actual per-message work, run as its own cancellable asyncio.Task
     (see ConnectionManager.start_turn) so a new message can supersede a slow
@@ -4679,6 +4779,7 @@ async def _run_chat_turn(
     _current_voice_match.set(voice_match)
     _current_speaker_profile_id.set(speaker_profile_id)
     _current_turn_audio.set(turn_audio)
+    _current_interrupted_reply.set(interrupted_reply)
     await _history_add({"role": "user", "content": user_text})
 
     full_text = ""
@@ -6173,6 +6274,31 @@ async def voice_transcribe(req: VoiceTranscribeRequest):
         logger.warning("voice_transcribe STT failed: %s", e)
         raise HTTPException(status_code=503, detail=f"STT backend unavailable: {e}")
     return {"success": True, "transcript": (transcript or "").strip()}
+
+
+@app.get("/recon/place-history", dependencies=[Depends(require_auth), Depends(rate_limit)])
+async def recon_place_history_route(query: str):
+    """Real, Wikipedia-grounded place history for Recon -- confirmed live
+    as a real gap: showing a place on the map never said anything ABOUT it,
+    just "target acquired." Reuses general_research's existing "brief" task
+    type (real Wikipedia search + summary fetch, already used by the
+    research-agenda fleet-sweep rotation) rather than duplicating Wikipedia-
+    calling code here -- same honest-failure shape: no fabricated history
+    if nothing real was found for the query."""
+    if not agent_service.is_ready():
+        return {"success": False, "error": "Research agent not ready yet."}
+    try:
+        result = await agent_service.run("general_research", {"type": "brief", "topic": query}, timeout=20.0)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    if not result.get("success") or not result.get("overview"):
+        return {"success": False, "error": result.get("error", f"No real history found for {query!r}.")}
+    sources = result.get("sources") or []
+    return {
+        "success": True,
+        "summary": result["overview"],
+        "source_url": sources[0].get("url") if sources else None,
+    }
 
 
 @app.get("/canvas")
@@ -8631,6 +8757,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 manager.end_conversation(websocket)
                 logger.info("Continuous conversation mode ended")
 
+            elif msg_type == "stop_turn":
+                # Real interrupt-with-no-replacement -- see ConnectionManager.
+                # stop_turn's own docstring for the gap this closes (Escape
+                # used to only silence local audio; the backend kept
+                # generating/synthesizing the interrupted turn regardless).
+                cancelled = manager.stop_turn(websocket)
+                logger.info("stop_turn: %s", "cancelled an in-flight turn" if cancelled else "nothing was running")
+
             elif msg_type in ("final_transcript", "user_text"):
                 text = message.get("data", "")
                 client_turn_id = message.get("turn_id")
@@ -8676,9 +8810,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 # stays free to read the next message immediately instead of
                 # blocking on the LLM/TTS pipeline for this one. See
                 # _run_chat_turn for the actual streaming generation + TTS work.
+                interrupted_reply = message.get("interrupted_reply")
                 manager.start_turn(
                     websocket,
-                    lambda turn_id, _text=text, _vm=voice_match, _sp=speaker_profile_id, _ta=turn_audio: _run_chat_turn(websocket, turn_id, _text, _vm, _sp, _ta),
+                    lambda turn_id, _text=text, _vm=voice_match, _sp=speaker_profile_id, _ta=turn_audio, _ir=interrupted_reply: _run_chat_turn(websocket, turn_id, _text, _vm, _sp, _ta, _ir),
                     turn_id=client_turn_id,
                 )
 

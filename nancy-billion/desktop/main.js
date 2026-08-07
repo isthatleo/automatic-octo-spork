@@ -65,6 +65,58 @@ async function createWindow() {
   await load()
 }
 
-app.whenReady().then(createWindow)
+// Mission Control -- a small, frameless, always-on-top, click-through-when-
+// empty window loading /overlay (frontend/app/overlay/page.tsx), so Billion
+// can show something (an image she generated, a note) without the user
+// needing the full 1440x900 dashboard window at all. Shares the main
+// window's session automatically (same origin, Electron's default session
+// partition), so the passcode gate that protects every other route covers
+// this one too -- no auth bypass needed. Own retry loop, independent of the
+// main window's lifecycle, since Mission Control is meant to be useful even
+// if the main dashboard window is never opened this session.
+let overlayWin = null
+
+async function createOverlayWindow() {
+  overlayWin = new BrowserWindow({
+    width: 420,
+    height: 560,
+    x: undefined, // OS default placement; reposition here later if a corner is preferred
+    y: undefined,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    hasShadow: false,
+    webPreferences: { contextIsolation: true },
+  })
+  overlayWin.setIgnoreMouseEvents(false)
+
+  const load = async () => {
+    if (await frontendUp()) {
+      overlayWin.loadURL(`${FRONTEND_URL}/overlay`)
+    } else {
+      const timer = setInterval(async () => {
+        if (!overlayWin || overlayWin.isDestroyed()) return clearInterval(timer)
+        if (await frontendUp()) {
+          clearInterval(timer)
+          overlayWin.loadURL(`${FRONTEND_URL}/overlay`)
+        }
+      }, RETRY_MS)
+      overlayWin.on('closed', () => clearInterval(timer))
+    }
+  }
+  await load()
+}
+
+app.whenReady().then(() => {
+  createWindow()
+  createOverlayWindow()
+})
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
+    createOverlayWindow()
+  }
+})

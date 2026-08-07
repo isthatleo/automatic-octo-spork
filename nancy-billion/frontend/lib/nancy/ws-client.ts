@@ -85,7 +85,18 @@ interface ActiveTurn extends TurnHandlers {
  *  seconds later). Resetting the deadline on every progress signal (a tool
  *  starting, the reply text arriving, each sentence's audio) means we only
  *  truly give up if nothing happens for a full timeoutMs stretch, not just
- *  because the whole turn took a while. */
+ *  because the whole turn took a while.
+ *
+ *  Confirmed live a second time with a different root cause: a gated tool
+ *  call (write_file, git_push, ...) sends exactly one tool_progress signal
+ *  when it STARTS, then goes fully silent for however long
+ *  _request_approval's live Telegram wait takes (up to ~150s,
+ *  main_new.py's _TOOL_ROUND_TIMEOUT_S) -- no heartbeat during that wait.
+ *  With the old 30s default this fired mid-approval-wait even though the
+ *  backend was healthy and the turn completed correctly moments later (the
+ *  same request's real answer showed up on Telegram). askNancyStreaming's
+ *  default timeoutMs is 180_000 specifically to sit above that 150s ceiling
+ *  with real headroom, not 30s. */
 function scheduleTurnTimeout(turnId: number, timeoutMs: number): ReturnType<typeof setTimeout> {
   return setTimeout(() => {
     if (activeTurn?.turnId === turnId) {
@@ -496,7 +507,14 @@ export function notifyConversationEnd(): void {
  * turn.
  */
 export function askNancyStreaming(
-  text: string, handlers: TurnHandlers, timeoutMs = 30_000, audioBase64?: string,
+  text: string, handlers: TurnHandlers, timeoutMs = 180_000, audioBase64?: string,
+  // Real barge-in context (see interrupt-vad.ts + page.tsx's
+  // interruptedReplyRef): set only for the turn immediately following a
+  // VAD-detected interruption, carrying what she was saying when cut off.
+  // Passed straight to the backend so it has real grounding for judging
+  // whether this new utterance continues that thought or changes topic,
+  // instead of seeing an ordinary, un-annotated consecutive turn.
+  interruptedReply?: string,
 ): number {
   const turnId = ++turnIdCounter
 
@@ -514,6 +532,7 @@ export function askNancyStreaming(
   // when it's absent, exactly like a typed message today.
   const payload: Record<string, unknown> = { type: 'user_text', data: text, turn_id: turnId }
   if (audioBase64) payload.audio_b64 = audioBase64
+  if (interruptedReply) payload.interrupted_reply = interruptedReply
 
   connect()
     .then((ws) => ws.send(JSON.stringify(payload)))
@@ -527,6 +546,28 @@ export function askNancyStreaming(
     })
 
   return turnId
+}
+
+/** Real interrupt: tells the backend to stop generating/synthesizing the
+ *  in-flight turn (see ConnectionManager.stop_turn in main_new.py) and
+ *  clears the client's own activeTurn slot so any frames already in flight
+ *  over the wire for that turn are dropped on arrival instead of being
+ *  mistaken for a new one. Confirmed live as a real gap before this
+ *  existed: page.tsx's interruptSpeech (Escape key) only ever cleared
+ *  local audio playback -- the backend was never told anything, so it kept
+ *  generating/synthesizing the interrupted turn to completion in the
+ *  background, and a late tts_audio_chunk for that same turn_id could
+ *  still reach onAudioChunk since nothing here had invalidated it.
+ *  Best-effort and synchronous from the caller's perspective: clears local
+ *  state immediately regardless of whether the send succeeds, since the
+ *  whole point is the user already wants silence now. */
+export function stopActiveTurn(): void {
+  if (!activeTurn) return
+  clearTimeout(activeTurn.timer)
+  activeTurn = null
+  connect()
+    .then((ws) => ws.send(JSON.stringify({ type: 'stop_turn' })))
+    .catch(() => { /* best-effort -- local state is already cleared either way */ })
 }
 
 /** Real speaker-verification enrollment -- sends one short raw-audio sample

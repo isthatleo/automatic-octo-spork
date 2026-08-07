@@ -79,6 +79,33 @@ class CanvasStore:
     def get(self, item_id: str) -> Optional[CanvasItem]:
         return self._items.get(item_id)
 
+    def search(self, query: str, type_: Optional[str] = None, limit: int = 5) -> List[CanvasItem]:
+        """Real recall for "show me X from our conversation"/"show me what
+        you built" -- confirmed live as a genuine gap: canvas had no way to
+        find an item again by what it actually is, only list-everything or
+        get-by-id (which nothing outside this module ever has reason to
+        already know). Case-insensitive substring match against title
+        always; against content too for text-shaped types (note/code/link),
+        never for image/3d_scene/html_preview, whose content is base64/JSON
+        blobs that would never usefully match a human's search phrase and
+        would be wasteful to scan. Newest-first, since "the X I asked about"
+        usually means the most recent one, not the first ever made."""
+        query_lower = query.strip().lower()
+        if not query_lower:
+            return []
+        text_searchable_types = {"note", "code", "link"}
+        matches = []
+        for item in self._items.values():
+            if type_ is not None and item.type != type_:
+                continue
+            haystack = item.title.lower()
+            if item.type in text_searchable_types:
+                haystack += " " + item.content.lower()
+            if query_lower in haystack:
+                matches.append(item)
+        matches.sort(key=lambda i: -i.created_at)
+        return matches[:limit]
+
     def create(self, type_: str, title: str, content: str, language: Optional[str] = None) -> CanvasItem:
         if type_ not in VALID_TYPES:
             raise ValueError(f"type must be one of {sorted(VALID_TYPES)}")

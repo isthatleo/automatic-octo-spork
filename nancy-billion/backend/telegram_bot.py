@@ -63,6 +63,20 @@ _LOCATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "show"/"show me" are dangerously overloaded here: "show me the image of
+# the milky way from our conversation" means "display some content", not
+# "find this place on a map" -- confirmed live as a real bug, mirroring the
+# same one fixed in frontend/lib/nancy/commands.ts's LOCATE regex (see that
+# file's comment for the full incident). Excluded here rather than dropping
+# "show"/"show me" as triggers entirely, since "show me Tokyo" is a
+# perfectly reasonable real place request that should keep working.
+_NOT_A_PLACE_RE = re.compile(
+    r"\b(image|picture|photo|screenshot|photograph|file|video|chart|graph|report|document|"
+    r"what you (built|made|created|showed|generated)|(that|it) (again|you (built|made|showed))|"
+    r"from (our|the|this) conversation|earlier|before|last time)\b",
+    re.IGNORECASE,
+)
+
 # The single source of truth for both Telegram's native "/" command picker
 # (setMyCommands) and /help's listing -- "status" and "markets" are wired to
 # real backend data by main_new.py via set_command_handler; "start", "help",
@@ -87,7 +101,7 @@ def _extract_location_query(text: str) -> Optional[str]:
     mirroring frontend/lib/nancy/commands.ts's LOCATE regex so 'a map/direction
     request' means the same thing here as it does in the voice/text UI."""
     m = _LOCATION_RE.search(text)
-    if not m:
+    if not m or _NOT_A_PLACE_RE.search(m.group(1)):
         return None
     query = m.group(1).strip().rstrip("?.!,")
     return query or None

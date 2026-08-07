@@ -23,10 +23,11 @@ import {
   WebhooksPanel, MemoryInsightsPanel, AchievementsPanel, ThemingPanel,
 } from '@/components/nancy/admin-panels'
 import { useVoice, cancelSpeech } from '@/lib/nancy/use-voice'
+import { startInterruptWatch } from '@/lib/nancy/interrupt-vad'
 import { parseCommand } from '@/lib/nancy/commands'
 import { TradingViewDialog } from '@/components/nancy/tradingview'
 import {
-  askNancyStreaming, onEconomicAlert, onExternalReply, onChatImage,
+  askNancyStreaming, stopActiveTurn, onEconomicAlert, onExternalReply, onChatImage,
   onConversationEnded, notifyConversationStart, notifyConversationEnd,
 } from '@/lib/nancy/ws-client'
 import { synthesizeSpeech } from '@/lib/nancy/tts-client'
@@ -221,6 +222,13 @@ export default function Page() {
     }
   }, [])
   const [currentUtterance, setCurrentUtterance] = useState('')
+  // Mirrors currentUtterance for code that needs the freshest value inside a
+  // callback captured once (e.g. the barge-in VAD watch below) rather than
+  // re-subscribing on every word she says.
+  const currentUtteranceRef = useRef('')
+  useEffect(() => {
+    currentUtteranceRef.current = currentUtterance
+  }, [currentUtterance])
   const [wordIndex, setWordIndex] = useState(-1)
   // Voice is the primary interaction; the full terminal (scrollback + typed
   // input) is hidden until explicitly summoned, so voice-first actually
@@ -431,6 +439,7 @@ export default function Page() {
    *  auto-resumes the mic the moment `speaking` flips false, so one call
    *  here is the complete interrupt. Bound to the Escape key globally. */
   const interruptSpeech = useCallback(() => {
+    stopActiveTurn()
     cancelSpeech()
     currentAudioRef.current?.pause()
     currentAudioRef.current = null
@@ -620,6 +629,18 @@ export default function Page() {
         setPlace(found)
         sfx.lock()
         nancySay(`Target acquired, Sir. Displaying ${found.name}, ${found.country}.`)
+        // Real, Wikipedia-grounded history follows separately (fire-and-
+        // forget -- never blocks the "target acquired" confirmation above
+        // on an extra network round trip). Confirmed live as a real gap:
+        // Recon used to only ever confirm a place was found, never say
+        // anything ABOUT it. Silently says nothing further if no real
+        // history was found -- never fabricated.
+        fetch(`/api/backend/recon/place-history?query=${encodeURIComponent(found.name)}`)
+          .then((r) => r.json())
+          .then((json) => {
+            if (json.success && json.summary) nancySay(json.summary)
+          })
+          .catch(() => { /* best-effort -- the location itself already succeeded */ })
       } else {
         sfx.error()
         nancySay(`I could not locate ${query}, Sir. Please try another place.`)
@@ -717,11 +738,25 @@ export default function Page() {
                 nancySay("I'm having trouble reaching my backend right now, Sir.")
               },
             },
-            30_000,
+            // 180s, not the old 30s -- confirmed live as a real false
+            // negative: a gated tool call (e.g. write_file) sends one
+            // tool_progress signal when it starts, then goes silent for
+            // however long the live Telegram approval wait takes (up to
+            // ~150s server-side), so 30s fired mid-wait even though the
+            // backend was healthy and the real answer reached Telegram
+            // moments later. See ws-client.ts's scheduleTurnTimeout doc.
+            180_000,
             // Only ever set for a voice-originated command (see use-voice.ts's
             // real capture) -- absent for typed input, exactly like today.
             audioBase64,
+            // Set only when this command follows a VAD-detected interrupt --
+            // see the barge-in effect above. Consumed once: cleared
+            // immediately so an unrelated LATER command never carries stale
+            // "he interrupted you" context from a previous, already-resolved
+            // interruption.
+            interruptedReplyRef.current ?? undefined,
           )
+          interruptedReplyRef.current = null
           beginStreamedTurn(turnId)
           break
         }
@@ -784,6 +819,25 @@ export default function Page() {
       start()
     }
   }, [speaking, state.listening, start, pause])
+
+  // Real barge-in: while she's speaking, a separate VAD watches for actual
+  // speech (not just noise -- see interrupt-vad.ts) and interrupts her the
+  // instant it fires, instead of the old "can't get a word in until she
+  // finishes" behavior. interruptedReplyRef captures what she was saying
+  // right before the cut, so the next turn can tell the backend "he just
+  // interrupted you saying: ..." -- real grounding for judging whether the
+  // new utterance continues that thought or changes topic, rather than the
+  // model seeing an ordinary, un-annotated consecutive turn.
+  const interruptedReplyRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!speaking) return
+    const stopWatch = startInterruptWatch(() => {
+      interruptedReplyRef.current = currentUtteranceRef.current || null
+      sfx.whooshOut()
+      interruptSpeech()
+    })
+    return stopWatch
+  }, [speaking, interruptSpeech])
 
   useEffect(() => {
     const t = setInterval(
