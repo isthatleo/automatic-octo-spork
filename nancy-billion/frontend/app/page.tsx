@@ -829,14 +829,30 @@ export default function Page() {
   // new utterance continues that thought or changes topic, rather than the
   // model seeing an ordinary, un-annotated consecutive turn.
   const interruptedReplyRef = useRef<string | null>(null)
+  const stopWatchRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     if (!speaking) return
-    const stopWatch = startInterruptWatch(() => {
-      interruptedReplyRef.current = currentUtteranceRef.current || null
-      sfx.whooshOut()
-      interruptSpeech()
-    })
-    return stopWatch
+    // Arm the VAD after a short delay, not the instant she starts talking.
+    // A browser's echo canceller (AEC3) hasn't converged yet at the very
+    // start of playback -- residual echo of her own voice is highest right
+    // there, and Silero VAD correctly recognizes that echo as real speech
+    // since it IS speech, just hers bleeding through the mic. Confirmed
+    // live as the likely cause of a "she just went quiet" report: no error
+    // anywhere, because there wasn't one -- the turn was interrupted by its
+    // own audio. Full elimination needs headphones or reference-signal AEC;
+    // this narrows the false-trigger window without disabling barge-in.
+    const armTimer = setTimeout(() => {
+      stopWatchRef.current = startInterruptWatch(() => {
+        interruptedReplyRef.current = currentUtteranceRef.current || null
+        sfx.whooshOut()
+        interruptSpeech()
+      })
+    }, 700)
+    return () => {
+      clearTimeout(armTimer)
+      stopWatchRef.current?.()
+      stopWatchRef.current = null
+    }
   }, [speaking, interruptSpeech])
 
   useEffect(() => {
